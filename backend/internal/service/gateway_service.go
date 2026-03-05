@@ -4868,9 +4868,12 @@ func (s *GatewayService) streamOpenAIResponsesAsClaude(c *gin.Context, resp *htt
 	streamStarted = true
 
 	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := resolveGatewayMaxLineSize(s.cfg)
+	maxLineSize := defaultMaxLineSize
+	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
+		maxLineSize = s.cfg.Gateway.MaxLineSize
+	}
 	scanBuf := getSSEScannerBuf64K()
-	scanner.Buffer(scanBuf.buf[:], maxLineSize)
+	scanner.Buffer(scanBuf[:0], maxLineSize)
 	defer putSSEScannerBuf64K(scanBuf)
 
 	for scanner.Scan() {
