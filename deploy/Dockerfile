@@ -7,7 +7,7 @@
 # =============================================================================
 
 ARG NODE_IMAGE=node:24-alpine
-ARG GOLANG_IMAGE=golang:1.25.5-alpine
+ARG GOLANG_IMAGE=golang:1.25.7-alpine
 ARG ALPINE_IMAGE=alpine:3.20
 ARG GOPROXY=https://goproxy.cn,direct
 ARG GOSUMDB=sum.golang.google.cn
@@ -44,6 +44,7 @@ ARG GOSUMDB
 
 ENV GOPROXY=${GOPROXY}
 ENV GOSUMDB=${GOSUMDB}
+ENV GOTOOLCHAIN=auto
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
