@@ -4488,7 +4488,7 @@ func buildOpenAIResponsesBodyFromAnthropicRequest(body []byte, model string, str
 		"stream": stream,
 	}
 
-	if maxTokens, ok := reqBody["max_tokens"]; ok {
+	if maxTokens, ok := reqBody["max_tokens"]; ok && !forceStoreFalse {
 		out["max_output_tokens"] = maxTokens
 	}
 	if temperature, ok := reqBody["temperature"]; ok {
