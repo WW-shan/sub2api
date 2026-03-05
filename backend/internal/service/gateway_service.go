@@ -4382,7 +4382,7 @@ func (s *GatewayService) forwardOpenAIResponsesAsClaudeCompat(
 		body = s.replaceModelInBody(body, mappedModel)
 	}
 
-	openAIBody, err := buildOpenAIResponsesBodyFromAnthropicRequest(body, mappedModel, reqStream)
+	openAIBody, err := buildOpenAIResponsesBodyFromAnthropicRequest(body, mappedModel, reqStream, account.Type == AccountTypeOAuth)
 	if err != nil {
 		return nil, fmt.Errorf("build openai responses request: %w", err)
 	}
@@ -4477,7 +4477,7 @@ func (s *GatewayService) forwardOpenAIResponsesAsClaudeCompat(
 	}, nil
 }
 
-func buildOpenAIResponsesBodyFromAnthropicRequest(body []byte, model string, stream bool) ([]byte, error) {
+func buildOpenAIResponsesBodyFromAnthropicRequest(body []byte, model string, stream bool, forceStoreFalse bool) ([]byte, error) {
 	var reqBody map[string]any
 	if err := json.Unmarshal(body, &reqBody); err != nil {
 		return nil, err
@@ -4518,7 +4518,48 @@ func buildOpenAIResponsesBodyFromAnthropicRequest(body []byte, model string, str
 		}
 	}
 
+	if forceStoreFalse {
+		out["store"] = false
+	}
+
 	return json.Marshal(out)
+}
+
+func buildAnthropicMessagesURL(base string) string {
+	normalized := strings.TrimRight(strings.TrimSpace(base), "/")
+	if strings.HasSuffix(normalized, "/v1/responses") {
+		normalized = strings.TrimSuffix(normalized, "/v1/responses")
+	}
+	if strings.HasSuffix(normalized, "/responses") {
+		normalized = strings.TrimSuffix(normalized, "/responses")
+	}
+	if strings.HasSuffix(normalized, "/v1/messages") {
+		return normalized + "?beta=true"
+	}
+	if strings.HasSuffix(normalized, "/v1") {
+		return normalized + "/messages?beta=true"
+	}
+	return normalized + "/v1/messages?beta=true"
+}
+
+func buildAnthropicCountTokensURL(base string) string {
+	normalized := strings.TrimRight(strings.TrimSpace(base), "/")
+	if strings.HasSuffix(normalized, "/v1/responses") {
+		normalized = strings.TrimSuffix(normalized, "/v1/responses")
+	}
+	if strings.HasSuffix(normalized, "/responses") {
+		normalized = strings.TrimSuffix(normalized, "/responses")
+	}
+	if strings.HasSuffix(normalized, "/v1/messages/count_tokens") {
+		return normalized + "?beta=true"
+	}
+	if strings.HasSuffix(normalized, "/v1/messages") {
+		return normalized + "/count_tokens?beta=true"
+	}
+	if strings.HasSuffix(normalized, "/v1") {
+		return normalized + "/messages/count_tokens?beta=true"
+	}
+	return normalized + "/v1/messages/count_tokens?beta=true"
 }
 
 func convertAnthropicToolsToOpenAITools(toolsRaw []any) []map[string]any {
@@ -5255,7 +5296,7 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 		if err != nil {
 			return nil, err
 		}
-		targetURL = validatedURL + "/v1/messages?beta=true"
+		targetURL = buildAnthropicMessagesURL(validatedURL)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
@@ -5635,7 +5676,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			if err != nil {
 				return nil, err
 			}
-			targetURL = validatedURL + "/v1/messages?beta=true"
+			targetURL = buildAnthropicMessagesURL(validatedURL)
 		}
 	}
 
@@ -7760,7 +7801,7 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 		if err != nil {
 			return nil, err
 		}
-		targetURL = validatedURL + "/v1/messages/count_tokens?beta=true"
+		targetURL = buildAnthropicCountTokensURL(validatedURL)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
@@ -7807,7 +7848,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 			if err != nil {
 				return nil, err
 			}
-			targetURL = validatedURL + "/v1/messages/count_tokens?beta=true"
+			targetURL = buildAnthropicCountTokensURL(validatedURL)
 		}
 	}
 
