@@ -3888,6 +3888,10 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		return nil, fmt.Errorf("parse request: empty request")
 	}
 
+	if account != nil && account.Platform == PlatformOpenAI && isGPTModelPrefix(parsed.Model) {
+		return s.forwardOpenAIResponsesAsClaudeCompat(ctx, c, account, parsed, startTime)
+	}
+
 	if account != nil && account.IsAnthropicAPIKeyPassthroughEnabled() {
 		passthroughBody := parsed.Body
 		passthroughModel := parsed.Model
@@ -4355,6 +4359,671 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		FirstTokenMs:     firstTokenMs,
 		ClientDisconnect: clientDisconnect,
 	}, nil
+}
+
+func isGPTModelPrefix(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	return normalized != "" && strings.HasPrefix(normalized, "gpt")
+}
+
+func (s *GatewayService) forwardOpenAIResponsesAsClaudeCompat(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	parsed *ParsedRequest,
+	startTime time.Time,
+) (*ForwardResult, error) {
+	body := parsed.Body
+	originalModel := parsed.Model
+	reqStream := parsed.Stream
+
+	mappedModel := account.GetMappedModel(originalModel)
+	if mappedModel != "" && mappedModel != originalModel {
+		body = s.replaceModelInBody(body, mappedModel)
+	}
+
+	openAIBody, err := buildOpenAIResponsesBodyFromAnthropicRequest(body, mappedModel, reqStream)
+	if err != nil {
+		return nil, fmt.Errorf("build openai responses request: %w", err)
+	}
+
+	token, tokenType, err := s.GetAccessToken(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	if tokenType != "oauth" && tokenType != "apikey" {
+		return nil, fmt.Errorf("unsupported token type for openai compat: %s", tokenType)
+	}
+
+	targetURL := "https://api.openai.com/v1/responses"
+	if account.Type == AccountTypeOAuth {
+		targetURL = chatgptCodexURL
+	} else {
+		baseURL := account.GetOpenAIBaseURL()
+		if baseURL != "" {
+			validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+			if err != nil {
+				return nil, err
+			}
+			targetURL = buildOpenAIResponsesURL(validatedURL)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(openAIBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("accept", "text/event-stream")
+	req.Header.Set("authorization", "Bearer "+token)
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+
+	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, account.IsTLSFingerprintEnabled())
+	if err != nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, fmt.Errorf("openai upstream request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		return s.handleErrorResponse(ctx, resp, c, account)
+	}
+
+	if reqStream {
+		usage, firstTokenMs, clientDisconnect, err := s.streamOpenAIResponsesAsClaude(c, resp, originalModel)
+		if err != nil {
+			return nil, err
+		}
+		if usage == nil {
+			usage = &ClaudeUsage{}
+		}
+		return &ForwardResult{
+			RequestID:        resp.Header.Get("x-request-id"),
+			Usage:            *usage,
+			Model:            originalModel,
+			Stream:           true,
+			Duration:         time.Since(startTime),
+			FirstTokenMs:     firstTokenMs,
+			ClientDisconnect: clientDisconnect,
+		}, nil
+	}
+
+	maxBytes := resolveUpstreamResponseReadLimit(s.cfg)
+	respBody, err := readUpstreamResponseBodyLimited(resp.Body, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	claudeJSON, usage := convertOpenAIResponsesJSONToClaude(respBody, originalModel)
+	writeAnthropicPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	c.Data(http.StatusOK, "application/json", claudeJSON)
+
+	if usage == nil {
+		usage = &ClaudeUsage{}
+	}
+	return &ForwardResult{
+		RequestID:    resp.Header.Get("x-request-id"),
+		Usage:        *usage,
+		Model:        originalModel,
+		Stream:       false,
+		Duration:     time.Since(startTime),
+		FirstTokenMs: nil,
+	}, nil
+}
+
+func buildOpenAIResponsesBodyFromAnthropicRequest(body []byte, model string, stream bool) ([]byte, error) {
+	var reqBody map[string]any
+	if err := json.Unmarshal(body, &reqBody); err != nil {
+		return nil, err
+	}
+
+	out := map[string]any{
+		"model":  model,
+		"stream": stream,
+	}
+
+	if maxTokens, ok := reqBody["max_tokens"]; ok {
+		out["max_output_tokens"] = maxTokens
+	}
+	if temperature, ok := reqBody["temperature"]; ok {
+		out["temperature"] = temperature
+	}
+	if topP, ok := reqBody["top_p"]; ok {
+		out["top_p"] = topP
+	}
+
+	if sys, ok := reqBody["system"]; ok {
+		if instructions := extractSystemInstructionsText(sys); instructions != "" {
+			out["instructions"] = instructions
+		}
+	}
+
+	if messagesRaw, ok := reqBody["messages"].([]any); ok {
+		input := convertAnthropicMessagesToOpenAIInput(messagesRaw)
+		if len(input) > 0 {
+			out["input"] = input
+		}
+	}
+
+	if toolsRaw, ok := reqBody["tools"].([]any); ok {
+		tools := convertAnthropicToolsToOpenAITools(toolsRaw)
+		if len(tools) > 0 {
+			out["tools"] = tools
+		}
+	}
+
+	return json.Marshal(out)
+}
+
+func convertAnthropicToolsToOpenAITools(toolsRaw []any) []map[string]any {
+	out := make([]map[string]any, 0, len(toolsRaw))
+	for _, item := range toolsRaw {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := tool["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		t := map[string]any{
+			"type": "function",
+			"name": name,
+		}
+		if desc, ok := tool["description"].(string); ok && strings.TrimSpace(desc) != "" {
+			t["description"] = desc
+		}
+		if schema, ok := tool["input_schema"]; ok && schema != nil {
+			t["parameters"] = schema
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+func convertAnthropicMessagesToOpenAIInput(messagesRaw []any) []any {
+	out := make([]any, 0, len(messagesRaw))
+	for _, item := range messagesRaw {
+		msgMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msgMap["role"].(string)
+		if role == "" {
+			role = "user"
+		}
+
+		content := msgMap["content"]
+		switch blocks := content.(type) {
+		case string:
+			text := strings.TrimSpace(blocks)
+			if text != "" {
+				out = append(out, map[string]any{
+					"type": "message",
+					"role": role,
+					"content": []map[string]any{{
+						"type": "input_text",
+						"text": text,
+					}},
+				})
+			}
+		case []any:
+			messageText := make([]string, 0, len(blocks))
+			for _, b := range blocks {
+				block, ok := b.(map[string]any)
+				if !ok {
+					continue
+				}
+				blockType, _ := block["type"].(string)
+				switch blockType {
+				case "text":
+					if text, _ := block["text"].(string); strings.TrimSpace(text) != "" {
+						messageText = append(messageText, text)
+					}
+				case "tool_use":
+					if role != "assistant" {
+						continue
+					}
+					name, _ := block["name"].(string)
+					callID, _ := block["id"].(string)
+					argsJSON := "{}"
+					if input, ok := block["input"]; ok && input != nil {
+						if encoded, err := json.Marshal(input); err == nil {
+							argsJSON = string(encoded)
+						}
+					}
+					if strings.TrimSpace(callID) == "" {
+						callID = "call_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+					}
+					if strings.TrimSpace(name) != "" {
+						out = append(out, map[string]any{
+							"type":      "function_call",
+							"id":        callID,
+							"call_id":   callID,
+							"name":      name,
+							"arguments": argsJSON,
+						})
+					}
+				case "tool_result":
+					if role != "user" {
+						continue
+					}
+					callID, _ := block["tool_use_id"].(string)
+					if strings.TrimSpace(callID) == "" {
+						continue
+					}
+					output := extractToolResultOutputText(block["content"])
+					out = append(out, map[string]any{
+						"type":    "function_call_output",
+						"call_id": callID,
+						"output":  output,
+					})
+				}
+			}
+
+			if len(messageText) > 0 {
+				out = append(out, map[string]any{
+					"type": "message",
+					"role": role,
+					"content": []map[string]any{{
+						"type": "input_text",
+						"text": strings.TrimSpace(strings.Join(messageText, "\n")),
+					}},
+				})
+			}
+		}
+	}
+	return out
+}
+
+func extractToolResultOutputText(content any) string {
+	switch v := content.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if typ, _ := m["type"].(string); typ == "text" {
+				if text, _ := m["text"].(string); strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n"))
+	default:
+		if encoded, err := json.Marshal(v); err == nil {
+			return string(encoded)
+		}
+		return ""
+	}
+}
+
+func extractSystemInstructionsText(system any) string {
+	switch v := system.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		var parts []string
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if typ, _ := m["type"].(string); typ == "text" {
+				if text, _ := m["text"].(string); strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n\n"))
+	default:
+		return ""
+	}
+}
+
+func extractAnthropicMessageTextContent(content any) string {
+	switch v := content.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		var parts []string
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if typ, _ := m["type"].(string); typ == "text" {
+				if text, _ := m["text"].(string); strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n"))
+	default:
+		return ""
+	}
+}
+
+func convertOpenAIResponsesJSONToClaude(respBody []byte, model string) ([]byte, *ClaudeUsage) {
+	text := strings.TrimSpace(gjson.GetBytes(respBody, "output_text").String())
+	contentBlocks := make([]map[string]any, 0, 8)
+	if text == "" {
+		outputs := gjson.GetBytes(respBody, "output").Array()
+		var chunks []string
+		for _, output := range outputs {
+			switch output.Get("type").String() {
+			case "message":
+				for _, c := range output.Get("content").Array() {
+					typ := c.Get("type").String()
+					if typ == "output_text" || typ == "text" {
+						t := strings.TrimSpace(c.Get("text").String())
+						if t != "" {
+							chunks = append(chunks, t)
+						}
+					}
+				}
+			case "function_call", "tool_call":
+				toolID := strings.TrimSpace(output.Get("call_id").String())
+				if toolID == "" {
+					toolID = strings.TrimSpace(output.Get("id").String())
+				}
+				if toolID == "" {
+					toolID = "toolu_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+				}
+				name := strings.TrimSpace(output.Get("name").String())
+				if name == "" {
+					name = strings.TrimSpace(output.Get("function.name").String())
+				}
+				args := strings.TrimSpace(output.Get("arguments").String())
+				if args == "" {
+					args = strings.TrimSpace(output.Get("function.arguments").String())
+				}
+				input := map[string]any{}
+				if args != "" {
+					_ = json.Unmarshal([]byte(args), &input)
+				}
+				contentBlocks = append(contentBlocks, map[string]any{
+					"type":  "tool_use",
+					"id":    toolID,
+					"name":  name,
+					"input": input,
+				})
+			}
+		}
+		text = strings.Join(chunks, "\n")
+	}
+	if strings.TrimSpace(text) != "" {
+		contentBlocks = append([]map[string]any{{"type": "text", "text": text}}, contentBlocks...)
+	}
+	if len(contentBlocks) == 0 {
+		contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": ""})
+	}
+
+	usage := &ClaudeUsage{
+		InputTokens:          int(gjson.GetBytes(respBody, "usage.input_tokens").Int()),
+		OutputTokens:         int(gjson.GetBytes(respBody, "usage.output_tokens").Int()),
+		CacheReadInputTokens: int(gjson.GetBytes(respBody, "usage.input_tokens_details.cached_tokens").Int()),
+	}
+
+	respID := strings.TrimSpace(gjson.GetBytes(respBody, "id").String())
+	if respID == "" {
+		respID = "msg_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	}
+
+	out := map[string]any{
+		"id":            respID,
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"stop_reason":   func() string { if len(contentBlocks) > 0 && contentBlocks[len(contentBlocks)-1]["type"] == "tool_use" { return "tool_use" }; return "end_turn" }(),
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":           usage.InputTokens,
+			"output_tokens":          usage.OutputTokens,
+			"cache_read_input_tokens": usage.CacheReadInputTokens,
+		},
+		"content": contentBlocks,
+	}
+
+	b, err := json.Marshal(out)
+	if err != nil {
+		fallback := []byte(`{"type":"message","role":"assistant","content":[{"type":"text","text":""}],"model":"` + model + `"}`)
+		return fallback, usage
+	}
+	return b, usage
+}
+
+func (s *GatewayService) streamOpenAIResponsesAsClaude(c *gin.Context, resp *http.Response, model string) (*ClaudeUsage, *int, bool, error) {
+	if c == nil {
+		return nil, nil, false, fmt.Errorf("nil context")
+	}
+
+	writeAnthropicPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Status(http.StatusOK)
+
+	writer := bufio.NewWriter(c.Writer)
+	flush := func() {
+		_ = writer.Flush()
+		c.Writer.Flush()
+	}
+
+	messageID := "msg_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	usage := &ClaudeUsage{}
+	streamStarted := false
+	contentStarted := false
+	contentIndex := 0
+	toolUseSeen := false
+	clientDisconnect := false
+	firstToken := 0
+	firstTokenMs := (*int)(nil)
+	streamStart := time.Now()
+
+	emit := func(eventType string, payload map[string]any) error {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		if _, err = writer.WriteString("event: " + eventType + "\n"); err != nil {
+			return err
+		}
+		if _, err = writer.WriteString("data: " + string(b) + "\n\n"); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := emit("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            messageID,
+			"type":          "message",
+			"role":          "assistant",
+			"content":       []any{},
+			"model":         model,
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":            0,
+				"output_tokens":           0,
+				"cache_read_input_tokens": 0,
+			},
+		},
+	}); err != nil {
+		return nil, nil, false, err
+	}
+	flush()
+	streamStarted = true
+
+	scanner := bufio.NewScanner(resp.Body)
+	maxLineSize := resolveGatewayMaxLineSize(s.cfg)
+	scanBuf := getSSEScannerBuf64K()
+	scanner.Buffer(scanBuf.buf[:], maxLineSize)
+	defer putSSEScannerBuf64K(scanBuf)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		data, ok := extractOpenAISSEDataLine(line)
+		if !ok {
+			continue
+		}
+		eventType := gjson.Get(data, "type").String()
+		switch eventType {
+		case "response.output_text.delta":
+			delta := gjson.Get(data, "delta").String()
+			if delta == "" {
+				continue
+			}
+			if !contentStarted {
+				if err := emit("content_block_start", map[string]any{
+					"type":  "content_block_start",
+					"index": contentIndex,
+					"content_block": map[string]any{
+						"type": "text",
+						"text": "",
+					},
+				}); err != nil {
+					return usage, firstTokenMs, clientDisconnect, err
+				}
+				contentStarted = true
+			}
+			if err := emit("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": contentIndex,
+				"delta": map[string]any{"type": "text_delta", "text": delta},
+			}); err != nil {
+				return usage, firstTokenMs, clientDisconnect, err
+			}
+			if firstToken == 0 {
+				ft := int(time.Since(streamStart).Milliseconds())
+				firstToken = ft
+				firstTokenMs = &firstToken
+			}
+			flush()
+		case "response.output_item.added", "response.output_item.done":
+			toolID, toolName, toolInput, ok := extractOpenAIStreamToolUse(data)
+			if !ok {
+				continue
+			}
+			if contentStarted {
+				if err := emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": contentIndex}); err != nil {
+					return usage, firstTokenMs, clientDisconnect, err
+				}
+				contentStarted = false
+				contentIndex++
+			}
+			if err := emit("content_block_start", map[string]any{
+				"type":  "content_block_start",
+				"index": contentIndex,
+				"content_block": map[string]any{
+					"type":  "tool_use",
+					"id":    toolID,
+					"name":  toolName,
+					"input": toolInput,
+				},
+			}); err != nil {
+				return usage, firstTokenMs, clientDisconnect, err
+			}
+			if err := emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": contentIndex}); err != nil {
+				return usage, firstTokenMs, clientDisconnect, err
+			}
+			contentIndex++
+			toolUseSeen = true
+			flush()
+		case "response.completed", "response.done":
+			usage.InputTokens = int(gjson.Get(data, "response.usage.input_tokens").Int())
+			usage.OutputTokens = int(gjson.Get(data, "response.usage.output_tokens").Int())
+			usage.CacheReadInputTokens = int(gjson.Get(data, "response.usage.input_tokens_details.cached_tokens").Int())
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		if streamStarted {
+			return usage, firstTokenMs, true, nil
+		}
+		return usage, firstTokenMs, false, err
+	}
+
+	if contentStarted {
+		if err := emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": contentIndex}); err != nil {
+			return usage, firstTokenMs, clientDisconnect, err
+		}
+	}
+	stopReason := "end_turn"
+	if toolUseSeen {
+		stopReason = "tool_use"
+	}
+	if err := emit("message_delta", map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
+		"usage": map[string]any{
+			"output_tokens": usage.OutputTokens,
+		},
+	}); err != nil {
+		return usage, firstTokenMs, clientDisconnect, err
+	}
+	if err := emit("message_stop", map[string]any{"type": "message_stop"}); err != nil {
+		return usage, firstTokenMs, clientDisconnect, err
+	}
+	flush()
+
+	return usage, firstTokenMs, clientDisconnect, nil
+}
+
+func extractOpenAIStreamToolUse(data string) (string, string, map[string]any, bool) {
+	item := gjson.Get(data, "item")
+	if !item.Exists() {
+		return "", "", nil, false
+	}
+
+	toolID := strings.TrimSpace(item.Get("call_id").String())
+	if toolID == "" {
+		toolID = strings.TrimSpace(item.Get("id").String())
+	}
+	toolName := strings.TrimSpace(item.Get("name").String())
+	if toolName == "" {
+		toolName = strings.TrimSpace(item.Get("function.name").String())
+	}
+	args := strings.TrimSpace(item.Get("arguments").String())
+	if args == "" {
+		args = strings.TrimSpace(item.Get("function.arguments").String())
+	}
+
+	if toolName == "" {
+		toolName = strings.TrimSpace(item.Get("tool_calls.0.function.name").String())
+		if toolID == "" {
+			toolID = strings.TrimSpace(item.Get("tool_calls.0.id").String())
+		}
+		if args == "" {
+			args = strings.TrimSpace(item.Get("tool_calls.0.function.arguments").String())
+		}
+	}
+
+	if toolName == "" {
+		return "", "", nil, false
+	}
+	if toolID == "" {
+		toolID = "toolu_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	}
+
+	input := map[string]any{}
+	if args != "" {
+		_ = json.Unmarshal([]byte(args), &input)
+	}
+
+	return toolID, toolName, input, true
 }
 
 func (s *GatewayService) forwardAnthropicAPIKeyPassthrough(
