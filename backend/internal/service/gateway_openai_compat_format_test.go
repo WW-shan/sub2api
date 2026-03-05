@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestConvertAnthropicMessagesToOpenAIInput_MultimodalAndDocument(t *testing.T) {
@@ -82,7 +83,7 @@ func TestConvertAnthropicMessagesToOpenAIInput_ThinkingToolUseAndToolResult(t *t
 	assistantContent1, ok := assistantMessage1["content"].([]map[string]any)
 	require.True(t, ok)
 	require.Len(t, assistantContent1, 1)
-	require.Equal(t, "input_text", assistantContent1[0]["type"])
+	require.Equal(t, "output_text", assistantContent1[0]["type"])
 	require.Equal(t, "step by step", assistantContent1[0]["text"])
 
 	functionCall, ok := out[1].(map[string]any)
@@ -99,7 +100,7 @@ func TestConvertAnthropicMessagesToOpenAIInput_ThinkingToolUseAndToolResult(t *t
 	assistantContent2, ok := assistantMessage2["content"].([]map[string]any)
 	require.True(t, ok)
 	require.Len(t, assistantContent2, 1)
-	require.Equal(t, "input_text", assistantContent2[0]["type"])
+	require.Equal(t, "output_text", assistantContent2[0]["type"])
 	require.Equal(t, "done", assistantContent2[0]["text"])
 
 	functionOutput, ok := out[3].(map[string]any)
@@ -169,6 +170,45 @@ func TestConvertAnthropicMessagesToOpenAIInput_ToolResultNonTextFallback(t *test
 	require.Contains(t, outputText, `"type":"image"`)
 }
 
+func TestConvertAnthropicMessagesToOpenAIInput_AssistantRoleUsesOutputText(t *testing.T) {
+	messages := []any{
+		map[string]any{"role": "assistant", "content": "answer"},
+	}
+
+	out := convertAnthropicMessagesToOpenAIInput(messages)
+	require.Len(t, out, 1)
+
+	msg, ok := out[0].(map[string]any)
+	require.True(t, ok)
+	content, ok := msg["content"].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, content, 1)
+	require.Equal(t, "output_text", content[0]["type"])
+	require.Equal(t, "answer", content[0]["text"])
+}
+
+func TestConvertAnthropicMessagesToOpenAIInput_AssistantImageFallsBackToOutputText(t *testing.T) {
+	messages := []any{
+		map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/ctx.png"}},
+			},
+		},
+	}
+
+	out := convertAnthropicMessagesToOpenAIInput(messages)
+	require.Len(t, out, 1)
+
+	msg, ok := out[0].(map[string]any)
+	require.True(t, ok)
+	content, ok := msg["content"].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, content, 1)
+	require.Equal(t, "output_text", content[0]["type"])
+	require.Equal(t, "https://example.com/ctx.png", content[0]["text"])
+}
+
 func TestBuildOpenAIResponsesBodyFromAnthropicRequest_ToolChoiceMapping(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -228,4 +268,45 @@ func TestBuildOpenAIResponsesBodyFromAnthropicRequest_InvalidToolChoiceDropped(t
 	require.NoError(t, json.Unmarshal(outBody, &out))
 	_, exists := out["tool_choice"]
 	require.False(t, exists)
+}
+
+func TestBuildOpenAIResponsesBodyFromAnthropicRequest_AssistantContextUsesOutputText(t *testing.T) {
+	body := []byte(`{
+		"model":"openai/gpt-5.3",
+		"stream":false,
+		"max_tokens":128,
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"q1"}]},
+			{"role":"assistant","content":[{"type":"text","text":"a1"}]},
+			{"role":"user","content":[{"type":"text","text":"q2"}]}
+		]
+	}`)
+
+	outBody, err := buildOpenAIResponsesBodyFromAnthropicRequest(body, "openai/gpt-5.3", false, false)
+	require.NoError(t, err)
+	require.Equal(t, "input_text", gjson.GetBytes(outBody, "input.0.content.0.type").String())
+	require.Equal(t, "output_text", gjson.GetBytes(outBody, "input.1.content.0.type").String())
+	require.Equal(t, "input_text", gjson.GetBytes(outBody, "input.2.content.0.type").String())
+}
+
+func TestConvertOpenAIResponsesJSONToClaude_UsesRefusalText(t *testing.T) {
+	respBody := []byte(`{
+		"id":"resp_refusal_1",
+		"output":[
+			{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I cannot help with that."}]}
+		],
+		"usage":{"input_tokens":3,"output_tokens":5}
+	}`)
+
+	out, usage := convertOpenAIResponsesJSONToClaude(respBody, "openai/gpt-5.3")
+	require.NotNil(t, usage)
+	require.Equal(t, 3, usage.InputTokens)
+	require.Equal(t, 5, usage.OutputTokens)
+
+	var claude map[string]any
+	require.NoError(t, json.Unmarshal(out, &claude))
+	require.Equal(t, "message", claude["type"])
+	require.Equal(t, "assistant", claude["role"])
+	require.Equal(t, "text", claude["content"].([]any)[0].(map[string]any)["type"])
+	require.Equal(t, "I cannot help with that.", claude["content"].([]any)[0].(map[string]any)["text"])
 }

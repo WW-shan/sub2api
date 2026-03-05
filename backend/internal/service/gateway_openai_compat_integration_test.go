@@ -223,3 +223,69 @@ func TestGatewayService_Forward_OpenAICompatStream_FunctionCallArgumentsDeltaToI
 	require.Equal(t, 1, strings.Count(streamBody, `"type":"tool_use"`))
 	require.Equal(t, 2, strings.Count(streamBody, `"type":"input_json_delta"`))
 }
+
+func TestGatewayService_Forward_OpenAICompatStream_RefusalDeltaAsText(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(nil))
+
+	body := []byte(`{
+		"model":"openai/gpt-5.3",
+		"stream":true,
+		"max_tokens":64,
+		"messages":[{"role":"user","content":[{"type":"text","text":"unsafe ask"}]}]
+	}`)
+
+	parsed, err := ParseGatewayRequest(body, domain.PlatformAnthropic)
+	require.NoError(t, err)
+
+	upstreamSSE := strings.Join([]string{
+		`data: {"type":"response.refusal.delta","delta":"I cannot"}`,
+		"",
+		`data: {"type":"response.refusal.delta","delta":" comply."}`,
+		"",
+		`data: {"type":"response.completed","response":{"usage":{"input_tokens":4,"output_tokens":2}}}`,
+		"",
+	}, "\n")
+
+	upstream := &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid-openai-refusal"}},
+			Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+		},
+	}
+
+	svc := &GatewayService{
+		httpUpstream: upstream,
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}},
+		},
+	}
+	account := &Account{
+		ID:             14,
+		Name:           "openai-apikey",
+		Platform:       PlatformOpenAI,
+		Type:           AccountTypeAPIKey,
+		Concurrency:    1,
+		Credentials:    map[string]any{"api_key": "sk-test", "base_url": "https://api.openai.com"},
+		Status:         StatusActive,
+		Schedulable:    true,
+		RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, parsed)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Stream)
+	require.Equal(t, 4, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+
+	streamBody := rec.Body.String()
+	require.Contains(t, streamBody, `"type":"text_delta"`)
+	require.Contains(t, streamBody, `I cannot`)
+	require.Contains(t, streamBody, `comply.`)
+	require.Contains(t, streamBody, `"stop_reason":"end_turn"`)
+}

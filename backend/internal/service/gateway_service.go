@@ -4693,6 +4693,7 @@ func convertAnthropicMessagesToOpenAIInput(messagesRaw []any) []any {
 		if role == "" {
 			role = "user"
 		}
+		textPartType := openAIResponsesMessageTextTypeForRole(role)
 
 		content := msgMap["content"]
 		switch blocks := content.(type) {
@@ -4703,7 +4704,7 @@ func convertAnthropicMessagesToOpenAIInput(messagesRaw []any) []any {
 					"type": "message",
 					"role": role,
 					"content": []map[string]any{{
-						"type": "input_text",
+						"type": textPartType,
 						"text": text,
 					}},
 				})
@@ -4716,7 +4717,7 @@ func convertAnthropicMessagesToOpenAIInput(messagesRaw []any) []any {
 					return
 				}
 				messageParts = append(messageParts, map[string]any{
-					"type": "input_text",
+					"type": textPartType,
 					"text": trimmed,
 				})
 			}
@@ -4743,9 +4744,15 @@ func convertAnthropicMessagesToOpenAIInput(messagesRaw []any) []any {
 						appendTextPart(text)
 					}
 				case "image":
+					if strings.EqualFold(role, "assistant") {
+						appendTextPart(extractAnthropicImageSourceText(block["source"]))
+						continue
+					}
 					if imagePart, ok := convertAnthropicImageBlockToOpenAIInputPart(block); ok {
 						messageParts = append(messageParts, imagePart)
+						continue
 					}
+					appendTextPart(extractAnthropicImageSourceText(block["source"]))
 				case "document":
 					appendTextPart(extractAnthropicDocumentSourceText(block["source"]))
 				case "thinking":
@@ -4812,6 +4819,13 @@ func convertAnthropicMessagesToOpenAIInput(messagesRaw []any) []any {
 	return out
 }
 
+func openAIResponsesMessageTextTypeForRole(role string) string {
+	if strings.EqualFold(strings.TrimSpace(role), "assistant") {
+		return "output_text"
+	}
+	return "input_text"
+}
+
 func convertAnthropicImageBlockToOpenAIInputPart(block map[string]any) (map[string]any, bool) {
 	source, ok := block["source"].(map[string]any)
 	if !ok {
@@ -4838,6 +4852,29 @@ func convertAnthropicImageBlockToOpenAIInputPart(block map[string]any) (map[stri
 	default:
 		return nil, false
 	}
+}
+
+func extractAnthropicImageSourceText(source any) string {
+	sourceMap, ok := source.(map[string]any)
+	if !ok {
+		return "[image]"
+	}
+	sourceType, _ := sourceMap["type"].(string)
+	switch sourceType {
+	case "url":
+		url, _ := sourceMap["url"].(string)
+		url = strings.TrimSpace(url)
+		if url != "" {
+			return url
+		}
+	case "base64":
+		mediaType, _ := sourceMap["media_type"].(string)
+		if strings.TrimSpace(mediaType) != "" {
+			return "[image:" + strings.TrimSpace(mediaType) + "]"
+		}
+		return "[image:base64]"
+	}
+	return "[image]"
 }
 
 func extractAnthropicDocumentSourceText(source any) string {
@@ -4974,7 +5011,19 @@ func convertOpenAIResponsesJSONToClaude(respBody []byte, model string) ([]byte, 
 						if t != "" {
 							chunks = append(chunks, t)
 						}
+						continue
 					}
+					if typ == "refusal" {
+						t := strings.TrimSpace(c.Get("refusal").String())
+						if t != "" {
+							chunks = append(chunks, t)
+						}
+					}
+				}
+			case "refusal":
+				t := strings.TrimSpace(output.Get("refusal").String())
+				if t != "" {
+					chunks = append(chunks, t)
 				}
 			case "function_call", "tool_call":
 				toolID := strings.TrimSpace(output.Get("call_id").String())
@@ -5218,6 +5267,53 @@ func (s *GatewayService) streamOpenAIResponsesAsClaude(c *gin.Context, resp *htt
 		eventType := gjson.Get(data, "type").String()
 		switch eventType {
 		case "response.output_text.delta":
+			emitTextDelta := func(delta string) error {
+				if activeToolCallID != "" {
+					if err := emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": activeToolIndex}); err != nil {
+						return err
+					}
+					contentIndex++
+					activeToolCallID = ""
+					activeToolIndex = -1
+				}
+				delta = strings.TrimSpace(delta)
+				if delta == "" {
+					return nil
+				}
+				if !contentStarted {
+					if err := emit("content_block_start", map[string]any{
+						"type":  "content_block_start",
+						"index": contentIndex,
+						"content_block": map[string]any{
+							"type": "text",
+							"text": "",
+						},
+					}); err != nil {
+						return err
+					}
+					contentStarted = true
+				}
+				if err := emit("content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": contentIndex,
+					"delta": map[string]any{"type": "text_delta", "text": delta},
+				}); err != nil {
+					return err
+				}
+				if firstToken == 0 {
+					ft := int(time.Since(streamStart).Milliseconds())
+					firstToken = ft
+					firstTokenMs = &firstToken
+				}
+				flush()
+				return nil
+			}
+
+			delta := gjson.Get(data, "delta").String()
+			if err := emitTextDelta(delta); err != nil {
+				return usage, firstTokenMs, clientDisconnect, err
+			}
+		case "response.refusal.delta", "response.output_refusal.delta":
 			if activeToolCallID != "" {
 				if err := emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": activeToolIndex}); err != nil {
 					return usage, firstTokenMs, clientDisconnect, err
@@ -5227,6 +5323,10 @@ func (s *GatewayService) streamOpenAIResponsesAsClaude(c *gin.Context, resp *htt
 				activeToolIndex = -1
 			}
 			delta := gjson.Get(data, "delta").String()
+			delta = strings.TrimSpace(delta)
+			if delta == "" {
+				delta = strings.TrimSpace(gjson.Get(data, "refusal").String())
+			}
 			if delta == "" {
 				continue
 			}
