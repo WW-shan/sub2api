@@ -29,7 +29,7 @@ RUN pnpm install --frozen-lockfile
 # Copy frontend source and build
 COPY frontend/ ./
 ENV NODE_OPTIONS=--max-old-space-size=4096
-RUN pnpm run build
+RUN pnpm exec vue-tsc -b --pretty false && pnpm exec vite build --mode production --debug
 
 # -----------------------------------------------------------------------------
 # Stage 2: Backend Builder
