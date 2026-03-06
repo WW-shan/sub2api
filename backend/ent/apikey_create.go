@@ -113,6 +113,20 @@ func (_c *APIKeyCreate) SetNillableStatus(v *string) *APIKeyCreate {
 	return _c
 }
 
+// SetIsClaudeProxyKey sets the "is_claude_proxy_key" field.
+func (_c *APIKeyCreate) SetIsClaudeProxyKey(v bool) *APIKeyCreate {
+	_c.mutation.SetIsClaudeProxyKey(v)
+	return _c
+}
+
+// SetNillableIsClaudeProxyKey sets the "is_claude_proxy_key" field if the given value is not nil.
+func (_c *APIKeyCreate) SetNillableIsClaudeProxyKey(v *bool) *APIKeyCreate {
+	if v != nil {
+		_c.SetIsClaudeProxyKey(*v)
+	}
+	return _c
+}
+
 // SetLastUsedAt sets the "last_used_at" field.
 func (_c *APIKeyCreate) SetLastUsedAt(v time.Time) *APIKeyCreate {
 	_c.mutation.SetLastUsedAt(v)
@@ -387,6 +401,10 @@ func (_c *APIKeyCreate) defaults() error {
 		v := apikey.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
+	if _, ok := _c.mutation.IsClaudeProxyKey(); !ok {
+		v := apikey.DefaultIsClaudeProxyKey
+		_c.mutation.SetIsClaudeProxyKey(v)
+	}
 	if _, ok := _c.mutation.Quota(); !ok {
 		v := apikey.DefaultQuota
 		_c.mutation.SetQuota(v)
@@ -456,6 +474,9 @@ func (_c *APIKeyCreate) check() error {
 		if err := apikey.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "APIKey.status": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.IsClaudeProxyKey(); !ok {
+		return &ValidationError{Name: "is_claude_proxy_key", err: errors.New(`ent: missing required field "APIKey.is_claude_proxy_key"`)}
 	}
 	if _, ok := _c.mutation.Quota(); !ok {
 		return &ValidationError{Name: "quota", err: errors.New(`ent: missing required field "APIKey.quota"`)}
@@ -534,6 +555,10 @@ func (_c *APIKeyCreate) createSpec() (*APIKey, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(apikey.FieldStatus, field.TypeString, value)
 		_node.Status = value
+	}
+	if value, ok := _c.mutation.IsClaudeProxyKey(); ok {
+		_spec.SetField(apikey.FieldIsClaudeProxyKey, field.TypeBool, value)
+		_node.IsClaudeProxyKey = value
 	}
 	if value, ok := _c.mutation.LastUsedAt(); ok {
 		_spec.SetField(apikey.FieldLastUsedAt, field.TypeTime, value)
@@ -790,6 +815,18 @@ func (u *APIKeyUpsert) SetStatus(v string) *APIKeyUpsert {
 // UpdateStatus sets the "status" field to the value that was provided on create.
 func (u *APIKeyUpsert) UpdateStatus() *APIKeyUpsert {
 	u.SetExcluded(apikey.FieldStatus)
+	return u
+}
+
+// SetIsClaudeProxyKey sets the "is_claude_proxy_key" field.
+func (u *APIKeyUpsert) SetIsClaudeProxyKey(v bool) *APIKeyUpsert {
+	u.Set(apikey.FieldIsClaudeProxyKey, v)
+	return u
+}
+
+// UpdateIsClaudeProxyKey sets the "is_claude_proxy_key" field to the value that was provided on create.
+func (u *APIKeyUpsert) UpdateIsClaudeProxyKey() *APIKeyUpsert {
+	u.SetExcluded(apikey.FieldIsClaudeProxyKey)
 	return u
 }
 
@@ -1217,6 +1254,20 @@ func (u *APIKeyUpsertOne) SetStatus(v string) *APIKeyUpsertOne {
 func (u *APIKeyUpsertOne) UpdateStatus() *APIKeyUpsertOne {
 	return u.Update(func(s *APIKeyUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetIsClaudeProxyKey sets the "is_claude_proxy_key" field.
+func (u *APIKeyUpsertOne) SetIsClaudeProxyKey(v bool) *APIKeyUpsertOne {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.SetIsClaudeProxyKey(v)
+	})
+}
+
+// UpdateIsClaudeProxyKey sets the "is_claude_proxy_key" field to the value that was provided on create.
+func (u *APIKeyUpsertOne) UpdateIsClaudeProxyKey() *APIKeyUpsertOne {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.UpdateIsClaudeProxyKey()
 	})
 }
 
@@ -1855,6 +1906,20 @@ func (u *APIKeyUpsertBulk) SetStatus(v string) *APIKeyUpsertBulk {
 func (u *APIKeyUpsertBulk) UpdateStatus() *APIKeyUpsertBulk {
 	return u.Update(func(s *APIKeyUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetIsClaudeProxyKey sets the "is_claude_proxy_key" field.
+func (u *APIKeyUpsertBulk) SetIsClaudeProxyKey(v bool) *APIKeyUpsertBulk {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.SetIsClaudeProxyKey(v)
+	})
+}
+
+// UpdateIsClaudeProxyKey sets the "is_claude_proxy_key" field to the value that was provided on create.
+func (u *APIKeyUpsertBulk) UpdateIsClaudeProxyKey() *APIKeyUpsertBulk {
+	return u.Update(func(s *APIKeyUpsert) {
+		s.UpdateIsClaudeProxyKey()
 	})
 }
 

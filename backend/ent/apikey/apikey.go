@@ -31,6 +31,8 @@ const (
 	FieldGroupID = "group_id"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
+	// FieldIsClaudeProxyKey holds the string denoting the is_claude_proxy_key field in the database.
+	FieldIsClaudeProxyKey = "is_claude_proxy_key"
 	// FieldLastUsedAt holds the string denoting the last_used_at field in the database.
 	FieldLastUsedAt = "last_used_at"
 	// FieldIPWhitelist holds the string denoting the ip_whitelist field in the database.
@@ -103,6 +105,7 @@ var Columns = []string{
 	FieldName,
 	FieldGroupID,
 	FieldStatus,
+	FieldIsClaudeProxyKey,
 	FieldLastUsedAt,
 	FieldIPWhitelist,
 	FieldIPBlacklist,
@@ -152,6 +155,8 @@ var (
 	DefaultStatus string
 	// StatusValidator is a validator for the "status" field. It is called by the builders before save.
 	StatusValidator func(string) error
+	// DefaultIsClaudeProxyKey holds the default value on creation for the "is_claude_proxy_key" field.
+	DefaultIsClaudeProxyKey bool
 	// DefaultQuota holds the default value on creation for the "quota" field.
 	DefaultQuota float64
 	// DefaultQuotaUsed holds the default value on creation for the "quota_used" field.
@@ -216,6 +221,11 @@ func ByGroupID(opts ...sql.OrderTermOption) OrderOption {
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
+}
+
+// ByIsClaudeProxyKey orders the results by the is_claude_proxy_key field.
+func ByIsClaudeProxyKey(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIsClaudeProxyKey, opts...).ToFunc()
 }
 
 // ByLastUsedAt orders the results by the last_used_at field.
