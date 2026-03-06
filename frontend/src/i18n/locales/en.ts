@@ -568,6 +568,8 @@ export default {
     today: 'Today',
     total: 'Total',
     quota: 'Quota',
+    proxyBadge: 'Proxy',
+    proxyBadgeHint: 'This API key is marked as a Claude proxy key',
     lastUsedAt: 'Last Used',
     useKey: 'Use Key',
     useKeyModal: {
@@ -616,6 +618,8 @@ export default {
     customKeyTooShort: 'Custom key must be at least 16 characters',
     customKeyInvalidChars: 'Custom key can only contain letters, numbers, underscores, and hyphens',
     customKeyRequired: 'Please enter a custom key',
+    proxyKeyLabel: 'Claude Proxy Key',
+    proxyKeyHint: 'Marks this API key as a Claude proxy key for management and display.',
     ipRestriction: 'IP Restriction',
     ipWhitelist: 'IP Whitelist',
     ipWhitelistPlaceholder: '192.168.1.100\n10.0.0.0/8',

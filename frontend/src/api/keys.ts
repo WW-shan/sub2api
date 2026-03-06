@@ -55,6 +55,7 @@ export async function create(
   name: string,
   groupId?: number | null,
   customKey?: string,
+  isClaudeProxyKey?: boolean,
   ipWhitelist?: string[],
   ipBlacklist?: string[],
   quota?: number,
@@ -67,6 +68,9 @@ export async function create(
   }
   if (customKey) {
     payload.custom_key = customKey
+  }
+  if (isClaudeProxyKey !== undefined) {
+    payload.is_claude_proxy_key = isClaudeProxyKey
   }
   if (ipWhitelist && ipWhitelist.length > 0) {
     payload.ip_whitelist = ipWhitelist

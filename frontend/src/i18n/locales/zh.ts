@@ -568,6 +568,8 @@ export default {
     today: '今日',
     total: '累计',
     quota: '额度',
+    proxyBadge: '代理',
+    proxyBadgeHint: '此 API 密钥已标记为 Claude 代理 Key',
     lastUsedAt: '上次使用时间',
     useKey: '使用密钥',
     useKeyModal: {
@@ -620,6 +622,8 @@ export default {
     customKeyTooShort: '自定义密钥至少需要16个字符',
     customKeyInvalidChars: '自定义密钥只能包含字母、数字、下划线和连字符',
     customKeyRequired: '请输入自定义密钥',
+    proxyKeyLabel: 'Claude 代理 Key',
+    proxyKeyHint: '用于在管理页面中标记并展示该 API 密钥为 Claude 代理 Key。',
     ipRestriction: 'IP 限制',
     ipWhitelist: 'IP 白名单',
     ipWhitelistPlaceholder: '192.168.1.100\n10.0.0.0/8',
