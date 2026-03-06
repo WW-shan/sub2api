@@ -72,6 +72,48 @@
               {{ status.proxy ? '已配置' : '未配置' }}
             </p>
           </div>
+          <div>
+            <p class="text-xs text-gray-500 dark:text-gray-400">累计更新账号数</p>
+            <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
+              {{ status.total_updated }}
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-500 dark:text-gray-400">累计跳过次数</p>
+            <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
+              {{ status.total_skipped }}
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-500 dark:text-gray-400">本轮处理记录数</p>
+            <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
+              {{ status.last_processed_records }}
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-500 dark:text-gray-400">最近识别账号</p>
+            <p class="mt-1 break-all text-xs text-gray-800 dark:text-gray-200">
+              {{ status.last_token_email || '暂无' }}
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-500 dark:text-gray-400">最近创建账号</p>
+            <p class="mt-1 break-all text-xs text-gray-800 dark:text-gray-200">
+              {{ status.last_created_email || status.last_created_account_id || '暂无' }}
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-500 dark:text-gray-400">最近更新账号</p>
+            <p class="mt-1 break-all text-xs text-gray-800 dark:text-gray-200">
+              {{ status.last_updated_email || status.last_updated_account_id || '暂无' }}
+            </p>
+          </div>
+          <div class="md:col-span-3">
+            <p class="text-xs text-gray-500 dark:text-gray-400">Codex 凭证目录</p>
+            <p class="mt-1 break-all text-xs text-gray-800 dark:text-gray-200">
+              {{ status.auth_dir || '未配置' }}
+            </p>
+          </div>
         </div>
 
         <div
@@ -91,16 +133,16 @@
 
       <div class="card space-y-3 p-6 text-sm text-gray-700 dark:text-gray-200">
         <p>
-          1. 在 <code>docker-compose.local.yml</code> 中会启动 <code>codex-register</code> 容器，该容器内部循环执行注册脚本或按上述开关暂停。
+          1. 在 <code>docker-compose.local.yml</code> 中会启动 <code>codex-register</code> 容器，并把 <code>deploy/codex_auth</code> 挂载到容器内的 <code>{{ status?.auth_dir || '/app/codex-auth' }}</code>。
         </p>
         <p>
-          2. 每次成功注册后，新账号会直接写入 PostgreSQL 的 <code>accounts</code> 表，平台为 <code>openai</code>、类型为 <code>oauth</code>。
+          2. 将 Codex CLI 机器上的 <code>~/.codex/auth.json</code> 复制到该目录下任意子目录，例如 <code>deploy/codex_auth/user-a/auth.json</code>，服务会自动识别并导入。
         </p>
         <p>
-          3. 这些账号会自动出现在「渠道账户」页面中（管理后台 &gt; Accounts）。
+          3. 每次导入/刷新后，新账号会直接写入 PostgreSQL 的 <code>accounts</code> 表，平台为 <code>openai</code>、类型为 <code>oauth</code>，并自动写入 <code>claude-* → gpt-5.4</code> 模型映射。
         </p>
         <p>
-          4. 如需配置代理或频率，可在部署环境中设置环境变量 <code>CODEX_PROXY</code>、<code>CODEX_SLEEP_MIN</code>、<code>CODEX_SLEEP_MAX</code>。
+          4. 这些账号会自动出现在「渠道账户」页面中（管理后台 &gt; Accounts）。如需配置代理或频率，可设置 <code>CODEX_PROXY</code>、<code>CODEX_SLEEP_MIN</code>、<code>CODEX_SLEEP_MAX</code>、<code>CODEX_GROUP_IDS</code>。
         </p>
       </div>
 
