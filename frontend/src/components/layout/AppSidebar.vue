@@ -590,7 +590,7 @@ const customMenuItemsForAdmin = computed(() => {
 })
 
 // Admin navigation items
-const adminNavItems = computed((): NavItem[] => {
+  const adminNavItems = computed((): NavItem[] => {
   const baseItems: NavItem[] = [
     { path: '/admin/dashboard', label: t('nav.dashboard'), icon: DashboardIcon },
     ...(adminSettingsStore.opsMonitoringEnabled
@@ -600,6 +600,7 @@ const adminNavItems = computed((): NavItem[] => {
     { path: '/admin/groups', label: t('nav.groups'), icon: FolderIcon, hideInSimpleMode: true },
     { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, hideInSimpleMode: true },
     { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon },
+    { path: '/admin/codex-register', label: t('nav.accounts') + ' (Codex)', icon: GlobeIcon },
     { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon },
     { path: '/admin/proxies', label: t('nav.proxies'), icon: ServerIcon },
     { path: '/admin/redeem', label: t('nav.redeemCodes'), icon: TicketIcon, hideInSimpleMode: true },

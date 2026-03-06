@@ -149,6 +149,14 @@ services:
       # Proxy for accessing GitHub (online updates + pricing data)
       # Examples: http://host:port, socks5://host:port
       - UPDATE_PROXY_URL=${UPDATE_PROXY_URL:-}
+
+      # =======================================================================
+      # Claude Code Proxy (OpenAI account forwarding)
+      # =======================================================================
+      # Internal URL of the claude-code-proxy service for routing PlatformOpenAI
+      # accounts through Anthropic↔OpenAI format conversion.
+      # Default points to the claude-code-proxy service on this compose network.
+      - GATEWAY_CLAUDE_CODE_PROXY_URL=${GATEWAY_CLAUDE_CODE_PROXY_URL:-http://claude-code-proxy:8082}
     depends_on:
       postgres:
         condition: service_healthy
@@ -162,6 +170,60 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  codex-register:
+    image: codex-register:local
+    build:
+      context: ../..
+      dockerfile: sub2api/deploy/codex-register.Dockerfile
+    container_name: sub2api-codex-register
+    restart: unless-stopped
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-sub2api}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - POSTGRES_DB=${POSTGRES_DB:-sub2api}
+      - CODEX_PROXY=${CODEX_PROXY:-}
+      - CODEX_SLEEP_MIN=${CODEX_SLEEP_MIN:-5}
+      - CODEX_SLEEP_MAX=${CODEX_SLEEP_MAX:-30}
+      - TZ=${TZ:-Asia/Shanghai}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - sub2api-network
+
+  # ===========================================================================
+  # Claude Code Proxy (OpenAI-to-Anthropic format conversion)
+  # ===========================================================================
+  # Converts OpenAI API format requests to Anthropic format.
+  # Used when routing Claude Code traffic through OpenAI-compatible accounts.
+  # Architecture: Claude Code → sub2api (auth/billing) → claude-code-proxy → OpenAI
+  claude-code-proxy:
+    image: ghcr.io/1rgs/claude-code-proxy:latest
+    container_name: sub2api-claude-code-proxy
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${CLAUDE_PROXY_OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${CLAUDE_PROXY_OPENAI_BASE_URL:-}
+      - PREFERRED_PROVIDER=${CLAUDE_PROXY_PREFERRED_PROVIDER:-openai}
+      - BIG_MODEL=${CLAUDE_PROXY_BIG_MODEL:-}
+      - SMALL_MODEL=${CLAUDE_PROXY_SMALL_MODEL:-}
+      - TZ=${TZ:-Asia/Shanghai}
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    # Note: Port not exposed to host by default. sub2api connects via
+    # internal network at http://claude-code-proxy:8082
+    # To expose for debugging, uncomment:
+    # ports:
+    #   - "127.0.0.1:8082:8082"
 
   # ===========================================================================
   # PostgreSQL Database

@@ -444,6 +444,11 @@ func (s *SchedulerSnapshotService) rebuildByAccount(ctx context.Context, account
 			firstErr = err
 		}
 	}
+	if account.Platform == PlatformOpenAI && s.cfg != nil && s.cfg.Gateway.ClaudeCodeProxyURL != "" {
+		if err := s.rebuildBucketsForPlatform(ctx, PlatformAnthropic, groupIDs, reason); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
 }
 
@@ -601,6 +606,10 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 
 	if useMixed {
 		platforms := []string{bucket.Platform, PlatformAntigravity}
+		openAIProxyEnabled := s.cfg != nil && s.cfg.Gateway.ClaudeCodeProxyURL != ""
+		if openAIProxyEnabled && bucket.Platform == PlatformAnthropic {
+			platforms = append(platforms, PlatformOpenAI)
+		}
 		var accounts []Account
 		var err error
 		if groupID > 0 {

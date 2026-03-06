@@ -467,6 +467,11 @@ type GatewayConfig struct {
 	// UserMessageQueue: 用户消息串行队列配置
 	// 对 role:"user" 的真实用户消息实施账号级串行化 + RPM 自适应延迟
 	UserMessageQueue UserMessageQueueConfig `mapstructure:"user_message_queue"`
+
+	// ClaudeCodeProxyURL: claude-code-proxy 服务地址，用于将 PlatformOpenAI 账号的
+	// Anthropic 格式请求转发到 OpenAI（由 proxy 完成 Anthropic↔OpenAI 格式转换）。
+	// 留空则不启用代理转发。示例: http://claude-code-proxy:8082
+	ClaudeCodeProxyURL string `mapstructure:"claude_code_proxy_url"`
 }
 
 // UserMessageQueueConfig 用户消息串行队列配置
@@ -1445,6 +1450,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.user_message_queue.cleanup_interval_seconds", 60)
 
 	viper.SetDefault("gateway.tls_fingerprint.enabled", true)
+	viper.SetDefault("gateway.claude_code_proxy_url", "")
 	viper.SetDefault("concurrency.ping_interval", 10)
 
 	// Sora 直连配置
