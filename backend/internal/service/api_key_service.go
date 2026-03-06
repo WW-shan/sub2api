@@ -150,7 +150,6 @@ type UpdateAPIKeyRequest struct {
 	RateLimit1d         *float64 `json:"rate_limit_1d"`
 	RateLimit7d         *float64 `json:"rate_limit_7d"`
 	ResetRateLimitUsage *bool    `json:"reset_rate_limit_usage"` // Reset all usage counters to 0
-	IsClaudeProxyKey    *bool    `json:"is_claude_proxy_key"`
 }
 
 // APIKeyService API Key服务
