@@ -95,11 +95,6 @@ func Status(v string) predicate.APIKey {
 	return predicate.APIKey(sql.FieldEQ(FieldStatus, v))
 }
 
-// IsClaudeProxyKey applies equality check predicate on the "is_claude_proxy_key" field. It's identical to IsClaudeProxyKeyEQ.
-func IsClaudeProxyKey(v bool) predicate.APIKey {
-	return predicate.APIKey(sql.FieldEQ(FieldIsClaudeProxyKey, v))
-}
-
 // LastUsedAt applies equality check predicate on the "last_used_at" field. It's identical to LastUsedAtEQ.
 func LastUsedAt(v time.Time) predicate.APIKey {
 	return predicate.APIKey(sql.FieldEQ(FieldLastUsedAt, v))
@@ -538,16 +533,6 @@ func StatusEqualFold(v string) predicate.APIKey {
 // StatusContainsFold applies the ContainsFold predicate on the "status" field.
 func StatusContainsFold(v string) predicate.APIKey {
 	return predicate.APIKey(sql.FieldContainsFold(FieldStatus, v))
-}
-
-// IsClaudeProxyKeyEQ applies the EQ predicate on the "is_claude_proxy_key" field.
-func IsClaudeProxyKeyEQ(v bool) predicate.APIKey {
-	return predicate.APIKey(sql.FieldEQ(FieldIsClaudeProxyKey, v))
-}
-
-// IsClaudeProxyKeyNEQ applies the NEQ predicate on the "is_claude_proxy_key" field.
-func IsClaudeProxyKeyNEQ(v bool) predicate.APIKey {
-	return predicate.APIKey(sql.FieldNEQ(FieldIsClaudeProxyKey, v))
 }
 
 // LastUsedAtEQ applies the EQ predicate on the "last_used_at" field.

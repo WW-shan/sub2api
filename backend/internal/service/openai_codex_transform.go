@@ -171,10 +171,6 @@ func normalizeCodexModel(model string) string {
 	}
 
 	normalized := strings.ToLower(modelID)
-	if strings.HasPrefix(normalized, "claude-") || strings.Contains(normalized, "claude-sonnet") || strings.Contains(normalized, "claude-opus") {
-		return "gpt-5.4"
-	}
-
 	if strings.Contains(normalized, "gpt-5.4") || strings.Contains(normalized, "gpt 5.4") {
 		return "gpt-5.4"
 	}

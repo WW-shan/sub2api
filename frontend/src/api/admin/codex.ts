@@ -4,19 +4,9 @@ export interface CodexStatus {
   enabled: boolean
   sleep_min: number
   sleep_max: number
-  total_created: number
-  total_updated: number
-  total_skipped: number
-  last_run: string | null
   last_success: string | null
   last_error: string | null
   proxy: boolean
-  last_token_email: string | null
-  last_created_email: string | null
-  last_created_account_id: string | null
-  last_updated_email: string | null
-  last_updated_account_id: string | null
-  last_processed_records: number
 }
 
 export interface CodexLogEntry {
@@ -32,7 +22,7 @@ export async function getStatus(): Promise<CodexStatus> {
 
 export async function getLogs(): Promise<CodexLogEntry[]> {
   const res = await apiClient.get<{ logs: CodexLogEntry[] }>('/admin/codex/logs')
-  return res.data.logs || []
+  return res.data?.logs ?? []
 }
 
 export async function enable(): Promise<CodexStatus> {

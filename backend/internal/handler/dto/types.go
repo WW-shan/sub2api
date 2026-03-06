@@ -32,13 +32,12 @@ type AdminUser struct {
 }
 
 type APIKey struct {
-	ID              int64      `json:"id"`
-	UserID          int64      `json:"user_id"`
-	Key             string     `json:"key"`
-	Name            string     `json:"name"`
-	GroupID         *int64     `json:"group_id"`
-	Status          string     `json:"status"`
-	IsClaudeProxyKey bool      `json:"is_claude_proxy_key"`
+	ID          int64      `json:"id"`
+	UserID      int64      `json:"user_id"`
+	Key         string     `json:"key"`
+	Name        string     `json:"name"`
+	GroupID     *int64     `json:"group_id"`
+	Status      string     `json:"status"`
 	IPWhitelist []string   `json:"ip_whitelist"`
 	IPBlacklist []string   `json:"ip_blacklist"`
 	LastUsedAt  *time.Time `json:"last_used_at"`

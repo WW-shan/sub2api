@@ -100,6 +100,42 @@ PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
 BIG_MODEL = os.environ.get("BIG_MODEL", "gpt-4.1")
 SMALL_MODEL = os.environ.get("SMALL_MODEL", "gpt-4.1-mini")
 
+
+def resolve_mapped_model(original_model: str, preferred_provider: str) -> tuple[str, bool]:
+    new_model = original_model
+    clean_v = original_model
+    if clean_v.startswith('anthropic/'):
+        clean_v = clean_v[10:]
+    elif clean_v.startswith('openai/'):
+        clean_v = clean_v[7:]
+    elif clean_v.startswith('gemini/'):
+        clean_v = clean_v[7:]
+
+    lower_clean = clean_v.lower()
+    mapped = False
+
+    if preferred_provider == "anthropic":
+        return f"anthropic/{clean_v}", True
+
+    if 'haiku' in lower_clean:
+        if preferred_provider == "google" and SMALL_MODEL in GEMINI_MODELS:
+            return f"gemini/{SMALL_MODEL}", True
+        return f"openai/{SMALL_MODEL}", True
+
+    if 'sonnet' in lower_clean or 'opus' in lower_clean:
+        if preferred_provider == "google" and BIG_MODEL in GEMINI_MODELS:
+            return f"gemini/{BIG_MODEL}", True
+        return f"openai/{BIG_MODEL}", True
+
+    if clean_v in GEMINI_MODELS and not original_model.startswith('gemini/'):
+        new_model = f"gemini/{clean_v}"
+        mapped = True
+    elif clean_v in OPENAI_MODELS and not original_model.startswith('openai/'):
+        new_model = f"openai/{clean_v}"
+        mapped = True
+
+    return new_model, mapped
+
 # List of OpenAI models
 OPENAI_MODELS = [
     "o3-mini",
@@ -204,49 +240,7 @@ class MessagesRequest(BaseModel):
 
         logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
 
-        # Remove provider prefixes for easier matching
-        clean_v = v
-        if clean_v.startswith('anthropic/'):
-            clean_v = clean_v[10:]
-        elif clean_v.startswith('openai/'):
-            clean_v = clean_v[7:]
-        elif clean_v.startswith('gemini/'):
-            clean_v = clean_v[7:]
-
-        # --- Mapping Logic --- START ---
-        mapped = False
-        if PREFERRED_PROVIDER == "anthropic":
-            # Don't remap to big/small models, just add the prefix
-            new_model = f"anthropic/{clean_v}"
-            mapped = True
-
-        # Map Haiku to SMALL_MODEL based on provider preference
-        elif 'haiku' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{SMALL_MODEL}"
-                mapped = True
-            else:
-                new_model = f"openai/{SMALL_MODEL}"
-                mapped = True
-
-        # Map Sonnet to BIG_MODEL based on provider preference
-        elif 'sonnet' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{BIG_MODEL}"
-                mapped = True
-            else:
-                new_model = f"openai/{BIG_MODEL}"
-                mapped = True
-
-        # Add prefixes to non-mapped models if they match known lists
-        elif not mapped:
-            if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
-                new_model = f"gemini/{clean_v}"
-                mapped = True # Technically mapped to add prefix
-            elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
-                new_model = f"openai/{clean_v}"
-                mapped = True # Technically mapped to add prefix
-        # --- Mapping Logic --- END ---
+        new_model, mapped = resolve_mapped_model(v, PREFERRED_PROVIDER)
 
         if mapped:
             logger.debug(f"📌 MODEL MAPPING: '{original_model}' ➡️ '{new_model}'")
@@ -282,44 +276,7 @@ class TokenCountRequest(BaseModel):
 
         logger.debug(f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
 
-        # Remove provider prefixes for easier matching
-        clean_v = v
-        if clean_v.startswith('anthropic/'):
-            clean_v = clean_v[10:]
-        elif clean_v.startswith('openai/'):
-            clean_v = clean_v[7:]
-        elif clean_v.startswith('gemini/'):
-            clean_v = clean_v[7:]
-
-        # --- Mapping Logic --- START ---
-        mapped = False
-        # Map Haiku to SMALL_MODEL based on provider preference
-        if 'haiku' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{SMALL_MODEL}"
-                mapped = True
-            else:
-                new_model = f"openai/{SMALL_MODEL}"
-                mapped = True
-
-        # Map Sonnet to BIG_MODEL based on provider preference
-        elif 'sonnet' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{BIG_MODEL}"
-                mapped = True
-            else:
-                new_model = f"openai/{BIG_MODEL}"
-                mapped = True
-
-        # Add prefixes to non-mapped models if they match known lists
-        elif not mapped:
-            if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
-                new_model = f"gemini/{clean_v}"
-                mapped = True # Technically mapped to add prefix
-            elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
-                new_model = f"openai/{clean_v}"
-                mapped = True # Technically mapped to add prefix
-        # --- Mapping Logic --- END ---
+        new_model, mapped = resolve_mapped_model(v, PREFERRED_PROVIDER)
 
         if mapped:
             logger.debug(f"📌 TOKEN COUNT MAPPING: '{original_model}' ➡️ '{new_model}'")
@@ -1122,9 +1079,11 @@ async def create_message(
         # Convert Anthropic request to LiteLLM format
         litellm_request = convert_anthropic_to_litellm(request)
         
+        request_api_key = raw_request.headers.get("x-api-key", "").strip()
+
         # Determine which API key to use based on the model
         if request.model.startswith("openai/"):
-            litellm_request["api_key"] = OPENAI_API_KEY
+            litellm_request["api_key"] = request_api_key or OPENAI_API_KEY
             # Use custom OpenAI base URL if configured
             if OPENAI_BASE_URL:
                 litellm_request["api_base"] = OPENAI_BASE_URL

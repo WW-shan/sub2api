@@ -1,17 +1,16 @@
 import json
 import os
 import random
+import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
 import traceback
-from typing import List
-
-import psycopg2
-from psycopg2.extras import Json
+from typing import List, Set, Tuple
 
 
 enabled = True
@@ -31,18 +30,20 @@ last_updated_email = ""
 last_updated_account_id = ""
 last_processed_records = 0
 recent_logs = []
+status_lock = threading.Lock()
 
 
 def append_log(level: str, message: str) -> None:
-    recent_logs.append(
-        {
-            "time": datetime.utcnow().isoformat() + "Z",
-            "level": level,
-            "message": message,
-        }
-    )
-    if len(recent_logs) > 100:
-        del recent_logs[0 : len(recent_logs) - 100]
+    with status_lock:
+        recent_logs.append(
+            {
+                "time": datetime.utcnow().isoformat() + "Z",
+                "level": level,
+                "message": message,
+            }
+        )
+        if len(recent_logs) > 100:
+            del recent_logs[0 : len(recent_logs) - 100]
 
 
 def ensure_dict(value) -> dict:
@@ -93,8 +94,11 @@ def get_env(name: str, default=None, required: bool = False) -> str:
 
 
 def create_db_connection():
+    import psycopg2
+
     host = get_env("POSTGRES_HOST", "postgres")
     port = int(get_env("POSTGRES_PORT", "5432"))
+    connect_timeout = int(get_env("POSTGRES_CONNECT_TIMEOUT", "5"))
     user = get_env("POSTGRES_USER", required=True)
     password = get_env("POSTGRES_PASSWORD", required=True)
     dbname = get_env("POSTGRES_DB", required=True)
@@ -105,19 +109,64 @@ def create_db_connection():
         user=user,
         password=password,
         dbname=dbname,
+        connect_timeout=connect_timeout,
     )
     conn.autocommit = True
     return conn
 
 
-def run_codex_once(tokens_dir: Path):
+def pg_json(value):
+    from psycopg2.extras import Json
+
+    return Json(value)
+
+
+def normalize_extra_for_compare(extra: dict) -> dict:
+    normalized = ensure_dict(extra)
+    normalized.pop("codex_auto_register_updated_at", None)
+    return normalized
+
+
+def should_update_account(
+    current_credentials: dict,
+    next_credentials: dict,
+    current_extra: dict,
+    next_extra: dict,
+) -> bool:
+    return (
+        current_credentials != next_credentials
+        or normalize_extra_for_compare(current_extra) != normalize_extra_for_compare(next_extra)
+    )
+
+
+def archive_processed_file(source: Path, processed_dir: Path) -> Path:
+    if not source.exists():
+        raise FileNotFoundError(f"source token file not found: {source}")
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    target = processed_dir / source.name
+    while target.exists():
+        target = processed_dir / f"{int(time.time() * 1000)}-{source.name}"
+    shutil.move(str(source), str(target))
+    return target
+
+
+def compute_group_binding_changes(current_group_ids: Set[int], next_group_ids: Set[int]) -> Tuple[Set[int], Set[int]]:
+    return next_group_ids - current_group_ids, current_group_ids - next_group_ids
+
+
+def run_codex_once(tokens_dir: Path) -> List[Tuple[Path, List[dict]]]:
     codex_dir = Path("/app/codex-auto-register-main")
-    script_path = codex_dir / "codex-autp-register.py"
+    script_name = get_env("CODEX_REGISTER_SCRIPT", "codex-autp-register.py")
+    script_path = codex_dir / script_name
+    if not script_path.exists():
+        fallback_script_path = codex_dir / "codex-auto-register.py"
+        if fallback_script_path.exists():
+            script_path = fallback_script_path
 
     tokens_dir.mkdir(parents=True, exist_ok=True)
 
     proxy = get_env("CODEX_PROXY", "")
-    cmd = ["python", str(script_path), "--once"]
+    cmd = [sys.executable, str(script_path), "--once"]
     if proxy:
         cmd.extend(["--proxy", proxy])
 
@@ -145,7 +194,7 @@ def run_codex_once(tokens_dir: Path):
         append_log("warn", "no_token_json_found")
         return []
 
-    token_infos = []
+    batches: List[Tuple[Path, List[dict]]] = []
     for json_file in json_files:
         try:
             data = json.loads(json_file.read_text(encoding="utf-8"))
@@ -154,13 +203,15 @@ def run_codex_once(tokens_dir: Path):
             append_log("error", f"token_json_parse_failed:{json_file.name}")
             continue
 
+        token_infos: List[dict] = []
         if isinstance(data, list):
             token_infos.extend(item for item in data if isinstance(item, dict))
         elif isinstance(data, dict):
             token_infos.append(data)
         print(f"[codex-register] 读取 token 文件: {json_file}", flush=True)
+        batches.append((json_file, token_infos))
 
-    return token_infos
+    return batches
 
 
 def get_existing_account(cur, email: str, account_id: str):
@@ -185,13 +236,35 @@ def get_existing_account(cur, email: str, account_id: str):
 def bind_groups(cur, account_id: int, group_ids: List[int]) -> None:
     if not group_ids:
         return
-    cur.execute("DELETE FROM account_groups WHERE account_id = %s", (account_id,))
-    for index, group_id in enumerate(group_ids, start=1):
+
+    desired_priority = {group_id: index for index, group_id in enumerate(group_ids, start=1)}
+    desired_ids = set(desired_priority.keys())
+
+    cur.execute("SELECT group_id, priority FROM account_groups WHERE account_id = %s", (account_id,))
+    current_rows = cur.fetchall()
+    current_priority = {int(row[0]): int(row[1]) for row in current_rows}
+    current_ids = set(current_priority.keys())
+
+    to_add, to_remove = compute_group_binding_changes(current_ids, desired_ids)
+
+    for group_id in to_remove:
+        cur.execute("DELETE FROM account_groups WHERE account_id = %s AND group_id = %s", (account_id, group_id))
+
+    for group_id in to_add:
         cur.execute(
             "INSERT INTO account_groups (account_id, group_id, priority, created_at) VALUES (%s, %s, %s, NOW()) "
             "ON CONFLICT (account_id, group_id) DO UPDATE SET priority = EXCLUDED.priority",
-            (account_id, group_id, index),
+            (account_id, group_id, desired_priority[group_id]),
         )
+
+    retained_ids = desired_ids.intersection(current_ids)
+    for group_id in retained_ids:
+        next_priority = desired_priority[group_id]
+        if current_priority[group_id] != next_priority:
+            cur.execute(
+                "UPDATE account_groups SET priority = %s WHERE account_id = %s AND group_id = %s",
+                (next_priority, account_id, group_id),
+            )
 
 
 def build_credentials(existing: dict, token_info: dict) -> dict:
@@ -217,7 +290,6 @@ def build_extra(existing: dict, token_info: dict) -> dict:
     extra = dict(existing)
     extra["codex_auto_register"] = True
     extra["codex_auto_register_model_target"] = "gpt-5.4"
-    extra["codex_auto_register_updated_at"] = datetime.utcnow().isoformat() + "Z"
     if token_info.get("auth_file"):
         extra["codex_auth_file"] = token_info.get("auth_file")
     return extra
@@ -239,14 +311,16 @@ def upsert_account(cur, token_info: dict) -> str:
         extra = build_extra(ensure_dict(existing_extra), token_info)
         current_credentials = ensure_dict(existing_credentials)
         current_extra = ensure_dict(existing_extra)
-        if credentials == current_credentials and extra == current_extra:
+        if not should_update_account(current_credentials, credentials, current_extra, extra):
             bind_groups(cur, existing_id, group_ids)
             print(f"[codex-register] 账号无需更新，跳过: {email or account_id}", flush=True)
             append_log("info", f"skip_unchanged:{email or account_id}")
             return "skipped"
+
+        extra["codex_auto_register_updated_at"] = datetime.utcnow().isoformat() + "Z"
         cur.execute(
             "UPDATE accounts SET credentials = %s, extra = %s, status = 'active', schedulable = true, updated_at = NOW() WHERE id = %s",
-            (Json(credentials), Json(extra), existing_id),
+            (pg_json(credentials), pg_json(extra), existing_id),
         )
         bind_groups(cur, existing_id, group_ids)
         print(f"[codex-register] 已更新账号: {email or account_id}", flush=True)
@@ -257,11 +331,12 @@ def upsert_account(cur, token_info: dict) -> str:
     name = f"codex-{identifier}"
     credentials = build_credentials({}, token_info)
     extra = build_extra({}, token_info)
+    extra["codex_auto_register_updated_at"] = datetime.utcnow().isoformat() + "Z"
 
     cur.execute(
         "INSERT INTO accounts (name, platform, type, credentials, extra, concurrency, priority, rate_multiplier, status, schedulable, auto_pause_on_expired) "
         "VALUES (%s, 'openai', 'oauth', %s, %s, 3, 50, 1.0, 'active', true, true) RETURNING id",
-        (name, Json(credentials), Json(extra)),
+        (name, pg_json(credentials), pg_json(extra)),
     )
     created_id = cur.fetchone()[0]
     bind_groups(cur, created_id, group_ids)
@@ -274,7 +349,8 @@ def run_one_cycle(tokens_dir: Path) -> None:
     global last_run, last_success, last_error, total_created, total_updated, total_skipped
     global last_token_email, last_created_email, last_created_account_id, last_updated_email, last_updated_account_id
     global last_processed_records
-    last_run = datetime.utcnow()
+    with status_lock:
+        last_run = datetime.utcnow()
     try:
         conn = create_db_connection()
         cur = conn.cursor()
@@ -287,27 +363,50 @@ def run_one_cycle(tokens_dir: Path) -> None:
         return
 
     try:
-        token_infos = run_codex_once(tokens_dir)
-        last_processed_records = len(token_infos)
-        if token_infos:
-            for token_info in token_infos:
-                identifier = token_info.get("email") or token_info.get("account_id") or token_info.get("name") or ""
-                if identifier:
-                    last_token_email = identifier
-                action = upsert_account(cur, token_info)
-                if action == "created":
-                    total_created += 1
-                    last_created_email = token_info.get("email") or ""
-                    last_created_account_id = token_info.get("account_id") or ""
-                elif action == "updated":
-                    total_updated += 1
-                    last_updated_email = token_info.get("email") or ""
-                    last_updated_account_id = token_info.get("account_id") or ""
-                else:
-                    total_skipped += 1
-            last_success = datetime.utcnow()
-            last_error = ""
-            append_log("info", f"cycle_completed:{len(token_infos)}")
+        batches = run_codex_once(tokens_dir)
+        with status_lock:
+            last_processed_records = sum(len(items) for _, items in batches)
+        if batches:
+            processed_dir = tokens_dir / "processed"
+            for source_file, token_infos in batches:
+                file_success = True
+                for token_info in token_infos:
+                    try:
+                        identifier = token_info.get("email") or token_info.get("account_id") or token_info.get("name") or ""
+                        if identifier:
+                            with status_lock:
+                                last_token_email = identifier
+                        action = upsert_account(cur, token_info)
+                        if action == "created":
+                            with status_lock:
+                                total_created += 1
+                                last_created_email = token_info.get("email") or ""
+                                last_created_account_id = token_info.get("account_id") or ""
+                        elif action == "updated":
+                            with status_lock:
+                                total_updated += 1
+                                last_updated_email = token_info.get("email") or ""
+                                last_updated_account_id = token_info.get("account_id") or ""
+                        else:
+                            with status_lock:
+                                total_skipped += 1
+                    except Exception as exc:  # noqa: BLE001
+                        file_success = False
+                        append_log("error", f"token_process_failed:{source_file.name}:{exc}")
+                        print(f"[codex-register] 处理 token 失败（保留重试）: {source_file} {exc}", flush=True)
+                        break
+
+                if file_success:
+                    try:
+                        archived = archive_processed_file(source_file, processed_dir)
+                        append_log("info", f"archived:{archived.name}")
+                    except Exception as exc:  # noqa: BLE001
+                        append_log("error", f"archive_failed:{source_file.name}:{exc}")
+                        print(f"[codex-register] 归档 token 文件失败（保留重试）: {source_file} {exc}", flush=True)
+            with status_lock:
+                last_success = datetime.utcnow()
+                last_error = ""
+            append_log("info", f"cycle_completed:{last_processed_records}")
         else:
             append_log("info", "cycle_completed:0")
     except Exception:  # noqa: BLE001
@@ -326,9 +425,10 @@ def run_one_cycle(tokens_dir: Path) -> None:
 
 
 def worker_loop(tokens_dir: Path, sleep_min: int, sleep_max: int) -> None:
-    global enabled
     while True:
-        if not enabled:
+        with status_lock:
+            worker_enabled = enabled
+        if not worker_enabled:
             time.sleep(5)
             continue
         run_one_cycle(tokens_dir)
@@ -339,24 +439,25 @@ def worker_loop(tokens_dir: Path, sleep_min: int, sleep_max: int) -> None:
 
 def get_status_payload() -> dict:
     proxy = get_env("CODEX_PROXY", "")
-    return {
-        "enabled": enabled,
-        "sleep_min": sleep_min_global,
-        "sleep_max": sleep_max_global,
-        "total_created": total_created,
-        "total_updated": total_updated,
-        "total_skipped": total_skipped,
-        "last_run": last_run.isoformat() + "Z" if last_run else None,
-        "last_success": last_success.isoformat() + "Z" if last_success else None,
-        "last_error": last_error,
-        "proxy": bool(proxy),
-        "last_token_email": last_token_email or None,
-        "last_created_email": last_created_email or None,
-        "last_created_account_id": last_created_account_id or None,
-        "last_updated_email": last_updated_email or None,
-        "last_updated_account_id": last_updated_account_id or None,
-        "last_processed_records": last_processed_records,
-    }
+    with status_lock:
+        return {
+            "enabled": enabled,
+            "sleep_min": sleep_min_global,
+            "sleep_max": sleep_max_global,
+            "total_created": total_created,
+            "total_updated": total_updated,
+            "total_skipped": total_skipped,
+            "last_run": last_run.isoformat() + "Z" if last_run else None,
+            "last_success": last_success.isoformat() + "Z" if last_success else None,
+            "last_error": last_error,
+            "proxy": bool(proxy),
+            "last_token_email": last_token_email or None,
+            "last_created_email": last_created_email or None,
+            "last_created_account_id": last_created_account_id or None,
+            "last_updated_email": last_updated_email or None,
+            "last_updated_account_id": last_updated_account_id or None,
+            "last_processed_records": last_processed_records,
+        }
 
 
 class CodexRequestHandler(BaseHTTPRequestHandler):
@@ -380,7 +481,9 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path == "/logs":
-            body = json.dumps({"logs": recent_logs}).encode("utf-8")
+            with status_lock:
+                logs = list(recent_logs)
+            body = json.dumps({"logs": logs}).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
             self.send_header("Content-Type", "application/json")
@@ -405,7 +508,8 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         global enabled, tokens_dir_global
         if self.path == "/enable":
-            enabled = True
+            with status_lock:
+                enabled = True
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -414,7 +518,8 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path == "/disable":
-            enabled = False
+            with status_lock:
+                enabled = False
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -423,8 +528,10 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path == "/run-once":
-            if tokens_dir_global is not None:
-                run_one_cycle(tokens_dir_global)
+            with status_lock:
+                run_once_tokens_dir = tokens_dir_global
+            if run_once_tokens_dir is not None:
+                run_one_cycle(run_once_tokens_dir)
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -449,17 +556,19 @@ def main() -> None:
     if sleep_max < sleep_min:
         sleep_max = sleep_min
 
-    sleep_min_global = sleep_min
-    sleep_max_global = sleep_max
+    with status_lock:
+        sleep_min_global = sleep_min
+        sleep_max_global = sleep_max
 
     tokens_dir = Path("/app/codex-auto-register-main/tokens")
-    tokens_dir_global = tokens_dir
+    with status_lock:
+        tokens_dir_global = tokens_dir
 
     worker = threading.Thread(target=worker_loop, args=(tokens_dir, sleep_min, sleep_max), daemon=True)
     worker.start()
 
     port = int(get_env("CODEX_HTTP_PORT", "5000"))
-    server = HTTPServer(("0.0.0.0", port), CodexRequestHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), CodexRequestHandler)
     print(f"[codex-register] HTTP 服务启动于 0.0.0.0:{port}", flush=True)
     server.serve_forever()
 

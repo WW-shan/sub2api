@@ -72,13 +72,6 @@
           <template #cell-name="{ value, row }">
             <div class="flex items-center gap-1.5">
               <span class="font-medium text-gray-900 dark:text-white">{{ value }}</span>
-              <span
-                v-if="row.is_claude_proxy_key"
-                class="inline-flex items-center rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-500/15 dark:text-violet-300"
-                :title="t('keys.proxyBadgeHint')"
-              >
-                {{ t('keys.proxyBadge') }}
-              </span>
               <Icon
                 v-if="row.ip_whitelist?.length > 0 || row.ip_blacklist?.length > 0"
                 name="shield"
@@ -459,30 +452,6 @@
             :options="statusOptions"
             :placeholder="t('keys.selectStatus')"
           />
-        </div>
-
-        <div class="space-y-3">
-          <div class="flex items-center justify-between">
-            <div>
-              <label class="input-label mb-0">{{ t('keys.proxyKeyLabel') }}</label>
-              <p class="input-hint mt-1">{{ t('keys.proxyKeyHint') }}</p>
-            </div>
-            <button
-              type="button"
-              @click="formData.is_claude_proxy_key = !formData.is_claude_proxy_key"
-              :class="[
-                'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
-                formData.is_claude_proxy_key ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
-              ]"
-            >
-              <span
-                :class="[
-                  'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
-                  formData.is_claude_proxy_key ? 'translate-x-4' : 'translate-x-0'
-                ]"
-              />
-            </button>
-          </div>
         </div>
 
         <!-- IP Restriction Section -->
@@ -1137,7 +1106,6 @@ const formData = ref({
   name: '',
   group_id: null as number | null,
   status: 'active' as 'active' | 'inactive',
-  is_claude_proxy_key: false,
   use_custom_key: false,
   custom_key: '',
   enable_ip_restriction: false,
@@ -1340,7 +1308,6 @@ const editKey = (key: ApiKey) => {
     name: key.name,
     group_id: key.group_id,
     status: key.status === 'quota_exhausted' || key.status === 'expired' || key.status === 'disabled' ? 'inactive' : key.status,
-    is_claude_proxy_key: key.is_claude_proxy_key,
     use_custom_key: false,
     custom_key: '',
     enable_ip_restriction: hasIPRestriction,
@@ -1478,7 +1445,6 @@ const handleSubmit = async () => {
         name: formData.value.name,
         group_id: formData.value.group_id,
         status: formData.value.status,
-        is_claude_proxy_key: formData.value.is_claude_proxy_key,
         ip_whitelist: ipWhitelist,
         ip_blacklist: ipBlacklist,
         quota: quota,
@@ -1494,7 +1460,6 @@ const handleSubmit = async () => {
         formData.value.name,
         formData.value.group_id,
         customKey,
-        formData.value.is_claude_proxy_key,
         ipWhitelist,
         ipBlacklist,
         quota,
@@ -1546,7 +1511,6 @@ const closeModals = () => {
     name: '',
     group_id: null,
     status: 'active',
-    is_claude_proxy_key: false,
     use_custom_key: false,
     custom_key: '',
     enable_ip_restriction: false,

@@ -1,17 +1,22 @@
 <template>
   <AppLayout>
-    <div class="mx-auto max-w-3xl space-y-6">
-      <div class="card p-6">
-        <h1 class="mb-2 text-xl font-semibold text-gray-900 dark:text-white">
-          Codex 自动注册服务
-        </h1>
-        <p class="text-sm text-gray-600 dark:text-gray-300">
-          该页面用于说明 Codex 自动注册容器的工作方式，并提供开关与基础控制。
-        </p>
-      </div>
+    <div class="mx-auto max-w-4xl space-y-6">
+      <div class="card">
+        <div class="flex items-center justify-between gap-4 border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+          <h1 class="text-xl font-semibold text-gray-900 dark:text-white">Codex 自动注册</h1>
+          <span
+            :class="[
+              'inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium',
+              status?.enabled
+                ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+                : 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
+            ]"
+          >
+            {{ status?.enabled ? '运行中' : '已停止' }}
+          </span>
+        </div>
 
-      <div class="card space-y-4 p-6 text-sm text-gray-700 dark:text-gray-200">
-        <div class="flex items-center justify-between">
+        <div class="flex flex-wrap items-center justify-between gap-4 p-6 text-sm text-gray-700 dark:text-gray-200">
           <div>
             <p class="text-sm font-medium text-gray-900 dark:text-white">当前状态</p>
             <p class="mt-1 text-sm">
@@ -19,7 +24,7 @@
               <span v-else class="text-gray-500 dark:text-gray-400">已关闭自动注册</span>
             </p>
           </div>
-          <div class="flex gap-2">
+          <div class="flex flex-wrap gap-2">
             <button
               type="button"
               class="btn btn-primary btn-sm"
@@ -46,130 +51,74 @@
             </button>
           </div>
         </div>
-
-        <div v-if="status" class="grid grid-cols-2 gap-4 md:grid-cols-3">
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">累计创建账号数</p>
-            <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
-              {{ status.total_created }}
-            </p>
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">最近成功时间</p>
-            <p class="mt-1 text-xs text-gray-800 dark:text-gray-200">
-              {{ status.last_success || '暂无' }}
-            </p>
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">休眠区间（秒）</p>
-            <p class="mt-1 text-xs text-gray-800 dark:text-gray-200">
-              {{ status.sleep_min }} - {{ status.sleep_max }}
-            </p>
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">是否配置代理</p>
-            <p class="mt-1 text-xs text-gray-800 dark:text-gray-200">
-              {{ status.proxy ? '已配置' : '未配置' }}
-            </p>
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">累计更新账号数</p>
-            <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
-              {{ status.total_updated }}
-            </p>
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">累计跳过次数</p>
-            <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
-              {{ status.total_skipped }}
-            </p>
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">本轮处理记录数</p>
-            <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
-              {{ status.last_processed_records }}
-            </p>
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">最近识别账号</p>
-            <p class="mt-1 break-all text-xs text-gray-800 dark:text-gray-200">
-              {{ status.last_token_email || '暂无' }}
-            </p>
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">最近创建账号</p>
-            <p class="mt-1 break-all text-xs text-gray-800 dark:text-gray-200">
-              {{ status.last_created_email || status.last_created_account_id || '暂无' }}
-            </p>
-          </div>
-          <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">最近更新账号</p>
-            <p class="mt-1 break-all text-xs text-gray-800 dark:text-gray-200">
-              {{ status.last_updated_email || status.last_updated_account_id || '暂无' }}
-            </p>
-          </div>
-        </div>
-
-        <div
-          v-if="status?.last_error"
-          class="rounded-md bg-red-50 p-3 text-xs text-red-700 dark:bg-red-900/30 dark:text-red-300"
-        >
-          <div class="mb-1 font-medium">最近错误日志</div>
-          <pre class="max-h-48 overflow-auto whitespace-pre-wrap text-[11px] leading-snug">
-{{ status.last_error }}
-          </pre>
-        </div>
-
-        <p v-if="error" class="text-xs text-red-600 dark:text-red-400">
-          {{ error }}
-        </p>
       </div>
 
-      <div class="card space-y-3 p-6 text-sm text-gray-700 dark:text-gray-200">
-        <p>
-          1. 当前使用内置的 <code>codex-autp-register.py</code> 直接执行注册流程：自动创建 Mail.tm 邮箱、收取验证码、完成 OpenAI 注册并输出 token 文件。
-        </p>
-        <p>
-          2. <code>codex-register</code> 容器会读取脚本产出的 token 文件，自动写入 PostgreSQL 的 <code>accounts</code> 表，平台为 <code>openai</code>、类型为 <code>oauth</code>。
-        </p>
-        <p>
-          3. 新账号会自动加入 <code>CODEX_GROUP_IDS</code> 指定分组，并写入 <code>claude-*-sonnet*</code> / <code>claude-*-opus*</code> 到 <code>gpt-5.4</code> 的模型映射。
-        </p>
-        <p>
-          4. 可选配置 <code>CODEX_PROXY</code>、<code>CODEX_SLEEP_MIN</code>、<code>CODEX_SLEEP_MAX</code>、<code>CODEX_GROUP_IDS</code>；无需额外桥接服务。
-        </p>
-      </div>
-
-      <div class="card space-y-2 p-6 text-sm text-gray-700 dark:text-gray-200">
-        <p class="font-medium">最近事件</p>
-        <div
-          v-if="logs.length === 0"
-          class="text-xs text-gray-500 dark:text-gray-400"
-        >
-          暂无事件
+      <div class="card">
+        <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+          <h2 class="text-base font-semibold text-gray-900 dark:text-white">运行概览</h2>
         </div>
-        <div
-          v-else
-          class="max-h-64 space-y-1 overflow-auto border-t border-gray-100 pt-2 text-xs dark:border-dark-700"
-        >
+
+        <div class="space-y-4 p-6 text-sm text-gray-700 dark:text-gray-200">
+          <div class="grid gap-4 sm:grid-cols-3">
+            <div class="rounded-lg border border-gray-100 bg-gray-50/80 p-3 dark:border-dark-700 dark:bg-dark-800/40">
+              <p class="text-xs text-gray-500 dark:text-gray-400">最近成功时间</p>
+              <p class="mt-1 text-xs text-gray-800 dark:text-gray-200">
+                {{ status?.last_success || '暂无' }}
+              </p>
+            </div>
+            <div class="rounded-lg border border-gray-100 bg-gray-50/80 p-3 dark:border-dark-700 dark:bg-dark-800/40">
+              <p class="text-xs text-gray-500 dark:text-gray-400">是否配置代理</p>
+              <p class="mt-1 text-xs text-gray-800 dark:text-gray-200">
+                {{ status?.proxy ? '已配置' : '未配置' }}
+              </p>
+            </div>
+            <div class="rounded-lg border border-gray-100 bg-gray-50/80 p-3 dark:border-dark-700 dark:bg-dark-800/40">
+              <p class="text-xs text-gray-500 dark:text-gray-400">休眠区间（秒）</p>
+              <p class="mt-1 text-xs text-gray-800 dark:text-gray-200">
+                {{ status ? `${status.sleep_min} - ${status.sleep_max}` : '--' }}
+              </p>
+            </div>
+          </div>
+
           <div
-            v-for="(log, idx) in logs"
-            :key="idx"
-            class="whitespace-pre-wrap text-[11px] leading-snug"
+            v-if="status?.last_error"
+            class="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-900/30 dark:text-red-300"
           >
-            [{{ log.level }}] {{ log.time }} - {{ log.message }}
+            <div class="mb-1 font-medium">最近错误日志</div>
+            <pre class="max-h-48 overflow-auto whitespace-pre-wrap text-[11px] leading-snug">{{ status.last_error }}</pre>
           </div>
+
+          <p v-if="error" class="text-xs text-red-600 dark:text-red-400">
+            {{ error }}
+          </p>
         </div>
       </div>
 
-      <div class="card p-6 text-sm text-gray-700 dark:text-gray-200">
-        <p class="mb-2 font-medium">快速入口</p>
-        <router-link
-          to="/admin/accounts"
-          class="inline-flex items-center rounded-md border border-primary-500 px-3 py-1.5 text-sm font-medium text-primary-600 hover:bg-primary-50 dark:border-primary-400 dark:text-primary-300 dark:hover:bg-primary-900/20"
-        >
-          前往 Accounts 页面查看自动注册结果
-        </router-link>
+      <div class="card">
+        <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+          <h2 class="text-base font-semibold text-gray-900 dark:text-white">最近事件</h2>
+        </div>
+
+        <div class="p-6 text-sm text-gray-700 dark:text-gray-200">
+          <div
+            v-if="logs.length === 0"
+            class="text-xs text-gray-500 dark:text-gray-400"
+          >
+            暂无事件
+          </div>
+          <div
+            v-else
+            class="max-h-64 overflow-auto rounded-lg border border-gray-100 text-xs dark:border-dark-700"
+          >
+            <div
+              v-for="(log, idx) in logs"
+              :key="`${log.time}-${log.level}-${log.message}-${idx}`"
+              class="border-b border-gray-100 px-3 py-2 whitespace-pre-wrap text-[11px] leading-snug last:border-b-0 dark:border-dark-700"
+            >
+              [{{ log.level }}] {{ log.time }} - {{ log.message }}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </AppLayout>
@@ -186,14 +135,24 @@ const error = ref<string | null>(null)
 const logs = ref<CodexLogEntry[]>([])
 let timer: number | undefined
 
+function getErrorMessage(error: unknown): string {
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = error.message
+    if (typeof message === 'string' && message) {
+      return message
+    }
+  }
+
+  return error instanceof Error ? error.message : String(error)
+}
+
 async function fetchStatus() {
   try {
     const data = await adminAPI.codex.getStatus()
     status.value = data
     error.value = null
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    error.value = msg
+  } catch (errorValue) {
+    error.value = getErrorMessage(errorValue)
   }
 }
 
@@ -201,12 +160,12 @@ async function fetchLogs() {
   try {
     const data = await adminAPI.codex.getLogs()
     logs.value = data
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    error.value = msg
+  } catch (errorValue) {
+    error.value = getErrorMessage(errorValue)
   }
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: referenced by template events
 async function toggleEnabled(value: boolean) {
   if (loading.value) return
   loading.value = true
@@ -214,14 +173,14 @@ async function toggleEnabled(value: boolean) {
     const data = value ? await adminAPI.codex.enable() : await adminAPI.codex.disable()
     status.value = data
     error.value = null
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    error.value = msg
+  } catch (errorValue) {
+    error.value = getErrorMessage(errorValue)
   } finally {
     loading.value = false
   }
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: referenced by template events
 async function runOnce() {
   if (loading.value) return
   loading.value = true
@@ -229,9 +188,8 @@ async function runOnce() {
     const data = await adminAPI.codex.runOnce()
     status.value = data
     error.value = null
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    error.value = msg
+  } catch (errorValue) {
+    error.value = getErrorMessage(errorValue)
   } finally {
     loading.value = false
   }
@@ -241,6 +199,9 @@ onMounted(() => {
   void fetchStatus()
   void fetchLogs()
   timer = window.setInterval(() => {
+    if (loading.value) {
+      return
+    }
     void fetchStatus()
     void fetchLogs()
   }, 10000)
@@ -252,6 +213,3 @@ onUnmounted(() => {
   }
 })
 </script>
-
-<style scoped>
-</style>

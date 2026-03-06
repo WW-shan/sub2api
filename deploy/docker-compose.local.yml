@@ -212,8 +212,8 @@ services:
       - OPENAI_API_KEY=${CLAUDE_PROXY_OPENAI_API_KEY:-}
       - OPENAI_BASE_URL=${CLAUDE_PROXY_OPENAI_BASE_URL:-http://sub2api:8080/v1}
       - PREFERRED_PROVIDER=${CLAUDE_PROXY_PREFERRED_PROVIDER:-openai}
-      - BIG_MODEL=${CLAUDE_PROXY_BIG_MODEL:-}
-      - SMALL_MODEL=${CLAUDE_PROXY_SMALL_MODEL:-}
+      - BIG_MODEL=${CLAUDE_PROXY_BIG_MODEL:-gpt-5.4}
+      - SMALL_MODEL=${CLAUDE_PROXY_SMALL_MODEL:-gpt-5.3-codex-spark}
       - TZ=${TZ:-Asia/Shanghai}
     networks:
       - sub2api-network

@@ -37,7 +37,6 @@ type CreateAPIKeyRequest struct {
 	IPBlacklist   []string `json:"ip_blacklist"`    // IP 黑名单
 	Quota         *float64 `json:"quota"`           // 配额限制 (USD)
 	ExpiresInDays *int     `json:"expires_in_days"` // 过期天数
-	IsClaudeProxyKey bool  `json:"is_claude_proxy_key"`
 
 	// Rate limit fields (0 = unlimited)
 	RateLimit5h *float64 `json:"rate_limit_5h"`
@@ -55,7 +54,6 @@ type UpdateAPIKeyRequest struct {
 	Quota       *float64 `json:"quota"`        // 配额限制 (USD), 0=无限制
 	ExpiresAt   *string  `json:"expires_at"`   // 过期时间 (ISO 8601)
 	ResetQuota  *bool    `json:"reset_quota"`  // 重置已用配额
-	IsClaudeProxyKey *bool `json:"is_claude_proxy_key"`
 
 	// Rate limit fields (nil = no change, 0 = unlimited)
 	RateLimit5h         *float64 `json:"rate_limit_5h"`
@@ -157,7 +155,6 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 		IPWhitelist:   req.IPWhitelist,
 		IPBlacklist:   req.IPBlacklist,
 		ExpiresInDays: req.ExpiresInDays,
-		IsClaudeProxyKey: req.IsClaudeProxyKey,
 	}
 	if req.Quota != nil {
 		svcReq.Quota = *req.Quota
@@ -218,9 +215,6 @@ func (h *APIKeyHandler) Update(c *gin.Context) {
 	svcReq.GroupID = req.GroupID
 	if req.Status != "" {
 		svcReq.Status = &req.Status
-	}
-	if req.IsClaudeProxyKey != nil {
-		svcReq.IsClaudeProxyKey = req.IsClaudeProxyKey
 	}
 	// Parse expires_at if provided
 	if req.ExpiresAt != nil {

@@ -134,20 +134,6 @@ func (_u *APIKeyUpdate) SetNillableStatus(v *string) *APIKeyUpdate {
 	return _u
 }
 
-// SetIsClaudeProxyKey sets the "is_claude_proxy_key" field.
-func (_u *APIKeyUpdate) SetIsClaudeProxyKey(v bool) *APIKeyUpdate {
-	_u.mutation.SetIsClaudeProxyKey(v)
-	return _u
-}
-
-// SetNillableIsClaudeProxyKey sets the "is_claude_proxy_key" field if the given value is not nil.
-func (_u *APIKeyUpdate) SetNillableIsClaudeProxyKey(v *bool) *APIKeyUpdate {
-	if v != nil {
-		_u.SetIsClaudeProxyKey(*v)
-	}
-	return _u
-}
-
 // SetLastUsedAt sets the "last_used_at" field.
 func (_u *APIKeyUpdate) SetLastUsedAt(v time.Time) *APIKeyUpdate {
 	_u.mutation.SetLastUsedAt(v)
@@ -610,9 +596,6 @@ func (_u *APIKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(apikey.FieldStatus, field.TypeString, value)
 	}
-	if value, ok := _u.mutation.IsClaudeProxyKey(); ok {
-		_spec.SetField(apikey.FieldIsClaudeProxyKey, field.TypeBool, value)
-	}
 	if value, ok := _u.mutation.LastUsedAt(); ok {
 		_spec.SetField(apikey.FieldLastUsedAt, field.TypeTime, value)
 	}
@@ -934,20 +917,6 @@ func (_u *APIKeyUpdateOne) SetStatus(v string) *APIKeyUpdateOne {
 func (_u *APIKeyUpdateOne) SetNillableStatus(v *string) *APIKeyUpdateOne {
 	if v != nil {
 		_u.SetStatus(*v)
-	}
-	return _u
-}
-
-// SetIsClaudeProxyKey sets the "is_claude_proxy_key" field.
-func (_u *APIKeyUpdateOne) SetIsClaudeProxyKey(v bool) *APIKeyUpdateOne {
-	_u.mutation.SetIsClaudeProxyKey(v)
-	return _u
-}
-
-// SetNillableIsClaudeProxyKey sets the "is_claude_proxy_key" field if the given value is not nil.
-func (_u *APIKeyUpdateOne) SetNillableIsClaudeProxyKey(v *bool) *APIKeyUpdateOne {
-	if v != nil {
-		_u.SetIsClaudeProxyKey(*v)
 	}
 	return _u
 }
@@ -1443,9 +1412,6 @@ func (_u *APIKeyUpdateOne) sqlSave(ctx context.Context) (_node *APIKey, err erro
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(apikey.FieldStatus, field.TypeString, value)
-	}
-	if value, ok := _u.mutation.IsClaudeProxyKey(); ok {
-		_spec.SetField(apikey.FieldIsClaudeProxyKey, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.LastUsedAt(); ok {
 		_spec.SetField(apikey.FieldLastUsedAt, field.TypeTime, value)
