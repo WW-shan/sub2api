@@ -1,3 +1,0 @@
-[submodule "tools/claude-code-proxy"]
-	path = tools/claude-code-proxy
-	url = https://github.com/1rgs/claude-code-proxy.git
