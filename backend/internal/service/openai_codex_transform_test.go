@@ -183,17 +183,20 @@ func TestApplyCodexOAuthTransform_EmptyInput(t *testing.T) {
 
 func TestNormalizeCodexModel_Gpt53(t *testing.T) {
 	cases := map[string]string{
-		"gpt-5.4":                   "gpt-5.4",
-		"gpt-5.4-high":              "gpt-5.4",
-		"gpt-5.4-chat-latest":       "gpt-5.4",
-		"gpt 5.4":                   "gpt-5.4",
-		"gpt-5.3":                   "gpt-5.3-codex",
-		"gpt-5.3-codex":             "gpt-5.3-codex",
-		"gpt-5.3-codex-xhigh":       "gpt-5.3-codex",
-		"gpt-5.3-codex-spark":       "gpt-5.3-codex",
-		"gpt-5.3-codex-spark-high":  "gpt-5.3-codex",
-		"gpt-5.3-codex-spark-xhigh": "gpt-5.3-codex",
-		"gpt 5.3 codex":             "gpt-5.3-codex",
+		"gpt-5.4":                    "gpt-5.4",
+		"gpt-5.4-high":               "gpt-5.4",
+		"gpt-5.4-chat-latest":        "gpt-5.4",
+		"gpt 5.4":                    "gpt-5.4",
+		"gpt-5.3":                    "gpt-5.3-codex",
+		"gpt-5.3-codex":              "gpt-5.3-codex",
+		"gpt-5.3-codex-xhigh":        "gpt-5.3-codex",
+		"gpt-5.3-codex-spark":        "gpt-5.3-codex",
+		"gpt-5.3-codex-spark-high":   "gpt-5.3-codex",
+		"gpt-5.3-codex-spark-xhigh":  "gpt-5.3-codex",
+		"gpt 5.3 codex":              "gpt-5.3-codex",
+		"claude-sonnet-4-5":          "gpt-5.4",
+		"claude-opus-4-6":            "gpt-5.4",
+		"claude-3-5-sonnet-20241022": "gpt-5.4",
 	}
 
 	for input, expected := range cases {
