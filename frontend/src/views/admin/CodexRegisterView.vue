@@ -73,12 +73,6 @@
             </p>
           </div>
           <div>
-            <p class="text-xs text-gray-500 dark:text-gray-400">注册模式</p>
-            <p class="mt-1 text-xs text-gray-800 dark:text-gray-200">
-              {{ status.register_mode === 'oauth_create' ? '自动 OAuth 建号' : 'Auth 导入' }}
-            </p>
-          </div>
-          <div>
             <p class="text-xs text-gray-500 dark:text-gray-400">累计更新账号数</p>
             <p class="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
               {{ status.total_updated }}
@@ -114,18 +108,6 @@
               {{ status.last_updated_email || status.last_updated_account_id || '暂无' }}
             </p>
           </div>
-          <div class="md:col-span-3">
-            <p class="text-xs text-gray-500 dark:text-gray-400">Codex 凭证目录</p>
-            <p class="mt-1 break-all text-xs text-gray-800 dark:text-gray-200">
-              {{ status.auth_dir || '未配置' }}
-            </p>
-          </div>
-          <div class="md:col-span-3">
-            <p class="text-xs text-gray-500 dark:text-gray-400">Sub2API 内部地址</p>
-            <p class="mt-1 break-all text-xs text-gray-800 dark:text-gray-200">
-              {{ status.sub2api_base_url || '未配置' }}
-            </p>
-          </div>
         </div>
 
         <div
@@ -145,16 +127,16 @@
 
       <div class="card space-y-3 p-6 text-sm text-gray-700 dark:text-gray-200">
         <p>
-          1. 当前默认模式是 <code>oauth_create</code>：<code>codex-register</code> 会复用后端已有的 OpenAI OAuth 建号链路，先生成授权地址，再由外部自动化注册器完成登录并回传 <code>code/state</code>。
+          1. 当前使用内置的 <code>codex-autp-register.py</code> 直接执行注册流程：自动创建 Mail.tm 邮箱、收取验证码、完成 OpenAI 注册并输出 token 文件。
         </p>
         <p>
-          2. 如果你仍要导入已有登录态，可把 <code>CODEX_REGISTER_MODE</code> 改为 <code>auth_import</code>，并将 <code>auth.json</code> 放到 <code>{{ status?.auth_dir || '/app/codex-auth' }}</code> 对应挂载目录。
+          2. <code>codex-register</code> 容器会读取脚本产出的 token 文件，自动写入 PostgreSQL 的 <code>accounts</code> 表，平台为 <code>openai</code>、类型为 <code>oauth</code>。
         </p>
         <p>
-          3. 自动建号成功后，会调用现有 <code>/admin/openai/create-from-oauth</code> 接口创建账号，并自动加入 <code>CODEX_GROUP_IDS</code> 指定分组，写入 <code>claude-* → gpt-5.4</code> 模型映射。
+          3. 新账号会自动加入 <code>CODEX_GROUP_IDS</code> 指定分组，并写入 <code>claude-*-sonnet*</code> / <code>claude-*-opus*</code> 到 <code>gpt-5.4</code> 的模型映射。
         </p>
         <p>
-          4. 自动模式需要配置 <code>CODEX_ADMIN_API_KEY</code> 与 <code>CODEX_BROWSER_REGISTER_URL</code>；可选配置 <code>CODEX_PROXY</code>、<code>CODEX_SLEEP_MIN</code>、<code>CODEX_SLEEP_MAX</code>、<code>CODEX_GROUP_IDS</code>。
+          4. 可选配置 <code>CODEX_PROXY</code>、<code>CODEX_SLEEP_MIN</code>、<code>CODEX_SLEEP_MAX</code>、<code>CODEX_GROUP_IDS</code>；无需额外桥接服务。
         </p>
       </div>
 

@@ -2,8 +2,6 @@ import { apiClient } from '@/api/client'
 
 export interface CodexStatus {
   enabled: boolean
-  register_mode: string
-  sub2api_base_url: string
   sleep_min: number
   sleep_max: number
   total_created: number
@@ -13,7 +11,6 @@ export interface CodexStatus {
   last_success: string | null
   last_error: string | null
   proxy: boolean
-  auth_dir: string
   last_token_email: string | null
   last_created_email: string | null
   last_created_account_id: string | null
