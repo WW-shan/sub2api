@@ -184,18 +184,11 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-sub2api}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       - POSTGRES_DB=${POSTGRES_DB:-sub2api}
-      - CODEX_REGISTER_MODE=${CODEX_REGISTER_MODE:-oauth_create}
-      - CODEX_SUB2API_BASE_URL=${CODEX_SUB2API_BASE_URL:-http://sub2api:8080/api/v1}
-      - CODEX_ADMIN_API_KEY=${CODEX_ADMIN_API_KEY:-}
-      - CODEX_BROWSER_REGISTER_URL=${CODEX_BROWSER_REGISTER_URL:-}
       - CODEX_PROXY=${CODEX_PROXY:-}
       - CODEX_SLEEP_MIN=${CODEX_SLEEP_MIN:-5}
       - CODEX_SLEEP_MAX=${CODEX_SLEEP_MAX:-30}
       - CODEX_GROUP_IDS=${CODEX_GROUP_IDS:-}
-      - CODEX_AUTH_DIR=/app/codex-auth
       - TZ=${TZ:-Asia/Shanghai}
-    volumes:
-      - ./codex_auth:/app/codex-auth:ro
     depends_on:
       postgres:
         condition: service_healthy

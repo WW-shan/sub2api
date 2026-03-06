@@ -3,8 +3,6 @@ import os
 import random
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -26,9 +24,6 @@ total_skipped = 0
 sleep_min_global = 0
 sleep_max_global = 0
 tokens_dir_global = None
-auth_dir_global = ""
-register_mode_global = ""
-sub2api_base_url_global = ""
 last_token_email = ""
 last_created_email = ""
 last_created_account_id = ""
@@ -83,77 +78,9 @@ def parse_group_ids() -> List[int]:
 
 def build_model_mapping() -> dict:
     return {
-        "claude-*": "gpt-5.4",
+        "claude-*-sonnet*": "gpt-5.4",
+        "claude-*-opus*": "gpt-5.4",
     }
-
-
-def get_register_mode() -> str:
-    mode = get_env("CODEX_REGISTER_MODE", "oauth_create").strip().lower()
-    if mode in {"oauth", "oauth_create", "oauth-register"}:
-        return "oauth_create"
-    if mode in {"auth_import", "auth-import", "import"}:
-        return "auth_import"
-    return "oauth_create"
-
-
-def get_sub2api_base_url() -> str:
-    return get_env("CODEX_SUB2API_BASE_URL", "http://sub2api:8080/api/v1").rstrip("/")
-
-
-def get_admin_api_key() -> str:
-    return get_env("CODEX_ADMIN_API_KEY", "")
-
-
-def admin_post_json(path: str, payload: dict) -> dict:
-    url = f"{get_sub2api_base_url()}{path}"
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": get_admin_api_key(),
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = response.read().decode("utf-8")
-            if not body:
-                return {}
-            data = json.loads(body)
-            if isinstance(data, dict):
-                if isinstance(data.get("data"), dict):
-                    return data["data"]
-                return data
-            return {}
-    except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"admin endpoint {path} failed: {exc.code} {error_body}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"admin endpoint {path} unreachable: {exc}") from exc
-
-
-def generate_oauth_session() -> dict:
-    return admin_post_json("/admin/openai/generate-auth-url", {})
-
-
-def create_account_from_oauth(code_info: dict) -> dict:
-    payload = {
-        "session_id": code_info.get("session_id") or "",
-        "code": code_info.get("code") or "",
-        "state": code_info.get("state") or "",
-        "name": code_info.get("name") or f"codex-{int(time.time())}",
-        "concurrency": int(code_info.get("concurrency") or 3),
-        "priority": int(code_info.get("priority") or 50),
-        "group_ids": parse_group_ids(),
-    }
-    redirect_uri = code_info.get("redirect_uri")
-    if redirect_uri:
-        payload["redirect_uri"] = redirect_uri
-    proxy_id = code_info.get("proxy_id")
-    if proxy_id:
-        payload["proxy_id"] = proxy_id
-    return admin_post_json("/admin/openai/create-from-oauth", payload)
 
 
 def get_env(name: str, default=None, required: bool = False) -> str:
@@ -188,18 +115,9 @@ def run_codex_once(tokens_dir: Path):
     tokens_dir.mkdir(parents=True, exist_ok=True)
 
     proxy = get_env("CODEX_PROXY", "")
-    register_mode = get_register_mode()
-
     cmd = ["python", str(script_path), "--once"]
     if proxy:
         cmd.extend(["--proxy", proxy])
-    if register_mode == "oauth_create":
-        session = generate_oauth_session()
-        auth_url = str(session.get("auth_url") or "").strip()
-        session_id = str(session.get("session_id") or "").strip()
-        if not auth_url or not session_id:
-            raise RuntimeError("generate-auth-url returned empty auth_url/session_id")
-        cmd.extend(["--auth-url", auth_url, "--session-id", session_id])
 
     print("[codex-register] 启动注册脚本:", " ".join(cmd), flush=True)
 
@@ -243,20 +161,6 @@ def run_codex_once(tokens_dir: Path):
     return token_infos
 
 
-def create_account_via_existing_oauth_flow(code_info: dict) -> str:
-    session_id = str(code_info.get("session_id") or "").strip()
-    code = str(code_info.get("code") or "").strip()
-    state = str(code_info.get("state") or "").strip()
-    if not session_id or not code or not state:
-        append_log("warn", "skip_missing_oauth_callback_fields")
-        return "skipped"
-    result = create_account_from_oauth(code_info)
-    identifier = str(result.get("name") or result.get("id") or session_id)
-    print(f"[codex-register] 已通过现有 OAuth 流程创建账号: {identifier}", flush=True)
-    append_log("info", f"created_via_oauth:{identifier}")
-    return "created"
-
-
 def get_existing_account(cur, email: str, account_id: str):
     conditions = []
     params = []
@@ -297,6 +201,7 @@ def build_credentials(existing: dict, token_info: dict) -> dict:
         credentials["email"] = token_info.get("email")
     if token_info.get("account_id"):
         credentials["account_id"] = token_info.get("account_id")
+        credentials["chatgpt_account_id"] = token_info.get("account_id")
     if token_info.get("expired") is not None:
         credentials["expires_at"] = token_info.get("expired")
     credentials["source"] = "codex-auto-register"
@@ -333,6 +238,7 @@ def upsert_account(cur, token_info: dict) -> str:
         current_credentials = ensure_dict(existing_credentials)
         current_extra = ensure_dict(existing_extra)
         if credentials == current_credentials and extra == current_extra:
+            bind_groups(cur, existing_id, group_ids)
             print(f"[codex-register] 账号无需更新，跳过: {email or account_id}", flush=True)
             append_log("info", f"skip_unchanged:{email or account_id}")
             return "skipped"
@@ -386,10 +292,7 @@ def run_one_cycle(tokens_dir: Path) -> None:
                 identifier = token_info.get("email") or token_info.get("account_id") or token_info.get("name") or ""
                 if identifier:
                     last_token_email = identifier
-                if get_register_mode() == "oauth_create" and token_info.get("code"):
-                    action = create_account_via_existing_oauth_flow(token_info)
-                else:
-                    action = upsert_account(cur, token_info)
+                action = upsert_account(cur, token_info)
                 if action == "created":
                     total_created += 1
                     last_created_email = token_info.get("email") or ""
@@ -436,8 +339,6 @@ def get_status_payload() -> dict:
     proxy = get_env("CODEX_PROXY", "")
     return {
         "enabled": enabled,
-        "register_mode": register_mode_global,
-        "sub2api_base_url": sub2api_base_url_global,
         "sleep_min": sleep_min_global,
         "sleep_max": sleep_max_global,
         "total_created": total_created,
@@ -447,7 +348,6 @@ def get_status_payload() -> dict:
         "last_success": last_success.isoformat() + "Z" if last_success else None,
         "last_error": last_error,
         "proxy": bool(proxy),
-        "auth_dir": auth_dir_global,
         "last_token_email": last_token_email or None,
         "last_created_email": last_created_email or None,
         "last_created_account_id": last_created_account_id or None,
@@ -539,7 +439,7 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    global sleep_min_global, sleep_max_global, tokens_dir_global, auth_dir_global, register_mode_global, sub2api_base_url_global
+    global sleep_min_global, sleep_max_global, tokens_dir_global
     sleep_min = int(get_env("CODEX_SLEEP_MIN", "5"))
     sleep_max = int(get_env("CODEX_SLEEP_MAX", "30"))
     if sleep_min < 1:
@@ -549,12 +449,9 @@ def main() -> None:
 
     sleep_min_global = sleep_min
     sleep_max_global = sleep_max
-    register_mode_global = get_register_mode()
-    sub2api_base_url_global = get_sub2api_base_url()
 
     tokens_dir = Path("/app/codex-auto-register-main/tokens")
     tokens_dir_global = tokens_dir
-    auth_dir_global = get_env("CODEX_AUTH_DIR", "/app/codex-auth")
 
     worker = threading.Thread(target=worker_loop, args=(tokens_dir, sleep_min, sleep_max), daemon=True)
     worker.start()
