@@ -4449,13 +4449,21 @@ func (s *GatewayService) forwardOpenAIResponsesAsClaudeCompat(
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(openAIBody))
+	buildOpenAICompatRequest := func(requestBody []byte) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(requestBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("content-type", "application/json")
+		req.Header.Set("accept", "text/event-stream")
+		req.Header.Set("authorization", "Bearer "+token)
+		return req, nil
+	}
+
+	req, err := buildOpenAICompatRequest(openAIBody)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("accept", "text/event-stream")
-	req.Header.Set("authorization", "Bearer "+token)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
@@ -4470,6 +4478,35 @@ func (s *GatewayService) forwardOpenAIResponsesAsClaudeCompat(
 		return nil, fmt.Errorf("openai upstream request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusBadRequest {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		if readErr == nil {
+			_ = resp.Body.Close()
+
+			retriedWithoutMetadata := false
+			if isOpenAIUnsupportedMetadataError(respBody) {
+				if fallbackBody, removed := dropTopLevelJSONField(openAIBody, "metadata"); removed {
+					retryReq, reqErr := buildOpenAICompatRequest(fallbackBody)
+					if reqErr == nil {
+						retryResp, retryErr := s.httpUpstream.DoWithTLS(retryReq, proxyURL, account.ID, account.Concurrency, account.IsTLSFingerprintEnabled())
+						if retryErr == nil && retryResp != nil {
+							resp = retryResp
+							retriedWithoutMetadata = true
+						} else {
+							if retryResp != nil && retryResp.Body != nil {
+								_ = retryResp.Body.Close()
+							}
+						}
+					}
+				}
+			}
+
+			if !retriedWithoutMetadata {
+				resp.Body = io.NopCloser(bytes.NewReader(respBody))
+			}
+		}
+	}
 
 	if resp.StatusCode >= 400 {
 		return s.handleErrorResponse(ctx, resp, c, account)
@@ -4515,6 +4552,41 @@ func (s *GatewayService) forwardOpenAIResponsesAsClaudeCompat(
 		Duration:     time.Since(startTime),
 		FirstTokenMs: nil,
 	}, nil
+}
+
+func dropTopLevelJSONField(body []byte, field string) ([]byte, bool) {
+	if strings.TrimSpace(field) == "" {
+		return body, false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body, false
+	}
+	if _, exists := payload[field]; !exists {
+		return body, false
+	}
+	delete(payload, field)
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
+func isOpenAIUnsupportedMetadataError(respBody []byte) bool {
+	msg := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
+	if msg == "" {
+		msg = strings.ToLower(strings.TrimSpace(string(respBody)))
+	}
+	if msg == "" {
+		return false
+	}
+	if !strings.Contains(msg, "metadata") {
+		return false
+	}
+	return strings.Contains(msg, "unsupported parameter") ||
+		strings.Contains(msg, "unknown parameter") ||
+		strings.Contains(msg, "unsupported field")
 }
 
 func buildOpenAIResponsesBodyFromAnthropicRequest(body []byte, model string, stream bool, forceStoreFalse bool) ([]byte, error) {

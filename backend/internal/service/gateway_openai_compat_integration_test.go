@@ -16,6 +16,38 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+type sequentialHTTPUpstreamRecorder struct {
+	responses []*http.Response
+	lastReq   *http.Request
+	lastBody  []byte
+	allBodies [][]byte
+	err       error
+}
+
+func (u *sequentialHTTPUpstreamRecorder) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	u.lastReq = req
+	if req != nil && req.Body != nil {
+		b, _ := io.ReadAll(req.Body)
+		u.lastBody = b
+		u.allBodies = append(u.allBodies, b)
+		_ = req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(b))
+	}
+	if u.err != nil {
+		return nil, u.err
+	}
+	if len(u.responses) == 0 {
+		return nil, io.EOF
+	}
+	resp := u.responses[0]
+	u.responses = u.responses[1:]
+	return resp, nil
+}
+
+func (u *sequentialHTTPUpstreamRecorder) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, enableTLSFingerprint bool) (*http.Response, error) {
+	return u.Do(req, proxyURL, accountID, accountConcurrency)
+}
+
 func TestGatewayService_Forward_OpenAICompatProviderModelAndToolChoice(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -88,6 +120,125 @@ func TestGatewayService_Forward_OpenAICompatProviderModelAndToolChoice(t *testin
 	respJSON := rec.Body.Bytes()
 	require.Equal(t, "openai/gpt-5.3", gjson.GetBytes(respJSON, "model").String())
 	require.Equal(t, "text", gjson.GetBytes(respJSON, "content.0.type").String())
+	require.Equal(t, "ok", gjson.GetBytes(respJSON, "content.0.text").String())
+}
+
+func TestGatewayService_Forward_OpenAICompatMetadataAndOutputConfigMapping(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(nil))
+
+	body := []byte(`{
+		"model":"openai/gpt-5.3",
+		"stream":false,
+		"max_tokens":128,
+		"metadata":{"user_id":"user_compat_1","trace_id":"trace_compat_1"},
+		"output_config":{"effort":"HIGH"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`)
+
+	parsed, err := ParseGatewayRequest(body, domain.PlatformAnthropic)
+	require.NoError(t, err)
+
+	upstream := &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid-openai-compat-metadata"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_2","output_text":"ok","usage":{"input_tokens":9,"output_tokens":6}}`)),
+		},
+	}
+
+	svc := &GatewayService{
+		httpUpstream: upstream,
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}},
+		},
+	}
+	account := &Account{
+		ID:             15,
+		Name:           "openai-apikey",
+		Platform:       PlatformOpenAI,
+		Type:           AccountTypeAPIKey,
+		Concurrency:    1,
+		Credentials:    map[string]any{"api_key": "sk-test", "base_url": "https://api.openai.com"},
+		Status:         StatusActive,
+		Schedulable:    true,
+		RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, parsed)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Stream)
+
+	require.Equal(t, "user_compat_1", gjson.GetBytes(upstream.lastBody, "metadata.user_id").String())
+	require.Equal(t, "trace_compat_1", gjson.GetBytes(upstream.lastBody, "metadata.trace_id").String())
+	require.Equal(t, "high", gjson.GetBytes(upstream.lastBody, "reasoning.effort").String())
+}
+
+func TestGatewayService_Forward_OpenAICompatFallbackWithoutMetadataOnUnsupportedParameter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(nil))
+
+	body := []byte(`{
+		"model":"openai/gpt-5.3",
+		"stream":false,
+		"max_tokens":128,
+		"metadata":{"user_id":"user_fallback_1"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`)
+
+	parsed, err := ParseGatewayRequest(body, domain.PlatformAnthropic)
+	require.NoError(t, err)
+
+	upstream := &sequentialHTTPUpstreamRecorder{
+		responses: []*http.Response{
+			{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid-openai-unsupported-metadata"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"invalid_request_error","message":"Unsupported parameter: metadata"}}`)),
+			},
+			{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid-openai-fallback-ok"}},
+				Body:       io.NopCloser(strings.NewReader(`{"id":"resp_fallback","output_text":"ok","usage":{"input_tokens":7,"output_tokens":4}}`)),
+			},
+		},
+	}
+
+	svc := &GatewayService{
+		httpUpstream: upstream,
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}},
+		},
+	}
+	account := &Account{
+		ID:             16,
+		Name:           "openai-apikey",
+		Platform:       PlatformOpenAI,
+		Type:           AccountTypeAPIKey,
+		Concurrency:    1,
+		Credentials:    map[string]any{"api_key": "sk-test", "base_url": "https://api.openai.com"},
+		Status:         StatusActive,
+		Schedulable:    true,
+		RateMultiplier: f64p(1),
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, parsed)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Stream)
+
+	require.Len(t, upstream.allBodies, 2)
+	require.True(t, gjson.GetBytes(upstream.allBodies[0], "metadata").Exists())
+	require.False(t, gjson.GetBytes(upstream.allBodies[1], "metadata").Exists())
+
+	respJSON := rec.Body.Bytes()
 	require.Equal(t, "ok", gjson.GetBytes(respJSON, "content.0.text").String())
 }
 
