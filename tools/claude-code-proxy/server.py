@@ -1466,6 +1466,11 @@ async def count_tokens(
 async def root():
     return {"message": "Anthropic Proxy for LiteLLM"}
 
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
 # Define ANSI color codes for terminal output
 class Colors:
     CYAN = "\033[96m"
