@@ -89,6 +89,7 @@ func TestConvertAnthropicMessagesToOpenAIInput_ThinkingToolUseAndToolResult(t *t
 	functionCall, ok := out[1].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "function_call", functionCall["type"])
+	require.Equal(t, "fc_toolu_123", functionCall["id"])
 	require.Equal(t, "toolu_123", functionCall["call_id"])
 	require.Equal(t, "read", functionCall["name"])
 
@@ -108,6 +109,30 @@ func TestConvertAnthropicMessagesToOpenAIInput_ThinkingToolUseAndToolResult(t *t
 	require.Equal(t, "function_call_output", functionOutput["type"])
 	require.Equal(t, "toolu_123", functionOutput["call_id"])
 	require.Equal(t, "file content", functionOutput["output"])
+}
+
+func TestConvertAnthropicMessagesToOpenAIInput_ToolUseWithoutID_UsesFCPrefixedItemID(t *testing.T) {
+	messages := []any{
+		map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "tool_use", "name": "read", "input": map[string]any{"path": "/tmp/a.txt"}},
+			},
+		},
+	}
+
+	out := convertAnthropicMessagesToOpenAIInput(messages)
+	require.Len(t, out, 1)
+
+	functionCall, ok := out[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "function_call", functionCall["type"])
+	id, _ := functionCall["id"].(string)
+	callID, _ := functionCall["call_id"].(string)
+	require.NotEmpty(t, id)
+	require.NotEmpty(t, callID)
+	require.Contains(t, id, "fc_")
+	require.Contains(t, callID, "call_")
 }
 
 func TestConvertAnthropicMessagesToOpenAIInput_PreservesInterleavedOrder(t *testing.T) {

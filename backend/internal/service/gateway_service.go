@@ -4933,13 +4933,11 @@ func convertAnthropicMessagesToOpenAIInput(messagesRaw []any) []any {
 							argsJSON = string(encoded)
 						}
 					}
-					if strings.TrimSpace(callID) == "" {
-						callID = "call_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-					}
+					itemID, callID := buildOpenAIResponsesFunctionCallIDs(callID)
 					if strings.TrimSpace(name) != "" {
 						out = append(out, map[string]any{
 							"type":      "function_call",
-							"id":        callID,
+							"id":        itemID,
 							"call_id":   callID,
 							"name":      name,
 							"arguments": argsJSON,
@@ -4975,6 +4973,43 @@ func convertAnthropicMessagesToOpenAIInput(messagesRaw []any) []any {
 		}
 	}
 	return out
+}
+
+func buildOpenAIResponsesFunctionCallIDs(rawCallID string) (itemID string, callID string) {
+	callID = strings.TrimSpace(rawCallID)
+	if callID == "" {
+		callID = "call_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	}
+
+	if strings.HasPrefix(callID, "fc_") {
+		return callID, callID
+	}
+
+	base := strings.TrimPrefix(callID, "call_")
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = strings.ReplaceAll(uuid.NewString(), "-", "")
+	}
+
+	sanitized := sanitizeOpenAIResponseID(base)
+	if sanitized == "" {
+		sanitized = strings.ReplaceAll(uuid.NewString(), "-", "")
+	}
+	return "fc_" + sanitized, callID
+}
+
+func sanitizeOpenAIResponseID(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	buf := make([]rune, 0, len(v))
+	for _, r := range v {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			buf = append(buf, r)
+		}
+	}
+	return strings.TrimSpace(string(buf))
 }
 
 func openAIResponsesMessageTextTypeForRole(role string) string {
