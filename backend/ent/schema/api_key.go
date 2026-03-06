@@ -47,6 +47,8 @@ func (APIKey) Fields() []ent.Field {
 		field.String("status").
 			MaxLen(20).
 			Default(domain.StatusActive),
+		field.Bool("is_claude_proxy_key").
+			Default(false),
 		field.Time("last_used_at").
 			Optional().
 			Nillable().

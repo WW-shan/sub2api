@@ -206,7 +206,7 @@ services:
     restart: unless-stopped
     environment:
       - OPENAI_API_KEY=${CLAUDE_PROXY_OPENAI_API_KEY:-}
-      - OPENAI_BASE_URL=${CLAUDE_PROXY_OPENAI_BASE_URL:-}
+      - OPENAI_BASE_URL=${CLAUDE_PROXY_OPENAI_BASE_URL:-https://ai.wwcloud.me/v1}
       - PREFERRED_PROVIDER=${CLAUDE_PROXY_PREFERRED_PROVIDER:-openai}
       - BIG_MODEL=${CLAUDE_PROXY_BIG_MODEL:-}
       - SMALL_MODEL=${CLAUDE_PROXY_SMALL_MODEL:-}
