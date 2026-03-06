@@ -6,6 +6,8 @@ import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import List, Optional, Set
 
@@ -14,6 +16,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--proxy")
+    parser.add_argument("--auth-url")
+    parser.add_argument("--session-id")
     parser.add_argument("--help", action="help")
     return parser.parse_args()
 
@@ -167,10 +171,62 @@ def write_token_files(tokens_dir: Path, payloads: List[dict]) -> int:
     return written
 
 
+def call_browser_register(args: argparse.Namespace) -> List[dict]:
+    endpoint = as_str(os.getenv("CODEX_BROWSER_REGISTER_URL"))
+    if not endpoint:
+        print("[codex-autp-register] CODEX_BROWSER_REGISTER_URL not configured", flush=True)
+        return []
+
+    payload = {
+        "auth_url": as_str(args.auth_url),
+        "session_id": as_str(args.session_id),
+        "proxy": as_str(args.proxy),
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        print(f"[codex-autp-register] browser register failed: {exc.code} {body}", flush=True)
+        return []
+    except urllib.error.URLError as exc:
+        print(f"[codex-autp-register] browser register unreachable: {exc}", flush=True)
+        return []
+
+    try:
+        data = json.loads(body) if body else {}
+    except Exception as exc:
+        print(f"[codex-autp-register] invalid browser register response: {exc}", flush=True)
+        return []
+
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        return [item for item in data["items"] if isinstance(item, dict)]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
 def main() -> int:
-    _ = parse_args()
+    args = parse_args()
 
     tokens_dir = Path("tokens")
+    if as_str(args.auth_url):
+        payloads = call_browser_register(args)
+        written = write_token_files(tokens_dir, payloads)
+        print(
+            f"[codex-autp-register] oauth automation wrote {written} callback file(s)",
+            flush=True,
+        )
+        return 0
+
     auth_files = auth_file_candidates()
     if not auth_files:
         print("[codex-autp-register] no Codex auth files found", flush=True)
