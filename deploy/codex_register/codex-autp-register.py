@@ -1,28 +1,194 @@
 #!/usr/bin/env python
+import argparse
+import base64
+import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
+from typing import List, Optional, Set
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--proxy")
+    parser.add_argument("--help", action="help")
+    return parser.parse_args()
+
+
+def as_str(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def as_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    raw = as_str(value)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def decode_jwt_payload(raw_token: str) -> dict:
+    token = as_str(raw_token)
+    if not token or token.count(".") < 2:
+        return {}
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def normalize_id_token(raw_value) -> tuple[str, dict]:
+    if isinstance(raw_value, dict):
+        raw_jwt = as_str(raw_value.get("raw_jwt") or raw_value.get("raw") or raw_value.get("token"))
+        claims = decode_jwt_payload(raw_jwt)
+        for key in ("email", "sub", "exp"):
+            if raw_value.get(key) is not None and claims.get(key) is None:
+                claims[key] = raw_value.get(key)
+        return raw_jwt, claims
+    raw_jwt = as_str(raw_value)
+    return raw_jwt, decode_jwt_payload(raw_jwt)
+
+
+def auth_file_candidates() -> List[Path]:
+    candidates: List[Path] = []
+    env_file = as_str(os.getenv("CODEX_AUTH_FILE"))
+    if env_file:
+        path = Path(env_file)
+        if path.is_file():
+            candidates.append(path)
+
+    auth_dir = Path(as_str(os.getenv("CODEX_AUTH_DIR")) or "/app/codex-auth")
+    if auth_dir.is_dir():
+        for path in sorted(auth_dir.rglob("*.json")):
+            if not path.is_file():
+                continue
+            if "/tokens/" in path.as_posix():
+                continue
+            candidates.append(path)
+
+    deduped: List[Path] = []
+    seen: Set[str] = set()
+    for path in candidates:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def normalize_token_payload(data: dict, source_file: Path) -> Optional[dict]:
+    access_token = as_str(data.get("access_token"))
+    refresh_token = as_str(data.get("refresh_token"))
+    id_token_raw, claims = normalize_id_token(data.get("id_token"))
+    auth_claims = claims.get("https://api.openai.com/auth")
+    if not isinstance(auth_claims, dict):
+        auth_claims = {}
+
+    email = as_str(data.get("email")) or as_str(claims.get("email"))
+    account_id = (
+        as_str(data.get("account_id"))
+        or as_str(auth_claims.get("chatgpt_account_id"))
+        or as_str(auth_claims.get("user_id"))
+    )
+    expired = (
+        as_int(data.get("expired"))
+        or as_int(data.get("expires_at"))
+        or as_int(claims.get("exp"))
+    )
+
+    if not any([access_token, refresh_token, id_token_raw, email, account_id]):
+        return None
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "id_token": id_token_raw,
+        "email": email,
+        "account_id": account_id,
+        "expired": expired,
+        "source": as_str(data.get("source")) or "codex-auth-json",
+        "auth_file": str(source_file),
+    }
+
+
+def parse_auth_file(path: Path) -> Optional[dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[codex-autp-register] failed to parse {path}: {exc}", flush=True)
+        return None
+
+    if isinstance(data, dict) and isinstance(data.get("tokens"), dict):
+        tokens = dict(data.get("tokens") or {})
+        tokens.setdefault("source", "codex-auth-json")
+        return normalize_token_payload(tokens, path)
+
+    if isinstance(data, dict):
+        return normalize_token_payload(data, path)
+
+    return None
+
+
+def write_token_files(tokens_dir: Path, payloads: List[dict]) -> int:
+    tokens_dir.mkdir(parents=True, exist_ok=True)
+    for old_file in tokens_dir.glob("*.json"):
+        try:
+            old_file.unlink()
+        except OSError:
+            pass
+
+    written = 0
+    for payload in payloads:
+        source_key = payload.get("email") or payload.get("account_id") or payload.get("auth_file") or str(time.time())
+        digest = hashlib.sha1(as_str(source_key).encode("utf-8")).hexdigest()[:12]
+        out_path = tokens_dir / f"token-{digest}.json"
+        out_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        written += 1
+    return written
 
 
 def main() -> int:
+    _ = parse_args()
+
     tokens_dir = Path("tokens")
-    tokens_dir.mkdir(parents=True, exist_ok=True)
+    auth_files = auth_file_candidates()
+    if not auth_files:
+        print("[codex-autp-register] no Codex auth files found", flush=True)
+        write_token_files(tokens_dir, [])
+        return 0
 
-    payload = {
-        "access_token": "",
-        "refresh_token": "",
-        "id_token": "",
-        "account_id": "",
-        "expired": int(time.time()) + 3600,
-        "source": "codex-auto-register-stub",
-    }
+    payloads: List[dict] = []
+    for path in auth_files:
+        payload = parse_auth_file(path)
+        if payload is None:
+            continue
+        payloads.append(payload)
 
-    ts = int(time.time())
-    out_path = tokens_dir / f"token-{ts}.json"
-    out_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-
-    print(f"[codex-autp-register] wrote stub token file: {out_path}", flush=True)
+    written = write_token_files(tokens_dir, payloads)
+    print(
+        f"[codex-autp-register] discovered {len(auth_files)} auth file(s), wrote {written} token file(s)",
+        flush=True,
+    )
     return 0
 
 

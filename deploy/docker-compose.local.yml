@@ -187,7 +187,11 @@ services:
       - CODEX_PROXY=${CODEX_PROXY:-}
       - CODEX_SLEEP_MIN=${CODEX_SLEEP_MIN:-5}
       - CODEX_SLEEP_MAX=${CODEX_SLEEP_MAX:-30}
+      - CODEX_GROUP_IDS=${CODEX_GROUP_IDS:-}
+      - CODEX_AUTH_DIR=/app/codex-auth
       - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - ./codex_auth:/app/codex-auth:ro
     depends_on:
       postgres:
         condition: service_healthy
