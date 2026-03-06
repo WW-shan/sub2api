@@ -310,3 +310,73 @@ func TestConvertOpenAIResponsesJSONToClaude_UsesRefusalText(t *testing.T) {
 	require.Equal(t, "text", claude["content"].([]any)[0].(map[string]any)["type"])
 	require.Equal(t, "I cannot help with that.", claude["content"].([]any)[0].(map[string]any)["text"])
 }
+
+func TestBuildOpenAIResponsesBodyFromAnthropicRequest_UsesSkillsAndPluginsAsTools(t *testing.T) {
+	body := []byte(`{
+		"model":"openai/gpt-5.3",
+		"stream":false,
+		"max_tokens":128,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"skills":[
+			{"name":"TodoWrite","description":"write todo list","input_schema":{"type":"object","properties":{"todos":{"type":"array"}}}},
+			{"function":{"name":"Read","description":"read file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}
+		],
+		"plugins":[
+			{"name":"TodoWrite","description":"duplicate todo plugin"},
+			{"name":"Search","description":"search code"}
+		]
+	}`)
+
+	outBody, err := buildOpenAIResponsesBodyFromAnthropicRequest(body, "openai/gpt-5.3", false, false)
+	require.NoError(t, err)
+
+	require.Equal(t, 3, len(gjson.GetBytes(outBody, "tools").Array()))
+	require.Equal(t, "TodoWrite", gjson.GetBytes(outBody, "tools.0.name").String())
+	require.Equal(t, "Read", gjson.GetBytes(outBody, "tools.1.name").String())
+	require.Equal(t, "Search", gjson.GetBytes(outBody, "tools.2.name").String())
+	require.Equal(t, "object", gjson.GetBytes(outBody, "tools.2.parameters.type").String())
+}
+
+func TestBuildOpenAIResponsesBodyFromAnthropicRequest_PreservesMetadata(t *testing.T) {
+	body := []byte(`{
+		"model":"openai/gpt-5.3",
+		"stream":false,
+		"max_tokens":128,
+		"metadata":{"user_id":"user_abc","trace_id":"trace_1"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	outBody, err := buildOpenAIResponsesBodyFromAnthropicRequest(body, "openai/gpt-5.3", false, false)
+	require.NoError(t, err)
+	require.Equal(t, "user_abc", gjson.GetBytes(outBody, "metadata.user_id").String())
+	require.Equal(t, "trace_1", gjson.GetBytes(outBody, "metadata.trace_id").String())
+}
+
+func TestBuildOpenAIResponsesBodyFromAnthropicRequest_MapsOutputConfigEffortToReasoning(t *testing.T) {
+	body := []byte(`{
+		"model":"openai/gpt-5.3",
+		"stream":false,
+		"max_tokens":128,
+		"output_config":{"effort":"HIGH"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	outBody, err := buildOpenAIResponsesBodyFromAnthropicRequest(body, "openai/gpt-5.3", false, false)
+	require.NoError(t, err)
+	require.Equal(t, "high", gjson.GetBytes(outBody, "reasoning.effort").String())
+}
+
+func TestBuildOpenAIResponsesBodyFromAnthropicRequest_ReasoningTakesPriorityOverOutputConfig(t *testing.T) {
+	body := []byte(`{
+		"model":"openai/gpt-5.3",
+		"stream":false,
+		"max_tokens":128,
+		"reasoning":{"effort":"medium"},
+		"output_config":{"effort":"high"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	outBody, err := buildOpenAIResponsesBodyFromAnthropicRequest(body, "openai/gpt-5.3", false, false)
+	require.NoError(t, err)
+	require.Equal(t, "medium", gjson.GetBytes(outBody, "reasoning.effort").String())
+}

@@ -936,10 +936,8 @@ func normalizeClaudeOAuthRequestBody(body []byte, modelID string, opts claudeOAu
 		delete(req, "temperature")
 		modified = true
 	}
-	if _, hasChoice := req["tool_choice"]; hasChoice {
-		delete(req, "tool_choice")
-		modified = true
-	}
+	// Preserve tool_choice to avoid dropping explicit tool intent
+	// (e.g. Claude Code TodoWrite/Read tool routing).
 
 	if !modified {
 		return body, modelID
@@ -4551,6 +4549,18 @@ func buildOpenAIResponsesBodyFromAnthropicRequest(body []byte, model string, str
 		}
 	}
 
+	if metadata, ok := reqBody["metadata"]; ok && metadata != nil {
+		out["metadata"] = metadata
+	}
+
+	if reasoning, ok := reqBody["reasoning"]; ok && reasoning != nil {
+		out["reasoning"] = reasoning
+	} else if outputConfig, ok := reqBody["output_config"]; ok {
+		if mappedReasoning, ok := mapAnthropicOutputConfigToOpenAIReasoning(outputConfig); ok {
+			out["reasoning"] = mappedReasoning
+		}
+	}
+
 	if messagesRaw, ok := reqBody["messages"].([]any); ok {
 		input := convertAnthropicMessagesToOpenAIInput(messagesRaw)
 		if len(input) > 0 {
@@ -4560,6 +4570,25 @@ func buildOpenAIResponsesBodyFromAnthropicRequest(body []byte, model string, str
 
 	if toolsRaw, ok := reqBody["tools"].([]any); ok {
 		tools := convertAnthropicToolsToOpenAITools(toolsRaw)
+		if skillsRaw, ok := reqBody["skills"].([]any); ok {
+			tools = append(tools, convertAnthropicToolsToOpenAITools(skillsRaw)...)
+		}
+		if pluginsRaw, ok := reqBody["plugins"].([]any); ok {
+			tools = append(tools, convertAnthropicToolsToOpenAITools(pluginsRaw)...)
+		}
+		tools = dedupeOpenAIToolsByName(tools)
+		if len(tools) > 0 {
+			out["tools"] = tools
+		}
+	} else {
+		tools := make([]map[string]any, 0)
+		if skillsRaw, ok := reqBody["skills"].([]any); ok {
+			tools = append(tools, convertAnthropicToolsToOpenAITools(skillsRaw)...)
+		}
+		if pluginsRaw, ok := reqBody["plugins"].([]any); ok {
+			tools = append(tools, convertAnthropicToolsToOpenAITools(pluginsRaw)...)
+		}
+		tools = dedupeOpenAIToolsByName(tools)
 		if len(tools) > 0 {
 			out["tools"] = tools
 		}
@@ -4576,6 +4605,20 @@ func buildOpenAIResponsesBodyFromAnthropicRequest(body []byte, model string, str
 	}
 
 	return json.Marshal(out)
+}
+
+func mapAnthropicOutputConfigToOpenAIReasoning(outputConfig any) (map[string]any, bool) {
+	m, ok := outputConfig.(map[string]any)
+	if !ok || len(m) == 0 {
+		return nil, false
+	}
+	effort, _ := m["effort"].(string)
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium", "high":
+		return map[string]any{"effort": strings.ToLower(strings.TrimSpace(effort))}, true
+	default:
+		return nil, false
+	}
 }
 
 func buildAnthropicMessagesURL(base string) string {
@@ -4624,19 +4667,62 @@ func convertAnthropicToolsToOpenAITools(toolsRaw []any) []map[string]any {
 		}
 		name, _ := tool["name"].(string)
 		if strings.TrimSpace(name) == "" {
+			if fn, ok := tool["function"].(map[string]any); ok {
+				name, _ = fn["name"].(string)
+			}
+		}
+		if strings.TrimSpace(name) == "" {
 			continue
 		}
 		t := map[string]any{
 			"type": "function",
 			"name": name,
 		}
-		if desc, ok := tool["description"].(string); ok && strings.TrimSpace(desc) != "" {
+		desc, _ := tool["description"].(string)
+		if strings.TrimSpace(desc) == "" {
+			if fn, ok := tool["function"].(map[string]any); ok {
+				desc, _ = fn["description"].(string)
+			}
+		}
+		if strings.TrimSpace(desc) != "" {
 			t["description"] = desc
 		}
 		if schema, ok := tool["input_schema"]; ok && schema != nil {
 			t["parameters"] = schema
+		} else if schema, ok := tool["parameters"]; ok && schema != nil {
+			t["parameters"] = schema
+		} else if schema, ok := tool["schema"]; ok && schema != nil {
+			t["parameters"] = schema
+		} else if fn, ok := tool["function"].(map[string]any); ok {
+			if schema, ok := fn["parameters"]; ok && schema != nil {
+				t["parameters"] = schema
+			}
+		}
+		if _, ok := t["parameters"]; !ok {
+			t["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
 		out = append(out, t)
+	}
+	return out
+}
+
+func dedupeOpenAIToolsByName(tools []map[string]any) []map[string]any {
+	if len(tools) <= 1 {
+		return tools
+	}
+	seen := make(map[string]struct{}, len(tools))
+	out := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, tool)
 	}
 	return out
 }
@@ -5276,7 +5362,6 @@ func (s *GatewayService) streamOpenAIResponsesAsClaude(c *gin.Context, resp *htt
 					activeToolCallID = ""
 					activeToolIndex = -1
 				}
-				delta = strings.TrimSpace(delta)
 				if delta == "" {
 					return nil
 				}
@@ -5323,9 +5408,8 @@ func (s *GatewayService) streamOpenAIResponsesAsClaude(c *gin.Context, resp *htt
 				activeToolIndex = -1
 			}
 			delta := gjson.Get(data, "delta").String()
-			delta = strings.TrimSpace(delta)
 			if delta == "" {
-				delta = strings.TrimSpace(gjson.Get(data, "refusal").String())
+				delta = gjson.Get(data, "refusal").String()
 			}
 			if delta == "" {
 				continue
