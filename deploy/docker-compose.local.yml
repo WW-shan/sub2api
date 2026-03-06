@@ -201,12 +201,15 @@ services:
   # Used when routing Claude Code traffic through OpenAI-compatible accounts.
   # Architecture: Claude Code → sub2api (auth/billing) → claude-code-proxy → OpenAI
   claude-code-proxy:
-    image: ghcr.io/1rgs/claude-code-proxy:latest
+    build:
+      context: ../tools/claude-code-proxy
+      dockerfile: Dockerfile
+    image: sub2api-claude-code-proxy:local
     container_name: sub2api-claude-code-proxy
     restart: unless-stopped
     environment:
       - OPENAI_API_KEY=${CLAUDE_PROXY_OPENAI_API_KEY:-}
-      - OPENAI_BASE_URL=${CLAUDE_PROXY_OPENAI_BASE_URL:-https://ai.wwcloud.me/v1}
+      - OPENAI_BASE_URL=${CLAUDE_PROXY_OPENAI_BASE_URL:-http://sub2api:8080/v1}
       - PREFERRED_PROVIDER=${CLAUDE_PROXY_PREFERRED_PROVIDER:-openai}
       - BIG_MODEL=${CLAUDE_PROXY_BIG_MODEL:-}
       - SMALL_MODEL=${CLAUDE_PROXY_SMALL_MODEL:-}
