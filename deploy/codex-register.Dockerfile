@@ -5,10 +5,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+	&& apt-get install -y --no-install-recommends build-essential curl ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
 
-COPY codex-auto-register-main /app/codex-auto-register-main
+COPY sub2api/deploy/codex_register /app/codex-auto-register-main
 COPY sub2api/deploy/codex_register_service.py /app/codex_register_service.py
 
 RUN pip install --upgrade pip \
