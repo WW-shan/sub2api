@@ -1796,9 +1796,6 @@ func (s *GatewayService) listSchedulableAccounts(ctx context.Context, groupID *i
 	useMixed := (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
 	if useMixed {
 		platforms := []string{platform, PlatformAntigravity}
-		if platform == PlatformAnthropic && s.isOpenAIProxyEnabled() {
-			platforms = append(platforms, PlatformOpenAI)
-		}
 		var accounts []Account
 		var err error
 		if groupID != nil {
@@ -1941,19 +1938,9 @@ func (s *GatewayService) isAccountAllowedForPlatform(account *Account, platform 
 		if account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled() {
 			return true
 		}
-		// OpenAI 账号通过 claude-code-proxy 代理转发时，可参与 anthropic 分组调度
-		if account.Platform == PlatformOpenAI && s.isOpenAIProxyEnabled() {
-			return true
-		}
 		return false
 	}
 	return account.Platform == platform
-}
-
-// isOpenAIProxyEnabled 检查是否配置了 Claude Code Proxy URL，
-// 启用后 OpenAI 账号可通过代理参与 Anthropic 格式请求的调度。
-func (s *GatewayService) isOpenAIProxyEnabled() bool {
-	return s.cfg != nil && s.cfg.Gateway.ClaudeCodeProxyURL != ""
 }
 
 func (s *GatewayService) isSoraAccountSchedulable(account *Account) bool {
@@ -2624,9 +2611,9 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		// 1) Sticky session only applies if the bound account is within the routing set.
 		if sessionHash != "" && s.cache != nil {
 			accountID, err := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-				if err == nil && accountID > 0 && containsInt64(routingAccountIDs, accountID) {
-					if _, excluded := excludedIDs[accountID]; !excluded {
-						account, err := s.getSchedulableAccount(ctx, accountID)
+			if err == nil && accountID > 0 && containsInt64(routingAccountIDs, accountID) {
+				if _, excluded := excludedIDs[accountID]; !excluded {
+					account, err := s.getSchedulableAccount(ctx, accountID)
 					// 检查账号分组归属和平台匹配（确保粘性会话不会跨分组或跨平台）
 					if err == nil {
 						clearSticky := shouldClearStickySession(account, requestedModel)
@@ -2863,15 +2850,15 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 					account, err := s.getSchedulableAccount(ctx, accountID)
 					// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
 					if err == nil {
-							clearSticky := shouldClearStickySession(account, requestedModel)
-							if clearSticky {
-								_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-							}
-							if !clearSticky && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
-								if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) || (account.Platform == PlatformOpenAI && s.isOpenAIProxyEnabled()) {
-									if s.debugModelRoutingEnabled() {
-										logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy mixed routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
-									}
+						clearSticky := shouldClearStickySession(account, requestedModel)
+						if clearSticky {
+							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+						}
+						if !clearSticky && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
+							if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
+								if s.debugModelRoutingEnabled() {
+									logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy mixed routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
+								}
 								return account, nil
 							}
 						}
@@ -2983,7 +2970,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
 					if !clearSticky && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
-						if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) || (account.Platform == PlatformOpenAI && s.isOpenAIProxyEnabled()) {
+						if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
 							return account, nil
 						}
 					}
@@ -3190,7 +3177,7 @@ func (s *GatewayService) diagnoseSelectionFailure(
 		}
 		return selectionFailureDiagnosis{Category: "unschedulable", Detail: detail}
 	}
-	if isPlatformFilteredForSelection(acc, platform, allowMixedScheduling, s.isOpenAIProxyEnabled()) {
+	if isPlatformFilteredForSelection(acc, platform, allowMixedScheduling) {
 		return selectionFailureDiagnosis{
 			Category: "platform_filtered",
 			Detail:   fmt.Sprintf("account_platform=%s requested_platform=%s", acc.Platform, strings.TrimSpace(platform)),
@@ -3263,16 +3250,13 @@ func (s *GatewayService) logSoraSelectionFailureDetails(
 	}
 }
 
-func isPlatformFilteredForSelection(acc *Account, platform string, allowMixedScheduling bool, openAIProxyEnabled bool) bool {
+func isPlatformFilteredForSelection(acc *Account, platform string, allowMixedScheduling bool) bool {
 	if acc == nil {
 		return true
 	}
 	if allowMixedScheduling {
 		if acc.Platform == PlatformAntigravity {
 			return !acc.IsMixedSchedulingEnabled()
-		}
-		if acc.Platform == PlatformOpenAI && openAIProxyEnabled {
-			return false
 		}
 		return acc.Platform != platform
 	}
@@ -5055,12 +5039,8 @@ func writeAnthropicPassthroughResponseHeaders(dst http.Header, src http.Header, 
 func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, tokenType, modelID string, reqStream bool, mimicClaudeCode bool) (*http.Request, error) {
 	// 确定目标URL
 	targetURL := claudeAPIURL
-	isProxyForwarding := false
 
-	if account.IsOpenAI() && s.cfg != nil && s.cfg.Gateway.ClaudeCodeProxyURL != "" {
-		targetURL = strings.TrimRight(s.cfg.Gateway.ClaudeCodeProxyURL, "/") + "/v1/messages"
-		isProxyForwarding = true
-	} else if account.Type == AccountTypeAPIKey {
+	if account.Type == AccountTypeAPIKey {
 		baseURL := account.GetBaseURL()
 		if baseURL != "" {
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)
@@ -5074,22 +5054,6 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	clientHeaders := http.Header{}
 	if c != nil && c.Request != nil {
 		clientHeaders = c.Request.Header
-	}
-
-	// OpenAI 代理转发：跳过 OAuth 指纹、Anthropic 特有头处理，直接构建简洁请求
-	if isProxyForwarding {
-		req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("content-type", "application/json")
-		req.Header.Set("x-api-key", token)
-		if v := clientHeaders.Get("anthropic-version"); v != "" {
-			req.Header.Set("anthropic-version", v)
-		} else {
-			req.Header.Set("anthropic-version", "2023-06-01")
-		}
-		return req, nil
 	}
 
 	// OAuth账号：应用统一指纹

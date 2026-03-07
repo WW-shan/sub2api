@@ -150,13 +150,6 @@ services:
       # Examples: http://host:port, socks5://host:port
       - UPDATE_PROXY_URL=${UPDATE_PROXY_URL:-}
 
-      # =======================================================================
-      # Claude Code Proxy (OpenAI account forwarding)
-      # =======================================================================
-      # Internal URL of the claude-code-proxy service for routing PlatformOpenAI
-      # accounts through Anthropic↔OpenAI format conversion.
-      # Default points to the claude-code-proxy service on this compose network.
-      - GATEWAY_CLAUDE_CODE_PROXY_URL=${GATEWAY_CLAUDE_CODE_PROXY_URL:-http://claude-code-proxy:8082}
     depends_on:
       postgres:
         condition: service_healthy
@@ -194,40 +187,6 @@ services:
         condition: service_healthy
     networks:
       - sub2api-network
-
-  # ===========================================================================
-  # Claude Code Proxy (OpenAI-to-Anthropic format conversion)
-  # ===========================================================================
-  # Converts OpenAI API format requests to Anthropic format.
-  # Used when routing Claude Code traffic through OpenAI-compatible accounts.
-  # Architecture: Claude Code → sub2api (auth/billing) → claude-code-proxy → OpenAI
-  claude-code-proxy:
-    build:
-      context: ../tools/claude-code-proxy
-      dockerfile: Dockerfile
-    image: sub2api-claude-code-proxy:local
-    container_name: sub2api-claude-code-proxy
-    restart: unless-stopped
-    environment:
-      - OPENAI_API_KEY=${CLAUDE_PROXY_OPENAI_API_KEY:-}
-      - OPENAI_BASE_URL=${CLAUDE_PROXY_OPENAI_BASE_URL:-http://sub2api:8080/v1}
-      - PREFERRED_PROVIDER=${CLAUDE_PROXY_PREFERRED_PROVIDER:-openai}
-      - BIG_MODEL=${CLAUDE_PROXY_BIG_MODEL:-gpt-5.4}
-      - SMALL_MODEL=${CLAUDE_PROXY_SMALL_MODEL:-gpt-5.3-codex-spark}
-      - TZ=${TZ:-Asia/Shanghai}
-    networks:
-      - sub2api-network
-    healthcheck:
-      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8082/health', timeout=5).status == 200 else 1)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    # Note: Port not exposed to host by default. sub2api connects via
-    # internal network at http://claude-code-proxy:8082
-    # To expose for debugging, uncomment:
-    # ports:
-    #   - "127.0.0.1:8082:8082"
 
   # ===========================================================================
   # PostgreSQL Database
