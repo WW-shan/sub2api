@@ -1,81 +1,77 @@
 <template>
   <AppLayout>
-    <TablePageLayout>
-      <template #actions>
-        <div class="flex flex-wrap items-center justify-end gap-2">
-          <button
-            type="button"
-            class="btn btn-secondary btn-sm"
-            :disabled="refreshing || loading"
-            @click="refreshAll"
-          >
-            {{ refreshing ? t('admin.codexRegister.actions.refreshing') : t('common.refresh') }}
-          </button>
-          <button
-            type="button"
-            class="btn btn-primary btn-sm"
-            :disabled="loading || status?.enabled"
-            @click="toggleEnabled(true)"
-          >
-            {{ t('admin.codexRegister.actions.start') }}
-          </button>
-          <button
-            type="button"
-            class="btn btn-secondary btn-sm"
-            :disabled="loading || !status?.enabled"
-            @click="toggleEnabled(false)"
-          >
-            {{ t('admin.codexRegister.actions.stop') }}
-          </button>
-          <button
-            type="button"
-            class="btn btn-secondary btn-sm"
-            :disabled="loading"
-            @click="runOnce"
-          >
-            {{ t('admin.codexRegister.actions.runOnce') }}
-          </button>
-        </div>
-      </template>
-
-      <template #filters>
-        <div class="flex flex-col gap-3">
-          <div class="space-y-2">
-            <div class="flex flex-wrap items-center gap-3">
-              <span
-                :class="[
-                  'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium',
-                  status?.enabled
-                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-900/20 dark:text-emerald-300'
-                    : 'border-gray-200 bg-gray-100 text-gray-600 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300'
-                ]"
-              >
-                {{ statusBadgeLabel }}
-              </span>
-              <span class="inline-flex items-center rounded-full border border-primary-200 bg-primary-50 px-3 py-1 text-xs font-medium text-primary-700 dark:border-primary-900/60 dark:bg-primary-900/20 dark:text-primary-300">
-                {{ t('admin.codexRegister.badge.adminConsole') }}
-              </span>
-              <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300">
-                {{ t('admin.codexRegister.panels.polling', { seconds: 10 }) }}
-              </span>
+    <div class="mx-auto max-w-6xl space-y-6">
+      <div class="card overflow-hidden">
+        <div class="card-body space-y-6">
+          <div class="flex flex-col gap-4 border-b border-gray-100 pb-6 dark:border-dark-700 xl:flex-row xl:items-start xl:justify-between">
+            <div class="space-y-3">
+              <div class="flex flex-wrap items-center gap-3">
+                <span
+                  :class="[
+                    'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium',
+                    status?.enabled
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-900/20 dark:text-emerald-300'
+                      : 'border-gray-200 bg-gray-100 text-gray-600 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300'
+                  ]"
+                >
+                  {{ statusBadgeLabel }}
+                </span>
+                <span class="inline-flex items-center rounded-full border border-primary-200 bg-primary-50 px-3 py-1 text-xs font-medium text-primary-700 dark:border-primary-900/60 dark:bg-primary-900/20 dark:text-primary-300">
+                  {{ t('admin.codexRegister.badge.adminConsole') }}
+                </span>
+                <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300">
+                  {{ t('admin.codexRegister.panels.polling', { seconds: 10 }) }}
+                </span>
+              </div>
+              <div class="space-y-1">
+                <p class="text-sm font-medium text-gray-700 dark:text-gray-200">
+                  {{ serviceStatusLabel }}
+                </p>
+                <p class="text-sm text-gray-500 dark:text-gray-400">
+                  {{ proxyDetailLabel }}
+                </p>
+              </div>
             </div>
-            <div class="flex flex-col gap-1">
-              <p class="text-sm text-gray-500 dark:text-gray-400">
-                {{ serviceStatusLabel }}
-              </p>
-              <p class="text-xs text-gray-400 dark:text-gray-500">
-                {{ proxyDetailLabel }}
-              </p>
+
+            <div class="flex flex-wrap items-center gap-2 xl:justify-end">
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                :disabled="refreshing || loading"
+                @click="refreshAll"
+              >
+                {{ refreshing ? t('admin.codexRegister.actions.refreshing') : t('common.refresh') }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                :disabled="loading || status?.enabled"
+                @click="toggleEnabled(true)"
+              >
+                {{ t('admin.codexRegister.actions.start') }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                :disabled="loading || !status?.enabled"
+                @click="toggleEnabled(false)"
+              >
+                {{ t('admin.codexRegister.actions.stop') }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                :disabled="loading"
+                @click="runOnce"
+              >
+                {{ t('admin.codexRegister.actions.runOnce') }}
+              </button>
             </div>
           </div>
-        </div>
-      </template>
 
-      <template #table>
-        <div class="flex h-full flex-col gap-6 overflow-y-auto p-6">
           <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <StatCard :title="t('admin.codexRegister.summary.totalCreated')" :value="status?.total_created ?? 0" :icon="AccountsIcon" icon-variant="primary" />
-            <StatCard :title="t('admin.codexRegister.summary.lastSuccess')" :value="status?.last_success || t('admin.codexRegister.summary.empty')" :icon="ClockIcon" icon-variant="success" />
+            <StatCard :title="t('admin.codexRegister.summary.lastSuccess')" :value="lastSuccessLabel" :icon="ClockIcon" icon-variant="success" />
             <StatCard :title="t('admin.codexRegister.summary.proxy')" :value="proxySummaryLabel" :icon="NetworkIcon" icon-variant="warning" />
             <StatCard :title="t('admin.codexRegister.summary.sleepRange')" :value="sleepRangeSummaryLabel" :icon="PulseIcon" icon-variant="danger" />
           </div>
@@ -85,39 +81,34 @@
           </p>
 
           <div class="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
-            <div class="card overflow-hidden border-gray-200 dark:border-dark-700">
-              <div class="card-header">
-                <div class="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.codexRegister.panels.statusTitle') }}</h2>
-                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                      {{ t('admin.codexRegister.panels.statusDescription') }}
-                    </p>
-                  </div>
-                  <span class="text-xs text-gray-400 dark:text-gray-500">{{ t('admin.codexRegister.panels.polling', { seconds: 10 }) }}</span>
-                </div>
+            <section class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20">
+              <div class="border-b border-gray-200 px-6 py-4 dark:border-dark-700">
+                <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.codexRegister.panels.statusTitle') }}</h2>
+                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                  {{ t('admin.codexRegister.panels.statusDescription') }}
+                </p>
               </div>
-              <div class="card-body space-y-4">
+              <div class="space-y-4 p-6">
                 <div class="grid gap-3 sm:grid-cols-2">
-                  <div class="rounded-xl border border-gray-200 bg-gray-50/80 p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
                     <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.serviceStatus') }}</p>
                     <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
                       {{ serviceStatusLabel }}
                     </p>
                   </div>
-                  <div class="rounded-xl border border-gray-200 bg-gray-50/80 p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
                     <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.proxyConfig') }}</p>
                     <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
                       {{ proxyDetailLabel }}
                     </p>
                   </div>
-                  <div class="rounded-xl border border-gray-200 bg-gray-50/80 p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
                     <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.lastSuccessTitle') }}</p>
                     <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
                       {{ lastSuccessLabel }}
                     </p>
                   </div>
-                  <div class="rounded-xl border border-gray-200 bg-gray-50/80 p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
                     <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.sleepRangeTitle') }}</p>
                     <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
                       {{ sleepRangeDetailLabel }}
@@ -160,22 +151,20 @@
                   </p>
                 </div>
               </div>
-            </div>
+            </section>
 
-            <div class="card overflow-hidden border-gray-200 dark:border-dark-700">
-              <div class="card-header">
-                <div class="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.codexRegister.panels.eventsTitle') }}</h2>
-                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.codexRegister.panels.eventsDescription') }}</p>
-                  </div>
-                  <span class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300">
-                    {{ t('admin.codexRegister.panels.eventCount', { count: logs.length }) }}
-                  </span>
+            <section class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20">
+              <div class="flex items-center justify-between gap-3 border-b border-gray-200 px-6 py-4 dark:border-dark-700">
+                <div>
+                  <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.codexRegister.panels.eventsTitle') }}</h2>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.codexRegister.panels.eventsDescription') }}</p>
                 </div>
+                <span class="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300">
+                  {{ t('admin.codexRegister.panels.eventCount', { count: logs.length }) }}
+                </span>
               </div>
 
-              <div class="card-body">
+              <div class="p-6">
                 <div
                   v-if="logs.length === 0"
                   class="rounded-xl border border-dashed border-gray-200 px-6 py-10 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-gray-400"
@@ -184,7 +173,7 @@
                 </div>
                 <div
                   v-else
-                  class="max-h-[28rem] overflow-auto rounded-xl border border-gray-200 dark:border-dark-700"
+                  class="max-h-[28rem] overflow-auto rounded-xl border border-gray-200 bg-white dark:border-dark-700 dark:bg-dark-900/40"
                 >
                   <div
                     v-for="(log, idx) in logs"
@@ -212,11 +201,11 @@
                   </div>
                 </div>
               </div>
-            </div>
+            </section>
           </div>
         </div>
-      </template>
-    </TablePageLayout>
+      </div>
+    </div>
   </AppLayout>
 </template>
 
@@ -226,7 +215,6 @@ import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { CodexLogEntry, CodexStatus } from '@/api/admin/codex'
 import StatCard from '@/components/common/StatCard.vue'
-import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 
 const { t } = useI18n()
 
@@ -277,9 +265,29 @@ const lastSuccessLabel = computed(() => {
   return error.value ? t('common.unknown') : t('common.loading')
 })
 
-const sleepRangeSummaryLabel = computed(() => status.value ? t('admin.codexRegister.summary.rangeValue', { min: status.value.sleep_min, max: status.value.sleep_max }) : '--')
-const sleepRangeDetailLabel = computed(() => status.value ? t('admin.codexRegister.summary.rangeValueWithUnit', { min: status.value.sleep_min, max: status.value.sleep_max }) : '--')
-const errorStateLabel = computed(() => status.value?.last_error ? t('admin.codexRegister.badge.attention') : t('admin.codexRegister.badge.healthy'))
+const sleepRangeSummaryLabel = computed(() => {
+  if (status.value) {
+    return t('admin.codexRegister.summary.rangeValue', { min: status.value.sleep_min, max: status.value.sleep_max })
+  }
+
+  return error.value ? t('common.unknown') : t('common.loading')
+})
+
+const sleepRangeDetailLabel = computed(() => {
+  if (status.value) {
+    return t('admin.codexRegister.summary.rangeValueWithUnit', { min: status.value.sleep_min, max: status.value.sleep_max })
+  }
+
+  return error.value ? t('common.unknown') : t('common.loading')
+})
+
+const errorStateLabel = computed(() => {
+  if (!status.value) {
+    return error.value ? t('common.unknown') : t('common.loading')
+  }
+
+  return status.value.last_error ? t('admin.codexRegister.badge.attention') : t('admin.codexRegister.badge.healthy')
+})
 
 const AccountsIcon = {
   render: () => h('svg', { fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor', 'stroke-width': '1.8' }, [
@@ -394,7 +402,6 @@ onUnmounted(() => {
 })
 
 defineExpose({
-  TablePageLayout,
   StatCard,
   AccountsIcon,
   ClockIcon,

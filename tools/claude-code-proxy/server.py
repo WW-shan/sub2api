@@ -813,6 +813,7 @@ def _extract_text_from_tool_result(content: Any) -> str:
 
 def convert_anthropic_to_responses_request(anthropic_request: MessagesRequest) -> Dict[str, Any]:
     input_items: List[Dict[str, Any]] = []
+    instructions = ""
 
     if anthropic_request.system:
         if isinstance(anthropic_request.system, str):
@@ -820,19 +821,12 @@ def convert_anthropic_to_responses_request(anthropic_request: MessagesRequest) -
         else:
             system_text = "\n\n".join(block.text for block in anthropic_request.system if getattr(block, "type", "") == "text" and getattr(block, "text", ""))
         if system_text:
-            input_items.append({
-                "type": "message",
-                "role": "system",
-                "content": [{"type": "input_text", "text": system_text}],
-            })
+            instructions = system_text
 
     for msg in anthropic_request.messages:
         if isinstance(msg.content, str):
-            input_items.append({
-                "type": "message",
-                "role": msg.role,
-                "content": [{"type": "input_text", "text": msg.content}],
-            })
+            text = msg.content if msg.role == "user" else f"Assistant:\n{msg.content}"
+            input_items.append({"type": "input_text", "text": text})
             continue
 
         blocks = msg.content
@@ -849,17 +843,13 @@ def convert_anthropic_to_responses_request(anthropic_request: MessagesRequest) -
                         "output": tool_result_text,
                     })
             if text_parts:
-                input_items.append({
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "\n\n".join(text_parts)}],
-                })
+                input_items.append({"type": "input_text", "text": "\n\n".join(text_parts)})
         else:
-            text_parts: List[Dict[str, str]] = []
+            text_parts: List[str] = []
             for block in blocks:
                 block_type = getattr(block, "type", "")
                 if block_type == "text" and getattr(block, "text", ""):
-                    text_parts.append({"type": "output_text", "text": block.text})
+                    text_parts.append(block.text)
                 elif block_type == "tool_use":
                     input_items.append({
                         "type": "function_call",
@@ -868,11 +858,7 @@ def convert_anthropic_to_responses_request(anthropic_request: MessagesRequest) -
                         "arguments": json.dumps(block.input or {}),
                     })
             if text_parts:
-                input_items.append({
-                    "type": "message",
-                    "role": "assistant",
-                    "content": text_parts,
-                })
+                input_items.append({"type": "input_text", "text": "Assistant:\n" + "\n\n".join(text_parts)})
 
     max_output_tokens = anthropic_request.max_tokens
     if max_output_tokens < 128:
@@ -886,6 +872,9 @@ def convert_anthropic_to_responses_request(anthropic_request: MessagesRequest) -
         "store": False,
         "include": ["reasoning.encrypted_content"],
     }
+
+    if instructions:
+        responses_request["instructions"] = instructions
 
     if anthropic_request.temperature is not None:
         responses_request["temperature"] = anthropic_request.temperature
