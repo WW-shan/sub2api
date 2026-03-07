@@ -1,7 +1,12 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import CodexRegisterView from '../CodexRegisterView.vue'
+import CodexRegistrationCard from '../CodexRegistrationCard.vue'
+
+const StatCardStub = {
+  props: ['title', 'value'],
+  template: '<div>{{ title }} {{ value }}</div>'
+}
 
 const codexApiMocks = vi.hoisted(() => ({
   getStatus: vi.fn(),
@@ -24,8 +29,6 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'common.loading': '加载中...',
     'common.unknown': '未知',
     'common.refresh': '刷新',
-    'admin.codexRegister.title': 'Codex 注册',
-    'admin.codexRegister.heroDescription': '管理 Codex 自动注册服务的运行状态、执行节奏和最近事件，让这套能力和后台其他运维页面保持同一视觉与信息层级。',
     'admin.codexRegister.badge.adminConsole': '后台控制台',
     'admin.codexRegister.badge.running': '运行中',
     'admin.codexRegister.badge.stopped': '已停止',
@@ -39,11 +42,12 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.summary.lastSuccess': '最近成功时间',
     'admin.codexRegister.summary.proxy': '是否配置代理',
     'admin.codexRegister.summary.sleepRange': '休眠区间（秒）',
-    'admin.codexRegister.summary.empty': '暂无',
     'admin.codexRegister.summary.proxyConfigured': '已配置',
     'admin.codexRegister.summary.proxyMissing': '未配置',
+    'admin.codexRegister.summary.rangeValue': 'range',
+    'admin.codexRegister.summary.rangeValueWithUnit': 'range with unit',
     'admin.codexRegister.panels.statusTitle': '当前状态',
-    'admin.codexRegister.panels.statusDescription': '统一查看当前开关状态、代理配置和最近一次失败信息。',
+    'admin.codexRegister.panels.statusDescription': 'status description',
     'admin.codexRegister.panels.serviceStatus': '服务状态',
     'admin.codexRegister.panels.serviceEnabled': '当前状态：已开启自动注册',
     'admin.codexRegister.panels.serviceDisabled': '当前状态：已关闭自动注册',
@@ -56,7 +60,7 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.panels.errorTitle': '最近错误日志',
     'admin.codexRegister.panels.noErrors': '最近没有错误输出，服务状态看起来正常。',
     'admin.codexRegister.panels.eventsTitle': '最近事件',
-    'admin.codexRegister.panels.eventsDescription': '展示服务最近的运行记录和错误，便于快速排查容器执行情况。',
+    'admin.codexRegister.panels.eventsDescription': 'events description',
     'admin.codexRegister.panels.emptyEvents': '暂无事件'
   }
 
@@ -82,7 +86,7 @@ vi.mock('vue-i18n', async (importOriginal) => {
   }
 })
 
-describe('CodexRegisterView', () => {
+describe('CodexRegistrationCard', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.clearAllMocks()
@@ -111,70 +115,115 @@ describe('CodexRegisterView', () => {
     vi.useRealTimers()
   })
 
-  it('keeps operational sections and removes intro/cumulative content', async () => {
+  it('renders operational status, summary, and logs', async () => {
     const clearIntervalSpy = vi.spyOn(window, 'clearInterval')
 
-    const wrapper = mount(CodexRegisterView, {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: {
+        active: true
+      },
       global: {
         stubs: {
-          AppLayout: {
-            template: '<div><slot /></div>'
-          }
+          StatCard: StatCardStub
         }
       }
     })
+
     await flushPromises()
 
     expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(1)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(1)
 
-    const pageText = wrapper.text()
+    const cardText = wrapper.text()
 
-    expect(pageText).toContain('当前状态')
-    expect(pageText).toContain('手动执行一次')
-    expect(pageText).toContain('累计生成账号数')
-    expect(pageText).toContain('18')
-    expect(pageText).toContain('最近成功时间')
-    expect(pageText).toContain('是否配置代理')
-    expect(pageText).toContain('休眠区间（秒）')
-    expect(pageText).toContain('最近错误日志')
-    expect(pageText).toContain('最近事件')
-    expect(pageText).toContain('run completed')
-
-    expect(pageText).not.toContain('该页面用于说明 Codex 自动注册容器的工作方式')
-    expect(pageText).not.toContain('累计创建账号数')
-    expect(pageText).not.toContain('累计更新账号数')
-    expect(pageText).not.toContain('累计跳过次数')
-    expect(pageText).not.toContain('本轮处理记录数')
-    expect(pageText).not.toContain('快速入口')
+    expect(cardText).toContain('当前状态')
+    expect(cardText).toContain('手动执行一次')
+    expect(cardText).toContain('12 - 34 秒')
+    expect(cardText).toContain('18')
+    expect(cardText).toContain('最近成功时间')
+    expect(cardText).toContain('是否配置代理')
+    expect(cardText).toContain('休眠区间（秒）')
+    expect(cardText).toContain('最近错误日志')
+    expect(cardText).toContain('最近事件')
+    expect(cardText).toContain('run completed')
 
     wrapper.unmount()
     expect(clearIntervalSpy).toHaveBeenCalled()
     clearIntervalSpy.mockRestore()
   })
 
-  it('clears stale status content when initial requests fail', async () => {
-    codexApiMocks.getStatus.mockRejectedValueOnce(new Error('status failed'))
-    codexApiMocks.getLogs.mockRejectedValueOnce(new Error('logs failed'))
+  it('polls only when active and stops when deactivated', async () => {
+    const setIntervalSpy = vi.spyOn(window, 'setInterval')
+    const clearIntervalSpy = vi.spyOn(window, 'clearInterval')
 
-    const wrapper = mount(CodexRegisterView, {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: {
+        active: false
+      },
       global: {
         stubs: {
-          AppLayout: {
-            template: '<div><slot /></div>'
-          }
+          StatCard: StatCardStub
         }
       }
     })
 
     await flushPromises()
 
-    const pageText = wrapper.text()
+    expect(codexApiMocks.getStatus).not.toHaveBeenCalled()
+    expect(codexApiMocks.getLogs).not.toHaveBeenCalled()
+    expect(setIntervalSpy).not.toHaveBeenCalled()
 
-    expect(pageText).toContain('logs failed')
-    expect(pageText).toContain('未知')
-    expect(pageText).toContain('暂无事件')
-    expect(pageText).not.toContain('当前状态：已关闭自动注册')
-    expect(pageText).not.toContain('已配置代理，容器可按当前出口执行注册')
+    await wrapper.setProps({ active: true })
+    await flushPromises()
+
+    expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(1)
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(10000)
+    await flushPromises()
+
+    expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
+
+    await wrapper.setProps({ active: false })
+    await flushPromises()
+
+    expect(clearIntervalSpy).toHaveBeenCalled()
+
+    vi.advanceTimersByTime(10000)
+    await flushPromises()
+
+    expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
+
+    setIntervalSpy.mockRestore()
+    clearIntervalSpy.mockRestore()
+  })
+
+  it('shows error details when initial requests fail', async () => {
+    codexApiMocks.getStatus.mockRejectedValueOnce(new Error('status failed'))
+    codexApiMocks.getLogs.mockRejectedValueOnce(new Error('logs failed'))
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: {
+        active: true
+      },
+      global: {
+        stubs: {
+          StatCard: StatCardStub
+        }
+      }
+    })
+
+    await flushPromises()
+
+    const cardText = wrapper.text()
+
+    expect(cardText).toContain('logs failed')
+    expect(cardText).toContain('未知')
+    expect(cardText).toContain('暂无事件')
+    expect(cardText).not.toContain('当前状态：已关闭自动注册')
+    expect(cardText).not.toContain('已配置代理，容器可按当前出口执行注册')
   })
 })

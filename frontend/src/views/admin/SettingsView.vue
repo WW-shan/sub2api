@@ -839,6 +839,10 @@
           </div>
         </div>
 
+        <div v-if="activeTab === 'gateway'">
+          <CodexRegistrationCard :active="activeTab === 'gateway'" />
+        </div>
+
         <!-- Gateway Scheduling Settings -->
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
@@ -1481,6 +1485,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api'
 import type {
@@ -1496,6 +1501,7 @@ import GroupBadge from '@/components/common/GroupBadge.vue'
 import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import ImageUpload from '@/components/common/ImageUpload.vue'
+import CodexRegistrationCard from './settings/components/CodexRegistrationCard.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { useAppStore } from '@/stores'
 import { useAdminSettingsStore } from '@/stores/adminSettings'
@@ -1507,11 +1513,12 @@ import {
 } from '@/utils/registrationEmailPolicy'
 
 const { t } = useI18n()
+const route = useRoute()
 const appStore = useAppStore()
 const adminSettingsStore = useAdminSettingsStore()
 
 type SettingsTab = 'general' | 'security' | 'users' | 'gateway' | 'email'
-const activeTab = ref<SettingsTab>('general')
+const activeTab = ref<SettingsTab>(route.query.tab === 'gateway' ? 'gateway' : 'general')
 const settingsTabs = [
   { key: 'general'  as SettingsTab, icon: 'home'   as const },
   { key: 'security' as SettingsTab, icon: 'shield' as const },

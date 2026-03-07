@@ -81,6 +81,27 @@ var openaiPassthroughAllowedHeaders = map[string]bool{
 	"x-codex-turn-metadata": true,
 }
 
+var openAIUndefinedPlaceholderOptionalFields = map[string]struct{}{
+	"conversation":           {},
+	"include":                {},
+	"instructions":           {},
+	"max_completion_tokens":  {},
+	"max_output_tokens":      {},
+	"max_tool_calls":         {},
+	"metadata":               {},
+	"parallel_tool_calls":    {},
+	"previous_response_id":   {},
+	"prompt_cache_retention": {},
+	"safety_identifier":      {},
+	"temperature":            {},
+	"tool_choice":            {},
+	"tools":                  {},
+	"top_logprobs":           {},
+	"top_p":                  {},
+	"truncation":             {},
+	"user":                   {},
+}
+
 // codex_cli_only 拒绝时记录的请求头白名单（仅用于诊断日志，不参与上游透传）
 var codexCLIOnlyDebugHeaderWhitelist = []string{
 	"User-Agent",
@@ -1609,6 +1630,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	disablePatch := func() {
 		patchDisabled = true
+	}
+
+	if sanitizeOpenAIUndefinedPlaceholderFields(reqBody) {
+		bodyModified = true
+		disablePatch()
 	}
 
 	// 非透传模式下，instructions 为空时注入默认指令。
@@ -4101,4 +4127,23 @@ func normalizeOpenAIReasoningEffort(raw string) string {
 		// Only store known effort levels for now to keep UI consistent.
 		return ""
 	}
+}
+
+func sanitizeOpenAIUndefinedPlaceholderFields(reqBody map[string]any) bool {
+	if len(reqBody) == 0 {
+		return false
+	}
+
+	modified := false
+	for field := range openAIUndefinedPlaceholderOptionalFields {
+		value, ok := reqBody[field]
+		if !ok {
+			continue
+		}
+		if s, ok := value.(string); ok && strings.TrimSpace(s) == "[undefined]" {
+			delete(reqBody, field)
+			modified = true
+		}
+	}
+	return modified
 }
