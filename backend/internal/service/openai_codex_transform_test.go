@@ -95,6 +95,19 @@ func TestApplyCodexOAuthTransform_CompactForcesNonStreaming(t *testing.T) {
 	require.True(t, result.Modified)
 }
 
+func TestApplyCodexOAuthTransform_StripsUnsupportedServiceTier(t *testing.T) {
+	reqBody := map[string]any{
+		"model":        "gpt-5.4",
+		"service_tier": "auto",
+	}
+
+	result := applyCodexOAuthTransform(reqBody, false, false)
+
+	_, hasServiceTier := reqBody["service_tier"]
+	require.False(t, hasServiceTier)
+	require.True(t, result.Modified)
+}
+
 func TestApplyCodexOAuthTransform_NonContinuationDefaultsStoreFalseAndStripsIDs(t *testing.T) {
 	// 非续链场景：未设置 store 时默认 false，并移除 input 中的 id。
 
