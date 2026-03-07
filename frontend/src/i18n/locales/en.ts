@@ -335,6 +335,7 @@ export default {
     groups: 'Groups',
     subscriptions: 'Subscriptions',
     accounts: 'Accounts',
+    codexRegister: 'Codex Register',
     proxies: 'Proxies',
     redeemCodes: 'Redeem Codes',
     ops: 'Ops',
@@ -953,7 +954,7 @@ export default {
     },
 
     codexRegister: {
-      title: 'Codex Registration',
+      title: 'Codex Register',
       description: 'Manage Codex auto-registration status, execution cadence, and event logs in one place',
       heroDescription: 'Manage Codex auto-registration runtime, execution cadence, and recent events with the same visual hierarchy used across the rest of the admin console.',
       badge: {

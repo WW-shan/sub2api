@@ -47,16 +47,12 @@ afterAll(() => {
 })
 
 describe('router table', () => {
-  it('redirects the Codex register route to the settings gateway tab', () => {
+  it('registers the Codex register route as a standalone admin page', () => {
     const codexRoute = routes.find((route) => route.path === '/admin/codex-register')
     expect(codexRoute).toBeDefined()
 
-    expect(codexRoute?.redirect).toEqual({
-      path: '/admin/settings',
-      query: { tab: 'gateway' }
-    })
-
-    expect(codexRoute?.component).toBeUndefined()
+    expect(codexRoute?.redirect).toBeUndefined()
+    expect(codexRoute?.component).toBeDefined()
     expect(codexRoute?.meta?.titleKey).toBe('admin.codexRegister.title')
   })
 })

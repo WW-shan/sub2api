@@ -839,9 +839,7 @@
           </div>
         </div>
 
-        <div v-if="activeTab === 'gateway'">
-          <CodexRegistrationCard :active="activeTab === 'gateway'" />
-        </div>
+
 
         <!-- Gateway Scheduling Settings -->
         <div class="card">
@@ -1501,7 +1499,6 @@ import GroupBadge from '@/components/common/GroupBadge.vue'
 import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import ImageUpload from '@/components/common/ImageUpload.vue'
-import CodexRegistrationCard from './settings/components/CodexRegistrationCard.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { useAppStore } from '@/stores'
 import { useAdminSettingsStore } from '@/stores/adminSettings'
