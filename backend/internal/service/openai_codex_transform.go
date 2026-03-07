@@ -122,6 +122,7 @@ func applyCodexOAuthTransform(reqBody map[string]any, isCodexCLI bool, isCompact
 		"frequency_penalty",
 		"presence_penalty",
 		"service_tier",
+		"user",
 	} {
 		if _, ok := reqBody[key]; ok {
 			delete(reqBody, key)

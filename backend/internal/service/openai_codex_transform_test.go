@@ -108,6 +108,19 @@ func TestApplyCodexOAuthTransform_StripsUnsupportedServiceTier(t *testing.T) {
 	require.True(t, result.Modified)
 }
 
+func TestApplyCodexOAuthTransform_StripsUnsupportedUser(t *testing.T) {
+	reqBody := map[string]any{
+		"model": "gpt-5.2",
+		"user":  "u_123",
+	}
+
+	result := applyCodexOAuthTransform(reqBody, false, false)
+
+	_, hasUser := reqBody["user"]
+	require.False(t, hasUser)
+	require.True(t, result.Modified)
+}
+
 func TestApplyCodexOAuthTransform_NonContinuationDefaultsStoreFalseAndStripsIDs(t *testing.T) {
 	// 非续链场景：未设置 store 时默认 false，并移除 input 中的 id。
 
