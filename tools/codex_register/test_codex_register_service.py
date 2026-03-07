@@ -30,25 +30,35 @@ class _FakeConn:
 
 
 class CodexRegisterServiceTests(unittest.TestCase):
-    def test_build_model_mapping_contains_all_claude_tiers(self):
+    def test_build_model_mapping_contains_supported_defaults(self):
         self.assertEqual(
             service.build_model_mapping(),
             {
-                "claude-*-haiku*": "gpt-5.3-codex-spark",
-                "claude-*-sonnet*": "gpt-5.4",
-                "claude-*-opus*": "gpt-5.4",
+                "claude-haiku*": "gpt-5.3-codex-spark",
+                "claude-sonnet*": "gpt-5.4",
+                "claude-opus*": "gpt-5.4",
+                "gpt-5": "gpt-5",
+                "gpt-5.1": "gpt-5.1",
+                "gpt-5.1-codex": "gpt-5.1-codex",
+                "gpt-5.1-codex-max": "gpt-5.1-codex-max",
+                "gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
+                "gpt-5.2": "gpt-5.2",
+                "gpt-5.2-codex": "gpt-5.2-codex",
+                "gpt-5.3-codex": "gpt-5.3-codex",
+                "gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
+                "gpt-5.4": "gpt-5.4",
             },
         )
 
     def test_build_model_mapping_can_be_overridden_by_env(self):
-        custom_mapping = '{"claude-*-haiku*":"spark-max","claude-*-sonnet*":"gpt-5.4"}'
+        custom_mapping = '{"claude-haiku*":"spark-max","claude-sonnet*":"gpt-5.4"}'
 
         with mock.patch.dict("os.environ", {"CODEX_MODEL_MAPPING_JSON": custom_mapping}, clear=False):
             self.assertEqual(
                 service.build_model_mapping(),
                 {
-                    "claude-*-haiku*": "spark-max",
-                    "claude-*-sonnet*": "gpt-5.4",
+                    "claude-haiku*": "spark-max",
+                    "claude-sonnet*": "gpt-5.4",
                 },
             )
 
