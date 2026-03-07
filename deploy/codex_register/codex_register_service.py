@@ -97,6 +97,7 @@ def parse_group_ids() -> List[int]:
 
 def build_model_mapping() -> Dict[str, str]:
     return {
+        "claude-*-haiku*": "gpt-5.3-codex-spark",
         "claude-*-sonnet*": "gpt-5.4",
         "claude-*-opus*": "gpt-5.4",
     }
@@ -866,7 +867,7 @@ def build_credentials(existing: JSONDict, token_info: JSONDict) -> JSONDict:
 def build_extra(existing: JSONDict, token_info: JSONDict) -> JSONDict:
     extra = dict(existing)
     extra["codex_auto_register"] = True
-    extra["codex_auto_register_model_target"] = "gpt-5.4"
+    extra["codex_auto_register_model_mapping"] = build_model_mapping()
     if token_info.get("auth_file"):
         extra["codex_auth_file"] = token_info.get("auth_file")
     return extra

@@ -30,6 +30,16 @@ class _FakeConn:
 
 
 class CodexRegisterServiceTests(unittest.TestCase):
+    def test_build_model_mapping_contains_all_claude_tiers(self):
+        self.assertEqual(
+            service.build_model_mapping(),
+            {
+                "claude-*-haiku*": "gpt-5.3-codex-spark",
+                "claude-*-sonnet*": "gpt-5.4",
+                "claude-*-opus*": "gpt-5.4",
+            },
+        )
+
     def test_normalize_extra_ignores_transient_timestamp(self):
         before = {
             "codex_auto_register": True,
@@ -124,7 +134,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
             },
             {
                 "codex_auto_register": True,
-                "codex_auto_register_model_target": "gpt-5.4",
+                "codex_auto_register_model_mapping": service.build_model_mapping(),
                 "codex_auto_register_updated_at": "2026-03-07T10:00:00Z",
             },
         )
