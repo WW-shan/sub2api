@@ -48,6 +48,12 @@ recent_logs = []
 status_lock = threading.Lock()
 JSONDict = Dict[str, Any]
 
+DEFAULT_MODEL_MAPPING: Dict[str, str] = {
+    "claude-*-haiku*": "gpt-5.3-codex-spark",
+    "claude-*-sonnet*": "gpt-5.4",
+    "claude-*-opus*": "gpt-5.4",
+}
+
 
 def append_log(level: str, message: str) -> None:
     with status_lock:
@@ -96,11 +102,22 @@ def parse_group_ids() -> List[int]:
 
 
 def build_model_mapping() -> Dict[str, str]:
-    return {
-        "claude-*-haiku*": "gpt-5.3-codex-spark",
-        "claude-*-sonnet*": "gpt-5.4",
-        "claude-*-opus*": "gpt-5.4",
-    }
+    raw = get_env("CODEX_MODEL_MAPPING_JSON", "")
+    if not raw:
+        return dict(DEFAULT_MODEL_MAPPING)
+
+    parsed = ensure_dict(raw)
+    mapping: Dict[str, str] = {}
+    for key, value in parsed.items():
+        pattern = str(key).strip()
+        target = str(value).strip()
+        if pattern and target:
+            mapping[pattern] = target
+
+    if mapping:
+        return mapping
+
+    return dict(DEFAULT_MODEL_MAPPING)
 
 
 def get_env(name: str, default=None, required: bool = False) -> str:

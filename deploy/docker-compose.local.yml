@@ -181,6 +181,7 @@ services:
       - CODEX_SLEEP_MIN=${CODEX_SLEEP_MIN:-5}
       - CODEX_SLEEP_MAX=${CODEX_SLEEP_MAX:-30}
       - CODEX_GROUP_IDS=${CODEX_GROUP_IDS:-}
+      - CODEX_MODEL_MAPPING_JSON=${CODEX_MODEL_MAPPING_JSON:-}
       - TZ=${TZ:-Asia/Shanghai}
     depends_on:
       postgres:

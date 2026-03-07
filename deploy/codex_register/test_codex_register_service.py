@@ -40,6 +40,18 @@ class CodexRegisterServiceTests(unittest.TestCase):
             },
         )
 
+    def test_build_model_mapping_can_be_overridden_by_env(self):
+        custom_mapping = '{"claude-*-haiku*":"spark-max","claude-*-sonnet*":"gpt-5.4"}'
+
+        with mock.patch.dict("os.environ", {"CODEX_MODEL_MAPPING_JSON": custom_mapping}, clear=False):
+            self.assertEqual(
+                service.build_model_mapping(),
+                {
+                    "claude-*-haiku*": "spark-max",
+                    "claude-*-sonnet*": "gpt-5.4",
+                },
+            )
+
     def test_normalize_extra_ignores_transient_timestamp(self):
         before = {
             "codex_auto_register": True,
