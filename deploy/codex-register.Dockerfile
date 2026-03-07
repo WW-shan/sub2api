@@ -9,11 +9,10 @@ RUN apt-get update \
 	&& rm -rf /var/lib/apt/lists/*
 
 COPY sub2api/deploy/codex_register /app/codex-auto-register-main
-COPY sub2api/deploy/codex_register_service.py /app/codex_register_service.py
 
 RUN pip install --upgrade pip \
     && pip install curl_cffi psycopg2-binary
 
-WORKDIR /app
+WORKDIR /app/codex-auto-register-main
 
 CMD ["python", "codex_register_service.py"]
