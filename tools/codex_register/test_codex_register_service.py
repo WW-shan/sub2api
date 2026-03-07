@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from deploy.codex_register import codex_register_service as service
+from tools.codex_register import codex_register_service as service
 
 
 class _FakeCursor:
