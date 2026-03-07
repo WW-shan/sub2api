@@ -15,6 +15,7 @@ import re
 from datetime import datetime
 import sys
 
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -787,6 +788,258 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
             usage=Usage(input_tokens=0, output_tokens=0)
         )
 
+
+def _responses_call_id(call_id: str) -> str:
+    if call_id.startswith("fc_"):
+        stripped = call_id[3:]
+        if stripped.startswith("toolu_") or stripped.startswith("call_"):
+            return stripped
+    return call_id
+
+
+def _extract_text_from_tool_result(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                parts.append(str(item.get("text")))
+        return "\n\n".join(parts)
+    return ""
+
+
+def convert_anthropic_to_responses_request(anthropic_request: MessagesRequest) -> Dict[str, Any]:
+    input_items: List[Dict[str, Any]] = []
+
+    if anthropic_request.system:
+        if isinstance(anthropic_request.system, str):
+            system_text = anthropic_request.system
+        else:
+            system_text = "\n\n".join(block.text for block in anthropic_request.system if getattr(block, "type", "") == "text" and getattr(block, "text", ""))
+        if system_text:
+            input_items.append({"role": "system", "content": system_text})
+
+    for msg in anthropic_request.messages:
+        if isinstance(msg.content, str):
+            input_items.append({"role": msg.role, "content": msg.content})
+            continue
+
+        blocks = msg.content
+        if msg.role == "user":
+            text_parts: List[str] = []
+            for block in blocks:
+                if getattr(block, "type", "") == "text" and getattr(block, "text", ""):
+                    text_parts.append(block.text)
+                elif getattr(block, "type", "") == "tool_result":
+                    tool_result_text = _extract_text_from_tool_result(getattr(block, "content", None)) or "(empty)"
+                    input_items.append({
+                        "type": "function_call_output",
+                        "call_id": f"fc_{block.tool_use_id}" if not str(block.tool_use_id).startswith("fc_") else block.tool_use_id,
+                        "output": tool_result_text,
+                    })
+            if text_parts:
+                input_items.append({"role": "user", "content": "\n\n".join(text_parts)})
+        else:
+            text_parts: List[Dict[str, str]] = []
+            for block in blocks:
+                block_type = getattr(block, "type", "")
+                if block_type == "text" and getattr(block, "text", ""):
+                    text_parts.append({"type": "output_text", "text": block.text})
+                elif block_type == "tool_use":
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": f"fc_{block.id}" if not str(block.id).startswith("fc_") else block.id,
+                        "name": block.name,
+                        "arguments": json.dumps(block.input or {}),
+                    })
+            if text_parts:
+                input_items.append({"role": "assistant", "content": text_parts})
+
+    max_output_tokens = anthropic_request.max_tokens
+    if max_output_tokens < 128:
+        max_output_tokens = 128
+
+    responses_request: Dict[str, Any] = {
+        "model": anthropic_request.model.split("/", 1)[1] if anthropic_request.model.startswith("openai/") else anthropic_request.model,
+        "input": input_items,
+        "max_output_tokens": max_output_tokens,
+        "stream": False,
+        "store": False,
+        "include": ["reasoning.encrypted_content"],
+    }
+
+    if anthropic_request.temperature is not None:
+        responses_request["temperature"] = anthropic_request.temperature
+    if anthropic_request.top_p is not None:
+        responses_request["top_p"] = anthropic_request.top_p
+    if anthropic_request.tools:
+        responses_request["tools"] = [
+            {
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description or "",
+                "parameters": tool.input_schema,
+            }
+            for tool in anthropic_request.tools
+        ]
+    if anthropic_request.tool_choice:
+        choice_type = anthropic_request.tool_choice.get("type")
+        if choice_type == "auto":
+            responses_request["tool_choice"] = "auto"
+        elif choice_type == "any":
+            responses_request["tool_choice"] = "required"
+        elif choice_type == "none":
+            responses_request["tool_choice"] = "none"
+        elif choice_type == "tool" and anthropic_request.tool_choice.get("name"):
+            responses_request["tool_choice"] = {
+                "type": "function",
+                "function": {"name": anthropic_request.tool_choice.get("name")},
+            }
+    if anthropic_request.thinking and anthropic_request.thinking.enabled:
+        responses_request["reasoning"] = {"effort": "high", "summary": "auto"}
+
+    return responses_request
+
+
+def convert_responses_to_anthropic(response_dict: Dict[str, Any], original_request: MessagesRequest) -> MessagesResponse:
+    blocks: List[Dict[str, Any]] = []
+    output_items = response_dict.get("output") or []
+    for item in output_items:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            for summary in item.get("summary") or []:
+                if isinstance(summary, dict) and summary.get("type") == "summary_text" and summary.get("text"):
+                    blocks.append({"type": "text", "text": str(summary.get("text"))})
+        elif item_type == "message":
+            for part in item.get("content") or []:
+                if isinstance(part, dict) and part.get("type") == "output_text" and part.get("text") is not None:
+                    blocks.append({"type": "text", "text": str(part.get("text"))})
+        elif item_type == "function_call":
+            arguments = item.get("arguments") or "{}"
+            if isinstance(arguments, str):
+                try:
+                    input_payload = json.loads(arguments)
+                except json.JSONDecodeError:
+                    input_payload = {"raw": arguments}
+            else:
+                input_payload = arguments
+            blocks.append({
+                "type": "tool_use",
+                "id": _responses_call_id(str(item.get("call_id") or item.get("id") or f"toolu_{uuid.uuid4().hex[:24]}")),
+                "name": str(item.get("name") or ""),
+                "input": input_payload if isinstance(input_payload, dict) else {"raw": input_payload},
+            })
+
+    if not blocks:
+        blocks = [{"type": "text", "text": ""}]
+
+    status = response_dict.get("status") or "completed"
+    stop_reason = "end_turn"
+    if status == "incomplete":
+        details = response_dict.get("incomplete_details") or {}
+        if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
+            stop_reason = "max_tokens"
+    elif blocks and blocks[-1].get("type") == "tool_use":
+        stop_reason = "tool_use"
+
+    usage = response_dict.get("usage") or {}
+    input_tokens = int(usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    cache_read = 0
+    details = usage.get("input_tokens_details") or {}
+    if isinstance(details, dict):
+        cache_read = int(details.get("cached_tokens") or 0)
+
+    return MessagesResponse(
+        id=str(response_dict.get("id") or f"msg_{uuid.uuid4()}"),
+        model=original_request.original_model or original_request.model,
+        role="assistant",
+        content=blocks,
+        stop_reason=stop_reason,
+        stop_sequence=None,
+        usage=Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=cache_read,
+        ),
+    )
+
+
+def anthropic_sse_from_response(response: MessagesResponse):
+    message_start = {
+        "type": "message_start",
+        "message": {
+            "id": response.id,
+            "type": "message",
+            "role": "assistant",
+            "model": response.model,
+            "content": [],
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": response.usage.input_tokens,
+                "cache_creation_input_tokens": response.usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                "output_tokens": 0,
+            },
+        },
+    }
+    yield f"event: message_start\ndata: {json.dumps(message_start)}\n\n"
+
+    for index, block in enumerate(response.content):
+        if block.type == "text":
+            yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+            if block.text:
+                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': index, 'delta': {'type': 'text_delta', 'text': block.text}})}\n\n"
+            yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': index})}\n\n"
+        elif block.type == "thinking":
+            yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': index, 'content_block': {'type': 'thinking', 'thinking': ''}})}\n\n"
+            if block.thinking:
+                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': index, 'delta': {'type': 'thinking_delta', 'thinking': block.thinking}})}\n\n"
+            yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': index})}\n\n"
+        elif block.type == "tool_use":
+            yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': index, 'content_block': {'type': 'tool_use', 'id': block.id, 'name': block.name, 'input': {}}})}\n\n"
+            partial_json = json.dumps(block.input or {})
+            yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': index, 'delta': {'type': 'input_json_delta', 'partial_json': partial_json}})}\n\n"
+            yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': index})}\n\n"
+
+    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': response.stop_reason, 'stop_sequence': response.stop_sequence}, 'usage': {'output_tokens': response.usage.output_tokens}})}\n\n"
+    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+def build_openai_responses_url(base_url: str) -> str:
+    normalized = (base_url or "https://api.openai.com/v1").rstrip("/")
+    if normalized.endswith("/v1/responses"):
+        return normalized
+    if normalized.endswith("/responses"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return normalized + "/responses"
+    return normalized + "/v1/responses"
+
+
+async def call_openai_responses_api(original_request: MessagesRequest) -> MessagesResponse:
+    payload = convert_anthropic_to_responses_request(original_request)
+    url = build_openai_responses_url(OPENAI_BASE_URL or "https://api.openai.com/v1")
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "OpenAI-Beta": "responses=experimental",
+    }
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Error: {resp.text}")
+    return convert_responses_to_anthropic(resp.json(), original_request)
+
 async def handle_streaming(response_generator, original_request: MessagesRequest):
     """Handle streaming responses from LiteLLM and convert to Anthropic format."""
     try:
@@ -1075,6 +1328,25 @@ async def create_message(
             clean_model = clean_model[len("openai/"):]
         
         logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
+
+        if request.model.startswith("openai/"):
+            num_tools = len(request.tools) if request.tools else 0
+            log_request_beautifully(
+                "POST",
+                raw_request.url.path,
+                display_model,
+                request.model,
+                len(request.messages),
+                num_tools,
+                200,
+            )
+            anthropic_response = await call_openai_responses_api(request)
+            if request.stream:
+                return StreamingResponse(
+                    anthropic_sse_from_response(anthropic_response),
+                    media_type="text/event-stream",
+                )
+            return anthropic_response
         
         # Convert Anthropic request to LiteLLM format
         litellm_request = convert_anthropic_to_litellm(request)
