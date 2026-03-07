@@ -4,6 +4,7 @@ export interface CodexStatus {
   enabled: boolean
   sleep_min: number
   sleep_max: number
+  total_created: number
   last_success: string | null
   last_error: string | null
   proxy: boolean

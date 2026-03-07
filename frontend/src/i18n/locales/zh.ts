@@ -335,6 +335,7 @@ export default {
     groups: '分组管理',
     subscriptions: '订阅管理',
     accounts: '账号管理',
+    codexRegister: 'Codex 注册',
     proxies: 'IP管理',
     redeemCodes: '兑换码',
     ops: '运维监控',
@@ -972,6 +973,11 @@ export default {
       systemSettings: '系统设置',
       configureSystem: '配置系统设置',
       failedToLoad: '加载仪表盘数据失败'
+    },
+
+    codexRegister: {
+      title: 'Codex 注册',
+      description: '管理 Codex 自动注册服务的运行状态和生成账号'
     },
 
     dataManagement: {

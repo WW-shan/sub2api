@@ -335,6 +335,7 @@ export default {
     groups: 'Groups',
     subscriptions: 'Subscriptions',
     accounts: 'Accounts',
+    codexRegister: 'Codex Registration',
     proxies: 'Proxies',
     redeemCodes: 'Redeem Codes',
     ops: 'Ops',
@@ -950,6 +951,11 @@ export default {
       noDataAvailable: 'No data available',
       recentUsage: 'Recent Usage',
       failedToLoad: 'Failed to load dashboard statistics'
+    },
+
+    codexRegister: {
+      title: 'Codex Registration',
+      description: 'Manage Codex auto-registration service status and generated accounts'
     },
 
     dataManagement: {

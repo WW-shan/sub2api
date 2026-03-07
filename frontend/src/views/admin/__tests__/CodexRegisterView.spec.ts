@@ -26,6 +26,7 @@ describe('CodexRegisterView', () => {
       enabled: true,
       sleep_min: 12,
       sleep_max: 34,
+      total_created: 18,
       last_success: '2026-03-06 10:00:00',
       last_error: 'sample failure',
       proxy: true
@@ -64,9 +65,11 @@ describe('CodexRegisterView', () => {
 
     const pageText = wrapper.text()
 
-    expect(pageText).toContain('Codex 自动注册')
+    expect(pageText).toContain('Codex 注册')
     expect(pageText).toContain('当前状态')
     expect(pageText).toContain('手动执行一次')
+    expect(pageText).toContain('累计生成账号数')
+    expect(pageText).toContain('18')
     expect(pageText).toContain('最近成功时间')
     expect(pageText).toContain('是否配置代理')
     expect(pageText).toContain('休眠区间（秒）')
