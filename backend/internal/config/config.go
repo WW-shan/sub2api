@@ -1445,7 +1445,6 @@ func setDefaults() {
 	viper.SetDefault("gateway.user_message_queue.cleanup_interval_seconds", 60)
 
 	viper.SetDefault("gateway.tls_fingerprint.enabled", true)
-	viper.SetDefault("gateway.claude_code_proxy_url", "")
 	viper.SetDefault("concurrency.ping_interval", 10)
 
 	// Sora 直连配置
