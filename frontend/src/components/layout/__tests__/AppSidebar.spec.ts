@@ -138,19 +138,16 @@ describe('AppSidebar brand block', () => {
     expect(wrapper.html()).not.toContain('version.')
   })
 
-  it('does not render the Codex navigation item', () => {
-    const wrapper = mount(AppSidebar, mountOptions)
-    expect(wrapper.html()).not.toContain('nav.codexRegister')
-    expect(wrapper.html()).not.toContain('/admin/codex-register')
-  })
-
-  it('hides the codex navigation and version tokens even in admin mode', () => {
+  it('shows the Codex Register navigation item between accounts and announcements for admins', () => {
     authStoreMock.isAdmin = true
 
     const wrapper = mount(AppSidebar, mountOptions)
+    const html = wrapper.html()
 
-    expect(wrapper.html()).not.toContain('/admin/codex-register')
-    expect(wrapper.html()).not.toContain('nav.codexRegister')
-    expect(wrapper.html()).not.toContain('version.')
+    expect(html).toContain('/admin/accounts')
+    expect(html).toContain('/admin/codex-register')
+    expect(html).toContain('/admin/announcements')
+    expect(html.indexOf('/admin/accounts')).toBeLessThan(html.indexOf('/admin/codex-register'))
+    expect(html.indexOf('/admin/codex-register')).toBeLessThan(html.indexOf('/admin/announcements'))
   })
 })

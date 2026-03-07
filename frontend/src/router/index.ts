@@ -305,10 +305,7 @@ export const routes: RouteRecordRaw[] = [
   {
     path: '/admin/codex-register',
     name: 'AdminCodexRegister',
-    redirect: {
-      path: '/admin/settings',
-      query: { tab: 'gateway' }
-    },
+    component: () => import('@/views/admin/CodexRegisterView.vue'),
     meta: {
       requiresAuth: true,
       requiresAdmin: true,

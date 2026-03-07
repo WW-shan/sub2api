@@ -144,21 +144,7 @@ vi.mock('@/components/common/ImageUpload.vue', () => ({
     template: '<input type="text" :value="modelValue" @input="onInput" />'
   }
 }))
-vi.mock('@/views/admin/settings/components/CodexRegistrationCard.vue', () => ({
-  default: {
-    props: {
-      active: {
-        type: Boolean,
-        default: false
-      }
-    },
-    template: `
-      <div data-testid="codex-card" :data-active="active ? 'true' : 'false'">
-        <p v-if="active" data-testid="codex-error">codex-error</p>
-      </div>
-    `
-  }
-}))
+
 vi.mock('vue-router', () => ({
   useRoute: () => mockRoute
 }))
@@ -288,7 +274,7 @@ describe('SettingsView', () => {
     expect(updateSettings).toHaveBeenCalledTimes(1)
   })
 
-  it('initializes gateway tab from query and shows codex failure marker', async () => {
+  it('initializes gateway tab from query without rendering codex content', async () => {
     mockRoute.query = { tab: 'gateway' }
 
     const wrapper = mount(SettingsView)
@@ -302,44 +288,6 @@ describe('SettingsView', () => {
 
     expect(gatewayTabButton).toBeTruthy()
     expect(gatewayTabButton?.classes()).toContain('settings-tab-active')
-
-    const codexCard = wrapper.find('[data-testid="codex-card"]')
-    expect(codexCard.exists()).toBe(true)
-    expect(codexCard.attributes('data-active')).toBe('true')
-    expect(wrapper.find('[data-testid="codex-error"]').exists()).toBe(true)
-  })
-
-  it('toggles codex failure visibility only while gateway tab is active', async () => {
-    const wrapper = mount(SettingsView)
-
-    await flushPromises()
-    await flushPromises()
-
-    expect(wrapper.find('[data-testid="codex-card"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="codex-error"]').exists()).toBe(false)
-
-    const tabs = wrapper.findAll('button')
-    const gatewayTabButton = tabs.find((button) =>
-      button.text().includes('admin.settings.tabs.gateway')
-    )
-    const generalTabButton = tabs.find((button) =>
-      button.text().includes('admin.settings.tabs.general')
-    )
-
-    expect(gatewayTabButton).toBeTruthy()
-    expect(generalTabButton).toBeTruthy()
-
-    await gatewayTabButton?.trigger('click')
-    await flushPromises()
-
-    const codexCard = wrapper.find('[data-testid="codex-card"]')
-    expect(codexCard.exists()).toBe(true)
-    expect(codexCard.attributes('data-active')).toBe('true')
-    expect(wrapper.find('[data-testid="codex-error"]').exists()).toBe(true)
-
-    await generalTabButton?.trigger('click')
-    await flushPromises()
-
     expect(wrapper.find('[data-testid="codex-card"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="codex-error"]').exists()).toBe(false)
   })
