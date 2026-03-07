@@ -955,7 +955,52 @@ export default {
 
     codexRegister: {
       title: 'Codex Registration',
-      description: 'Manage Codex auto-registration service status and generated accounts'
+      description: 'Manage Codex auto-registration status, execution cadence, and event logs in one place',
+      heroDescription: 'Manage Codex auto-registration runtime, execution cadence, and recent events with the same visual hierarchy used across the rest of the admin console.',
+      badge: {
+        adminConsole: 'Admin Console',
+        running: 'Running',
+        stopped: 'Stopped',
+        attention: 'Needs Attention',
+        healthy: 'No Errors'
+      },
+      actions: {
+        start: 'Start',
+        stop: 'Stop',
+        runOnce: 'Run Once',
+        refreshing: 'Refreshing…'
+      },
+      summary: {
+        totalCreated: 'Total Accounts Created',
+        lastSuccess: 'Last Success Time',
+        proxy: 'Proxy Configured',
+        sleepRange: 'Sleep Range (Seconds)',
+        empty: 'N/A',
+        proxyConfigured: 'Configured',
+        proxyMissing: 'Not Configured',
+        rangeValue: '{min} - {max}',
+        rangeValueWithUnit: '{min} - {max} seconds'
+      },
+      panels: {
+        statusTitle: 'Current Status',
+        statusDescription: 'Review the current switch state, proxy setup, and the latest failure signal in one place.',
+        polling: 'Auto refresh: {seconds} seconds',
+        serviceStatus: 'Service Status',
+        serviceEnabled: 'Current status: auto-registration is enabled',
+        serviceDisabled: 'Current status: auto-registration is disabled',
+        proxyConfig: 'Proxy Configuration',
+        proxyConfiguredDetail: 'Proxy is configured and the container can register through the current egress path.',
+        proxyMissingDetail: 'No proxy is configured. Confirm whether the container requires a dedicated network exit.',
+        lastSuccessTitle: 'Last Success Time',
+        lastSuccessEmpty: 'No successful runs yet',
+        sleepRangeTitle: 'Sleep Range',
+        errorTitle: 'Latest Error Log',
+        noErrors: 'No recent error output. The service currently looks healthy.',
+        eventsTitle: 'Recent Events',
+        eventsDescription: 'Shows recent runtime records and failures so you can quickly inspect container behavior.',
+        eventCount: '{count} records',
+        emptyEvents: 'No events yet'
+      }
     },
 
     dataManagement: {

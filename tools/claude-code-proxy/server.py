@@ -820,11 +820,19 @@ def convert_anthropic_to_responses_request(anthropic_request: MessagesRequest) -
         else:
             system_text = "\n\n".join(block.text for block in anthropic_request.system if getattr(block, "type", "") == "text" and getattr(block, "text", ""))
         if system_text:
-            input_items.append({"role": "system", "content": system_text})
+            input_items.append({
+                "type": "message",
+                "role": "system",
+                "content": [{"type": "input_text", "text": system_text}],
+            })
 
     for msg in anthropic_request.messages:
         if isinstance(msg.content, str):
-            input_items.append({"role": msg.role, "content": msg.content})
+            input_items.append({
+                "type": "message",
+                "role": msg.role,
+                "content": [{"type": "input_text", "text": msg.content}],
+            })
             continue
 
         blocks = msg.content
@@ -841,7 +849,11 @@ def convert_anthropic_to_responses_request(anthropic_request: MessagesRequest) -
                         "output": tool_result_text,
                     })
             if text_parts:
-                input_items.append({"role": "user", "content": "\n\n".join(text_parts)})
+                input_items.append({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "\n\n".join(text_parts)}],
+                })
         else:
             text_parts: List[Dict[str, str]] = []
             for block in blocks:
@@ -856,7 +868,11 @@ def convert_anthropic_to_responses_request(anthropic_request: MessagesRequest) -
                         "arguments": json.dumps(block.input or {}),
                     })
             if text_parts:
-                input_items.append({"role": "assistant", "content": text_parts})
+                input_items.append({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": text_parts,
+                })
 
     max_output_tokens = anthropic_request.max_tokens
     if max_output_tokens < 128:

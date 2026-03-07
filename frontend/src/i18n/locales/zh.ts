@@ -977,7 +977,52 @@ export default {
 
     codexRegister: {
       title: 'Codex 注册',
-      description: '管理 Codex 自动注册服务的运行状态和生成账号'
+      description: '统一管理 Codex 自动注册的运行状态、执行节奏与事件日志',
+      heroDescription: '管理 Codex 自动注册服务的运行状态、执行节奏和最近事件，让这套能力和后台其他运维页面保持同一视觉与信息层级。',
+      badge: {
+        adminConsole: '后台控制台',
+        running: '运行中',
+        stopped: '已停止',
+        attention: '需关注',
+        healthy: '暂无错误'
+      },
+      actions: {
+        start: '开启',
+        stop: '关闭',
+        runOnce: '手动执行一次',
+        refreshing: '刷新中…'
+      },
+      summary: {
+        totalCreated: '累计生成账号数',
+        lastSuccess: '最近成功时间',
+        proxy: '是否配置代理',
+        sleepRange: '休眠区间（秒）',
+        empty: '暂无',
+        proxyConfigured: '已配置',
+        proxyMissing: '未配置',
+        rangeValue: '{min} - {max}',
+        rangeValueWithUnit: '{min} - {max} 秒'
+      },
+      panels: {
+        statusTitle: '当前状态',
+        statusDescription: '统一查看当前开关状态、代理配置和最近一次失败信息。',
+        polling: '自动轮询：{seconds} 秒',
+        serviceStatus: '服务状态',
+        serviceEnabled: '当前状态：已开启自动注册',
+        serviceDisabled: '当前状态：已关闭自动注册',
+        proxyConfig: '代理配置',
+        proxyConfiguredDetail: '已配置代理，容器可按当前出口执行注册',
+        proxyMissingDetail: '未配置代理，请确认网络出口要求',
+        lastSuccessTitle: '最近成功时间',
+        lastSuccessEmpty: '暂无成功记录',
+        sleepRangeTitle: '休眠区间',
+        errorTitle: '最近错误日志',
+        noErrors: '最近没有错误输出，服务状态看起来正常。',
+        eventsTitle: '最近事件',
+        eventsDescription: '展示服务最近的运行记录和错误，便于快速排查容器执行情况。',
+        eventCount: '{count} 条记录',
+        emptyEvents: '暂无事件'
+      }
     },
 
     dataManagement: {
