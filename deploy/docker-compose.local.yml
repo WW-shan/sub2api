@@ -263,4 +263,5 @@ services:
 # =============================================================================
 networks:
   sub2api-network:
+    name: sub2api-network
     driver: bridge

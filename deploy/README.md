@@ -148,13 +148,32 @@ SELECT
   (SELECT COUNT(*) FROM user_allowed_groups) AS new_pair_count;
 ```
 
-### datamanagementd（数据管理）联动
+### Nginx Proxy Manager Reverse Proxy
 
-如需启用管理后台“数据管理”功能，请额外部署宿主机 `datamanagementd`：
+If you want to bind a domain to Sub2API with a visual management UI, you can deploy the standalone Nginx Proxy Manager project in `tools/nginx-proxy-manager/`.
 
-- 主进程固定探测 `/tmp/sub2api-datamanagement.sock`
-- Docker 场景下需把宿主机 Socket 挂载到容器内同路径
-- 详细步骤见：`deploy/DATAMANAGEMENTD_CN.md`
+1. Start Sub2API first from `deploy/` using `docker-compose.yml`, `docker-compose.local.yml`, or `docker-compose.standalone.yml`
+2. If needed, edit the default passwords in `tools/nginx-proxy-manager/docker-compose.yml`
+3. Start Nginx Proxy Manager:
+
+```bash
+cd tools/nginx-proxy-manager
+docker compose up -d
+```
+
+4. Open the admin UI:
+
+```text
+http://YOUR_SERVER_IP:81
+```
+
+5. In Nginx Proxy Manager, create a Proxy Host with:
+   - Domain Names: your domain
+   - Scheme: `http`
+   - Forward Hostname / IP: `sub2api`
+   - Forward Port: `8080`
+
+6. If needed, enable SSL in the UI and request a Let's Encrypt certificate.
 
 ### Commands
 

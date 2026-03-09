@@ -99,7 +99,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    networks:
+      - sub2api-network
 
 volumes:
   sub2api_data:
     driver: local
+
+networks:
+  sub2api-network:
+    name: sub2api-network
+    driver: bridge
