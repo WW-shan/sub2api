@@ -31,24 +31,19 @@ class _FakeConn:
 
 class CodexRegisterServiceTests(unittest.TestCase):
     def test_build_model_mapping_contains_supported_defaults(self):
-        self.assertEqual(
-            service.build_model_mapping(),
-            {
-                "claude-haiku*": "gpt-5.3-codex-spark",
-                "claude-sonnet*": "gpt-5.4",
-                "claude-opus*": "gpt-5.4",
-                "gpt-5": "gpt-5",
-                "gpt-5.1": "gpt-5.1",
-                "gpt-5.1-codex": "gpt-5.1-codex",
-                "gpt-5.1-codex-max": "gpt-5.1-codex-max",
-                "gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
-                "gpt-5.2": "gpt-5.2",
-                "gpt-5.2-codex": "gpt-5.2-codex",
-                "gpt-5.3-codex": "gpt-5.3-codex",
-                "gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
-                "gpt-5.4": "gpt-5.4",
-            },
-        )
+        self.assertEqual(service.build_model_mapping(), dict(service.DEFAULT_MODEL_MAPPING))
+
+    def test_build_model_mapping_includes_common_gpt_aliases(self):
+        mapping = service.build_model_mapping()
+
+        self.assertEqual(mapping["gpt-5"], "gpt-5")
+        self.assertEqual(mapping["gpt-5-mini"], "gpt-5-mini")
+        self.assertEqual(mapping["gpt-5-nano"], "gpt-5-nano")
+        self.assertEqual(mapping["gpt-5.3-codex-spark"], "gpt-5.3-codex-spark")
+        self.assertEqual(mapping["gpt-5.3-codex-spark-high"], "gpt-5.3-codex-spark")
+        self.assertEqual(mapping["gpt-5-codex"], "gpt-5.1-codex")
+        self.assertEqual(mapping["codex-mini-latest"], "gpt-5.1-codex-mini")
+        self.assertEqual(mapping["gpt-5.2-codex-xhigh"], "gpt-5.2-codex")
 
     def test_build_model_mapping_can_be_overridden_by_env(self):
         custom_mapping = '{"claude-haiku*":"spark-max","claude-sonnet*":"gpt-5.4"}'
