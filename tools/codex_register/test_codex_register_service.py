@@ -604,6 +604,83 @@ class CodexRegisterServiceTests(unittest.TestCase):
         self.assertEqual(body["job_phase"], "waiting_manual:plan_type_invalid")
         self.assertEqual(body["waiting_reason"], "plan_type_invalid")
 
+    def test_resume_http_gate_rechecks_parent_reasons_after_first_failure(self):
+        service.job_phase = "waiting_manual:plan_type_missing"
+        service.waiting_reason = "plan_type_missing"
+        parent_record = {
+            "plan_type": "",
+            "organization_id": "org-1",
+            "workspace_reachable": True,
+            "members_page_accessible": True,
+        }
+        handler = _FakeHandler("/resume")
+
+        with mock.patch.object(service, "get_latest_parent_record", return_value=parent_record) as get_latest_parent, mock.patch.object(
+            service, "evaluate_resume_gate", return_value="plan_type_missing"
+        ) as evaluate_resume_gate, mock.patch.object(service, "start_workflow_once") as start_workflow_once:
+            service.CodexRequestHandler.do_POST(handler)
+
+        body = handler.body_json()
+        self.assertEqual(handler.status_code, 200)
+        get_latest_parent.assert_called_once()
+        evaluate_resume_gate.assert_called_once_with(parent_record)
+        start_workflow_once.assert_not_called()
+        self.assertEqual(body["job_phase"], "waiting_manual:plan_type_missing")
+        self.assertEqual(body["waiting_reason"], "plan_type_missing")
+
+    def test_resume_http_parent_gate_reason_advances_when_gate_passes(self):
+        service.job_phase = "waiting_manual:plan_type_missing"
+        service.waiting_reason = "plan_type_missing"
+
+        parent_record = {
+            "plan_type": "business",
+            "organization_id": "org-1",
+            "workspace_reachable": True,
+            "members_page_accessible": True,
+        }
+
+        def _start_resume(*, allow_resume):
+            self.assertTrue(allow_resume)
+            service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+            service.waiting_reason = ""
+            return True
+
+        handler = _FakeHandler("/resume")
+        with mock.patch.object(service, "get_latest_parent_record", return_value=parent_record) as get_latest_parent, mock.patch.object(
+            service, "evaluate_resume_gate", return_value=""
+        ) as evaluate_resume_gate, mock.patch.object(service, "start_workflow_once", side_effect=_start_resume) as start_workflow_once:
+            service.CodexRequestHandler.do_POST(handler)
+
+        body = handler.body_json()
+        self.assertEqual(handler.status_code, 200)
+        get_latest_parent.assert_called_once()
+        evaluate_resume_gate.assert_called_once_with(parent_record)
+        start_workflow_once.assert_called_once_with(allow_resume=True)
+        self.assertEqual(body["job_phase"], service.PHASE_RUNNING_PRE_RESUME_CHECK)
+
+    def test_resume_http_non_parent_waiting_reason_skips_parent_gate(self):
+        service.job_phase = "waiting_manual:db_connect_failed"
+        service.waiting_reason = "db_connect_failed"
+
+        def _start_resume(*, allow_resume):
+            self.assertTrue(allow_resume)
+            service.job_phase = service.PHASE_RUNNING_CREATE_PARENT
+            service.waiting_reason = ""
+            return True
+
+        handler = _FakeHandler("/resume")
+        with mock.patch.object(service, "get_latest_parent_record") as get_latest_parent, mock.patch.object(
+            service, "evaluate_resume_gate"
+        ) as evaluate_resume_gate, mock.patch.object(service, "start_workflow_once", side_effect=_start_resume) as start_workflow_once:
+            service.CodexRequestHandler.do_POST(handler)
+
+        body = handler.body_json()
+        self.assertEqual(handler.status_code, 200)
+        get_latest_parent.assert_not_called()
+        evaluate_resume_gate.assert_not_called()
+        start_workflow_once.assert_called_once_with(allow_resume=True)
+        self.assertEqual(body["job_phase"], service.PHASE_RUNNING_CREATE_PARENT)
+
     def test_evaluate_resume_gate_returns_reason_codes(self):
         service.tokens_dir_global = Path("/tmp")
 

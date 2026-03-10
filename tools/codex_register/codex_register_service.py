@@ -75,6 +75,14 @@ CANONICAL_JOB_PHASES = {
     PHASE_FAILED,
 }
 VALID_PARENT_PLAN_TYPES = {"team", "business"}
+PARENT_RESUME_GATE_REASONS = {
+    "parent_upgrade",
+    "plan_type_missing",
+    "plan_type_invalid",
+    "organization_id_missing",
+    "workspace_unreachable",
+    "members_page_inaccessible",
+}
 
 DEFAULT_MODEL_MAPPING: Dict[str, str] = {
     "claude-haiku*": "gpt-5.2-codex",
@@ -1657,7 +1665,7 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             else:
                 resume_phase = str(current_status.get("job_phase") or "")
                 resume_reason = str(current_status.get("waiting_reason") or "")
-                needs_parent_gate = resume_phase == PHASE_WAITING_PARENT_UPGRADE or resume_reason == "parent_upgrade"
+                needs_parent_gate = resume_phase == PHASE_WAITING_PARENT_UPGRADE or resume_reason in PARENT_RESUME_GATE_REASONS
 
                 if needs_parent_gate:
                     latest_parent = get_latest_parent_record()
