@@ -1,6 +1,9 @@
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tools.codex_register import codex_register_service as service
@@ -29,7 +32,115 @@ class _FakeConn:
         return None
 
 
+class _FakeHandler:
+    def __init__(self, path):
+        self.path = path
+        self.status_code = None
+        self.headers = []
+        self.wfile = io.BytesIO()
+
+    def send_response(self, code):
+        self.status_code = code
+
+    def send_header(self, key, value):
+        self.headers.append((key, value))
+
+    def end_headers(self):
+        return None
+
+    def _cors_headers(self):
+        service.CodexRequestHandler._cors_headers(self)
+
+    def body_json(self):
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+
+class _FakeThread:
+    def __init__(self, target=None, args=(), daemon=None):
+        self._target = target
+        self._args = args
+        self.daemon = daemon
+        self._alive = False
+
+    def start(self):
+        self._alive = True
+
+    def is_alive(self):
+        return self._alive
+
+
 class CodexRegisterServiceTests(unittest.TestCase):
+    def setUp(self):
+        self._state = {
+            "enabled": service.enabled,
+            "last_run": service.last_run,
+            "last_success": service.last_success,
+            "last_error": service.last_error,
+            "total_created": service.total_created,
+            "total_updated": service.total_updated,
+            "total_skipped": service.total_skipped,
+            "sleep_min_global": service.sleep_min_global,
+            "sleep_max_global": service.sleep_max_global,
+            "tokens_dir_global": service.tokens_dir_global,
+            "last_token_email": service.last_token_email,
+            "last_created_email": service.last_created_email,
+            "last_created_account_id": service.last_created_account_id,
+            "last_updated_email": service.last_updated_email,
+            "last_updated_account_id": service.last_updated_account_id,
+            "last_processed_records": service.last_processed_records,
+            "workflow_id": service.workflow_id,
+            "job_phase": service.job_phase,
+            "waiting_reason": service.waiting_reason,
+            "active_workflow_thread": service.active_workflow_thread,
+            "recent_logs": list(service.recent_logs),
+        }
+
+        service.enabled = False
+        service.last_run = None
+        service.last_success = None
+        service.last_error = ""
+        service.total_created = 0
+        service.total_updated = 0
+        service.total_skipped = 0
+        service.sleep_min_global = 0
+        service.sleep_max_global = 0
+        service.tokens_dir_global = None
+        service.last_token_email = ""
+        service.last_created_email = ""
+        service.last_created_account_id = ""
+        service.last_updated_email = ""
+        service.last_updated_account_id = ""
+        service.last_processed_records = 0
+        service.workflow_id = ""
+        service.job_phase = service.PHASE_IDLE
+        service.waiting_reason = ""
+        service.active_workflow_thread = None
+        service.recent_logs.clear()
+
+    def tearDown(self):
+        service.enabled = self._state["enabled"]
+        service.last_run = self._state["last_run"]
+        service.last_success = self._state["last_success"]
+        service.last_error = self._state["last_error"]
+        service.total_created = self._state["total_created"]
+        service.total_updated = self._state["total_updated"]
+        service.total_skipped = self._state["total_skipped"]
+        service.sleep_min_global = self._state["sleep_min_global"]
+        service.sleep_max_global = self._state["sleep_max_global"]
+        service.tokens_dir_global = self._state["tokens_dir_global"]
+        service.last_token_email = self._state["last_token_email"]
+        service.last_created_email = self._state["last_created_email"]
+        service.last_created_account_id = self._state["last_created_account_id"]
+        service.last_updated_email = self._state["last_updated_email"]
+        service.last_updated_account_id = self._state["last_updated_account_id"]
+        service.last_processed_records = self._state["last_processed_records"]
+        service.workflow_id = self._state["workflow_id"]
+        service.job_phase = self._state["job_phase"]
+        service.waiting_reason = self._state["waiting_reason"]
+        service.active_workflow_thread = self._state["active_workflow_thread"]
+        service.recent_logs.clear()
+        service.recent_logs.extend(self._state["recent_logs"])
+
     def test_extract_session_access_token_returns_value(self):
         self.assertEqual(service.extract_session_access_token({"accessToken": "abc123"}), "abc123")
 
@@ -215,6 +326,91 @@ class CodexRegisterServiceTests(unittest.TestCase):
         executed_sql = "\n".join(call.args[0] for call in cur.execute.call_args_list)
         self.assertNotIn("UPDATE accounts SET credentials", executed_sql)
 
+    def test_canonical_phase_values_include_required_phases(self):
+        self.assertIn(service.PHASE_IDLE, service.CANONICAL_JOB_PHASES)
+        self.assertIn(service.PHASE_RUNNING_CREATE_PARENT, service.CANONICAL_JOB_PHASES)
+        self.assertIn(service.PHASE_WAITING_PARENT_UPGRADE, service.CANONICAL_JOB_PHASES)
+        self.assertIn(service.PHASE_RUNNING_PRE_RESUME_CHECK, service.CANONICAL_JOB_PHASES)
+        self.assertIn(service.PHASE_RUNNING_INVITE_CHILDREN, service.CANONICAL_JOB_PHASES)
+        self.assertIn(service.PHASE_RUNNING_ACCEPT_AND_SWITCH, service.CANONICAL_JOB_PHASES)
+        self.assertIn(service.PHASE_RUNNING_VERIFY_AND_BIND, service.CANONICAL_JOB_PHASES)
+        self.assertIn(service.PHASE_COMPLETED, service.CANONICAL_JOB_PHASES)
+        self.assertIn(service.PHASE_ABANDONED, service.CANONICAL_JOB_PHASES)
+        self.assertIn(service.PHASE_FAILED, service.CANONICAL_JOB_PHASES)
+
+    def test_get_status_payload_exposes_single_run_lifecycle_fields(self):
+        service.job_phase = service.PHASE_IDLE
+        service.workflow_id = ""
+        service.waiting_reason = ""
+
+        payload = service.get_status_payload()
+
+        self.assertIn("job_phase", payload)
+        self.assertIn("workflow_id", payload)
+        self.assertIn("waiting_reason", payload)
+        self.assertIn("can_start", payload)
+        self.assertIn("can_resume", payload)
+        self.assertIn("can_abandon", payload)
+        self.assertEqual(payload["job_phase"], service.PHASE_IDLE)
+        self.assertIsNone(payload["workflow_id"])
+        self.assertIsNone(payload["waiting_reason"])
+        self.assertTrue(payload["can_start"])
+        self.assertFalse(payload["can_resume"])
+        self.assertTrue(payload["can_abandon"])
+
+    def test_get_status_payload_waiting_manual_flags(self):
+        service.job_phase = service.PHASE_WAITING_PARENT_UPGRADE
+        service.waiting_reason = "parent_upgrade"
+
+        payload = service.get_status_payload()
+
+        self.assertFalse(payload["can_start"])
+        self.assertTrue(payload["can_resume"])
+        self.assertTrue(payload["can_abandon"])
+        self.assertEqual(payload["waiting_reason"], "parent_upgrade")
+
+    def test_run_one_cycle_stage_failure_returns_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp) / "tokens"
+            tokens_dir.mkdir(parents=True)
+            bad = tokens_dir / "bad.json"
+
+            cur = mock.Mock()
+            conn = _FakeConn(cur)
+
+            with mock.patch.object(service, "create_db_connection", return_value=conn), mock.patch.object(
+                service,
+                "run_codex_once",
+                return_value=[(bad, [{"email": "fail@example.com"}])],
+            ), mock.patch.object(service, "upsert_account", side_effect=RuntimeError("boom")), mock.patch.object(
+                service,
+                "archive_processed_file",
+            ) as archive_processed_file:
+                ok, reason = service.run_one_cycle(tokens_dir)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "token_process_failed:bad.json")
+        archive_processed_file.assert_not_called()
+
+    def test_run_one_cycle_surfaces_script_exit_nonzero_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp) / "tokens"
+            tokens_dir.mkdir(parents=True)
+
+            cur = mock.Mock()
+            conn = _FakeConn(cur)
+
+            with mock.patch.object(service, "create_db_connection", return_value=conn), mock.patch.object(
+                service,
+                "run_codex_once",
+                side_effect=RuntimeError("script_exit_nonzero:1"),
+            ):
+                ok, reason = service.run_one_cycle(tokens_dir)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "script_exit_nonzero:1")
+        self.assertEqual(service.last_error, "script_exit_nonzero:1")
+
     def test_run_one_cycle_archives_successful_file_and_leaves_failed_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             tokens_dir = Path(tmp) / "tokens"
@@ -237,10 +433,240 @@ class CodexRegisterServiceTests(unittest.TestCase):
                 "archive_processed_file",
                 side_effect=lambda source, processed_dir: processed_dir / source.name,
             ) as archive_processed_file:
-                service.run_one_cycle(tokens_dir)
+                ok, reason = service.run_one_cycle(tokens_dir)
 
+        self.assertFalse(ok)
+        self.assertEqual(reason, "token_process_failed:bad.json")
         archived_sources = [call.args[0] for call in archive_processed_file.call_args_list]
         self.assertEqual(archived_sources, [good])
+
+    def test_finalize_workflow_failure_sets_waiting_manual_phase_and_reason_not_failed(self):
+        service.workflow_id = "wf-1"
+        service.job_phase = service.PHASE_RUNNING_CREATE_PARENT
+        service.enabled = True
+
+        service._finalize_workflow_once("wf-1", success=False, reason="db_connect_failed")
+
+        self.assertEqual(service.job_phase, "waiting_manual:db_connect_failed")
+        self.assertEqual(service.waiting_reason, "db_connect_failed")
+        self.assertNotEqual(service.job_phase, service.PHASE_FAILED)
+
+    def test_start_workflow_once_has_reentry_guard(self):
+        service.tokens_dir_global = Path("/tmp")
+        with mock.patch.object(service.threading, "Thread", _FakeThread):
+            first = service.start_workflow_once(allow_resume=False)
+            second = service.start_workflow_once(allow_resume=False)
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(service.job_phase, service.PHASE_RUNNING_CREATE_PARENT)
+
+    def test_start_from_completed_enters_running_create_parent(self):
+        service.job_phase = service.PHASE_COMPLETED
+        service.tokens_dir_global = Path("/tmp")
+        with mock.patch.object(service.threading, "Thread", _FakeThread):
+            started = service.start_workflow_once(allow_resume=False)
+
+        self.assertTrue(started)
+        self.assertEqual(service.job_phase, service.PHASE_RUNNING_CREATE_PARENT)
+
+    def test_resume_from_non_parent_waiting_restarts_from_create_parent(self):
+        service.job_phase = "waiting_manual:db_connect_failed"
+        service.waiting_reason = "db_connect_failed"
+        service.tokens_dir_global = Path("/tmp")
+
+        with mock.patch.object(service.threading, "Thread", _FakeThread):
+            started = service.start_workflow_once(allow_resume=True)
+
+        self.assertTrue(started)
+        self.assertEqual(service.job_phase, service.PHASE_RUNNING_CREATE_PARENT)
+
+    def test_disable_sets_abandoned_and_prevents_progression(self):
+        service.job_phase = service.PHASE_RUNNING_CREATE_PARENT
+        service.workflow_id = "wf-1"
+        handler = _FakeHandler("/disable")
+
+        service.CodexRequestHandler.do_POST(handler)
+
+        body = handler.body_json()
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(body["job_phase"], service.PHASE_ABANDONED)
+        self.assertFalse(body["can_abandon"])
+        self.assertFalse(service.start_workflow_once(allow_resume=False))
+
+    def test_enable_and_run_once_are_start_once_triggers(self):
+        enable_handler = _FakeHandler("/enable")
+        run_once_handler = _FakeHandler("/run-once")
+
+        with mock.patch.object(service, "start_workflow_once", side_effect=[True, False]) as start_workflow_once:
+            service.CodexRequestHandler.do_POST(enable_handler)
+            service.CodexRequestHandler.do_POST(run_once_handler)
+
+        self.assertEqual(enable_handler.status_code, 200)
+        self.assertEqual(run_once_handler.status_code, 200)
+        self.assertEqual(start_workflow_once.call_args_list, [mock.call(allow_resume=False), mock.call(allow_resume=False)])
+
+    def test_resume_http_noop_when_not_waiting_manual(self):
+        service.job_phase = service.PHASE_RUNNING_CREATE_PARENT
+        service.waiting_reason = ""
+        service.workflow_id = "wf-keep"
+        handler = _FakeHandler("/resume")
+
+        with mock.patch.object(service, "get_latest_parent_record") as get_latest_parent, mock.patch.object(
+            service, "evaluate_resume_gate"
+        ) as evaluate_resume_gate, mock.patch.object(service, "start_workflow_once") as start_workflow_once:
+            service.CodexRequestHandler.do_POST(handler)
+
+        body = handler.body_json()
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(body["job_phase"], service.PHASE_RUNNING_CREATE_PARENT)
+        get_latest_parent.assert_not_called()
+        evaluate_resume_gate.assert_not_called()
+        start_workflow_once.assert_not_called()
+
+    def test_resume_http_rereads_parent_and_advances_when_gate_passes(self):
+        service.job_phase = service.PHASE_WAITING_PARENT_UPGRADE
+        service.waiting_reason = "parent_upgrade"
+
+        parent_record = {
+            "plan_type": "business",
+            "organization_id": "org-1",
+            "workspace_reachable": True,
+            "members_page_accessible": True,
+        }
+
+        def _start_resume(*, allow_resume):
+            self.assertTrue(allow_resume)
+            service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+            service.waiting_reason = ""
+            return True
+
+        handler = _FakeHandler("/resume")
+        with mock.patch.object(service, "get_latest_parent_record", return_value=parent_record) as get_latest_parent, mock.patch.object(
+            service, "evaluate_resume_gate", return_value=""
+        ) as evaluate_resume_gate, mock.patch.object(service, "start_workflow_once", side_effect=_start_resume) as start_workflow_once:
+            service.CodexRequestHandler.do_POST(handler)
+
+        body = handler.body_json()
+        self.assertEqual(handler.status_code, 200)
+        get_latest_parent.assert_called_once()
+        evaluate_resume_gate.assert_called_once_with(parent_record)
+        start_workflow_once.assert_called_once_with(allow_resume=True)
+        self.assertEqual(body["job_phase"], service.PHASE_RUNNING_PRE_RESUME_CHECK)
+        self.assertFalse(body["can_resume"])
+
+    def test_resume_http_gate_fail_plan_type_missing(self):
+        service.job_phase = service.PHASE_WAITING_PARENT_UPGRADE
+        service.waiting_reason = "parent_upgrade"
+        parent_record = {
+            "plan_type": "",
+            "organization_id": "org-1",
+            "workspace_reachable": True,
+            "members_page_accessible": True,
+        }
+        handler = _FakeHandler("/resume")
+
+        with mock.patch.object(service, "get_latest_parent_record", return_value=parent_record) as get_latest_parent, mock.patch.object(
+            service, "evaluate_resume_gate", return_value="plan_type_missing"
+        ) as evaluate_resume_gate, mock.patch.object(service, "start_workflow_once") as start_workflow_once:
+            service.CodexRequestHandler.do_POST(handler)
+
+        body = handler.body_json()
+        self.assertEqual(handler.status_code, 200)
+        get_latest_parent.assert_called_once()
+        evaluate_resume_gate.assert_called_once_with(parent_record)
+        start_workflow_once.assert_not_called()
+        self.assertEqual(body["job_phase"], "waiting_manual:plan_type_missing")
+        self.assertEqual(body["waiting_reason"], "plan_type_missing")
+        self.assertTrue(body["can_resume"])
+
+    def test_resume_http_gate_fail_plan_type_invalid(self):
+        service.job_phase = service.PHASE_WAITING_PARENT_UPGRADE
+        service.waiting_reason = "parent_upgrade"
+        parent_record = {
+            "plan_type": "personal",
+            "organization_id": "org-1",
+            "workspace_reachable": True,
+            "members_page_accessible": True,
+        }
+        handler = _FakeHandler("/resume")
+
+        with mock.patch.object(service, "get_latest_parent_record", return_value=parent_record) as get_latest_parent, mock.patch.object(
+            service, "evaluate_resume_gate", return_value="plan_type_invalid"
+        ) as evaluate_resume_gate, mock.patch.object(service, "start_workflow_once") as start_workflow_once:
+            service.CodexRequestHandler.do_POST(handler)
+
+        body = handler.body_json()
+        self.assertEqual(handler.status_code, 200)
+        get_latest_parent.assert_called_once()
+        evaluate_resume_gate.assert_called_once_with(parent_record)
+        start_workflow_once.assert_not_called()
+        self.assertEqual(body["job_phase"], "waiting_manual:plan_type_invalid")
+        self.assertEqual(body["waiting_reason"], "plan_type_invalid")
+
+    def test_evaluate_resume_gate_returns_reason_codes(self):
+        service.tokens_dir_global = Path("/tmp")
+
+        self.assertEqual(service.evaluate_resume_gate({}), "plan_type_missing")
+        self.assertEqual(
+            service.evaluate_resume_gate({"plan_type": "personal", "organization_id": "org-1"}),
+            "plan_type_invalid",
+        )
+        self.assertEqual(
+            service.evaluate_resume_gate({"plan_type": "business", "organization_id": ""}),
+            "organization_id_missing",
+        )
+        self.assertEqual(
+            service.evaluate_resume_gate(
+                {
+                    "plan_type": "business",
+                    "organization_id": "org-1",
+                    "workspace_reachable": False,
+                }
+            ),
+            "workspace_unreachable",
+        )
+        self.assertEqual(
+            service.evaluate_resume_gate(
+                {
+                    "plan_type": "business",
+                    "organization_id": "org-1",
+                    "workspace_reachable": True,
+                    "members_page_accessible": False,
+                }
+            ),
+            "members_page_inaccessible",
+        )
+
+    def test_main_removes_infinite_worker_loop(self):
+        args = SimpleNamespace(
+            register_only=False,
+            proxy=None,
+            once=False,
+            sleep_min=5,
+            sleep_max=30,
+            tokens_dir="",
+        )
+
+        fake_server = mock.Mock()
+
+        def fake_get_env(name, default=None, required=False):
+            mapping = {
+                "CODEX_SLEEP_MIN": "5",
+                "CODEX_SLEEP_MAX": "30",
+                "CODEX_HTTP_PORT": "5000",
+            }
+            return mapping.get(name, default or "")
+
+        with mock.patch("argparse.ArgumentParser.parse_args", return_value=args), mock.patch.object(
+            service, "get_env", side_effect=fake_get_env
+        ), mock.patch.object(service.threading, "Thread") as thread_cls, mock.patch.object(
+            service, "ThreadingHTTPServer", return_value=fake_server
+        ):
+            service.main()
+
+        thread_cls.assert_not_called()
+        fake_server.serve_forever.assert_called_once()
 
 
 if __name__ == "__main__":

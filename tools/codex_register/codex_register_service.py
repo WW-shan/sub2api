@@ -45,8 +45,36 @@ last_updated_email = ""
 last_updated_account_id = ""
 last_processed_records = 0
 recent_logs = []
+workflow_id = ""
+job_phase = "idle"
+waiting_reason = ""
+active_workflow_thread = None
 status_lock = threading.Lock()
 JSONDict = Dict[str, Any]
+WAITING_MANUAL_PREFIX = "waiting_manual:"
+PHASE_IDLE = "idle"
+PHASE_RUNNING_CREATE_PARENT = "running:create_parent"
+PHASE_WAITING_PARENT_UPGRADE = "waiting_manual:parent_upgrade"
+PHASE_RUNNING_PRE_RESUME_CHECK = "running:pre_resume_check"
+PHASE_RUNNING_INVITE_CHILDREN = "running:invite_children"
+PHASE_RUNNING_ACCEPT_AND_SWITCH = "running:accept_and_switch"
+PHASE_RUNNING_VERIFY_AND_BIND = "running:verify_and_bind"
+PHASE_COMPLETED = "completed"
+PHASE_ABANDONED = "abandoned"
+PHASE_FAILED = "failed"
+CANONICAL_JOB_PHASES = {
+    PHASE_IDLE,
+    PHASE_RUNNING_CREATE_PARENT,
+    PHASE_WAITING_PARENT_UPGRADE,
+    PHASE_RUNNING_PRE_RESUME_CHECK,
+    PHASE_RUNNING_INVITE_CHILDREN,
+    PHASE_RUNNING_ACCEPT_AND_SWITCH,
+    PHASE_RUNNING_VERIFY_AND_BIND,
+    PHASE_COMPLETED,
+    PHASE_ABANDONED,
+    PHASE_FAILED,
+}
+VALID_PARENT_PLAN_TYPES = {"team", "business"}
 
 DEFAULT_MODEL_MAPPING: Dict[str, str] = {
     "claude-haiku*": "gpt-5.2-codex",
@@ -915,9 +943,10 @@ def run_codex_once(tokens_dir: Path) -> List[Tuple[Path, List[JSONDict]]]:
         print("[codex-register] stderr:\n" + result.stderr, flush=True)
 
     if result.returncode != 0:
+        reason = f"script_exit_nonzero:{result.returncode}"
         print(f"[codex-register] 注册脚本退出码非 0: {result.returncode}", flush=True)
-        append_log("error", f"script_exit_nonzero:{result.returncode}")
-        return []
+        append_log("error", reason)
+        raise RuntimeError(reason)
 
     json_files = sorted(tokens_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not json_files:
@@ -1097,27 +1126,69 @@ def upsert_account(cur, token_info: JSONDict) -> str:
     return "created"
 
 
-def run_one_cycle(tokens_dir: Path) -> None:
+def normalize_reason_code(reason: str) -> str:
+    return str(reason or "unknown").strip().replace(" ", "_")
+
+
+def build_waiting_phase(reason: str) -> str:
+    return f"{WAITING_MANUAL_PREFIX}{normalize_reason_code(reason)}"
+
+
+def is_waiting_phase(phase: str) -> bool:
+    return str(phase or "").startswith(WAITING_MANUAL_PREFIX)
+
+
+def set_waiting_manual_locked(reason: str) -> None:
+    global job_phase, waiting_reason
+    reason_code = normalize_reason_code(reason)
+    job_phase = build_waiting_phase(reason_code)
+    waiting_reason = reason_code
+
+
+def _set_phase_locked(phase: str) -> None:
+    global job_phase
+    if phase in CANONICAL_JOB_PHASES:
+        job_phase = phase
+
+
+def _refresh_workflow_thread_locked() -> None:
+    global active_workflow_thread
+    if active_workflow_thread is not None and not active_workflow_thread.is_alive():
+        active_workflow_thread = None
+
+
+def _build_workflow_id() -> str:
+    return f"wf-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+
+
+def run_one_cycle(tokens_dir: Path) -> Tuple[bool, str]:
     global last_run, last_success, last_error, total_created, total_updated, total_skipped
     global last_token_email, last_created_email, last_created_account_id, last_updated_email, last_updated_account_id
     global last_processed_records
+
     with status_lock:
         last_run = datetime.utcnow()
+
     try:
         conn = create_db_connection()
         cur = conn.cursor()
         print("[codex-register] 数据库连接成功", flush=True)
     except Exception as exc:  # noqa: BLE001
-        last_error = traceback.format_exc()
+        trace = traceback.format_exc()
+        with status_lock:
+            last_error = trace
         append_log("error", f"db_connect_failed:{exc}")
-        print(f"[codex-register] 数据库连接失败，将在 10 秒后重试: {last_error}", flush=True)
-        time.sleep(10)
-        return
+        print(f"[codex-register] 数据库连接失败: {trace}", flush=True)
+        return False, "db_connect_failed"
+
+    stage_failed = False
+    stage_reason = ""
 
     try:
         batches = run_codex_once(tokens_dir)
         with status_lock:
             last_processed_records = sum(len(items) for _, items in batches)
+
         if batches:
             processed_dir = tokens_dir / "processed"
             for source_file, token_infos in batches:
@@ -1145,6 +1216,9 @@ def run_one_cycle(tokens_dir: Path) -> None:
                                 total_skipped += 1
                     except Exception as exc:  # noqa: BLE001
                         file_success = False
+                        if not stage_reason:
+                            stage_reason = f"token_process_failed:{source_file.name}"
+                        stage_failed = True
                         append_log("error", f"token_process_failed:{source_file.name}:{exc}")
                         print(f"[codex-register] 处理 token 失败（保留重试）: {source_file} {exc}", flush=True)
                         break
@@ -1154,18 +1228,43 @@ def run_one_cycle(tokens_dir: Path) -> None:
                         archived = archive_processed_file(source_file, processed_dir)
                         append_log("info", f"archived:{archived.name}")
                     except Exception as exc:  # noqa: BLE001
+                        if not stage_reason:
+                            stage_reason = f"archive_failed:{source_file.name}"
+                        stage_failed = True
                         append_log("error", f"archive_failed:{source_file.name}:{exc}")
                         print(f"[codex-register] 归档 token 文件失败（保留重试）: {source_file} {exc}", flush=True)
+
+            if stage_failed:
+                append_log("warn", f"cycle_waiting_manual:{stage_reason}")
+                with status_lock:
+                    last_error = stage_reason
+                return False, stage_reason or "process_error"
+
             with status_lock:
                 last_success = datetime.utcnow()
                 last_error = ""
             append_log("info", f"cycle_completed:{last_processed_records}")
-        else:
-            append_log("info", "cycle_completed:0")
-    except Exception:  # noqa: BLE001
-        last_error = traceback.format_exc()
+            return True, ""
+
+        append_log("info", "cycle_completed:0")
+        with status_lock:
+            last_success = datetime.utcnow()
+            last_error = ""
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        trace = traceback.format_exc()
+        reason = str(exc or "").strip()
+        if reason.startswith("script_exit_nonzero:"):
+            with status_lock:
+                last_error = reason
+            append_log("error", reason)
+            print(f"[codex-register] 处理流程异常: {reason}", flush=True)
+            return False, reason
+        with status_lock:
+            last_error = trace
         append_log("error", "process_error")
-        print(f"[codex-register] 处理流程异常: {last_error}", flush=True)
+        print(f"[codex-register] 处理流程异常: {trace}", flush=True)
+        return False, "process_error"
     finally:
         try:
             cur.close()
@@ -1177,22 +1276,254 @@ def run_one_cycle(tokens_dir: Path) -> None:
             pass
 
 
-def worker_loop(tokens_dir: Path, sleep_min: int, sleep_max: int) -> None:
-    while True:
+def _begin_workflow_locked(*, allow_resume: bool) -> Optional[threading.Thread]:
+    global workflow_id, waiting_reason, enabled, active_workflow_thread
+
+    _refresh_workflow_thread_locked()
+    if active_workflow_thread is not None and active_workflow_thread.is_alive():
+        return None
+
+    if job_phase == PHASE_ABANDONED:
+        return None
+
+    if allow_resume:
+        if not is_waiting_phase(job_phase):
+            return None
+
+        if job_phase == PHASE_WAITING_PARENT_UPGRADE or waiting_reason == "parent_upgrade":
+            mode = "resume"
+            next_phase = PHASE_RUNNING_PRE_RESUME_CHECK
+        else:
+            mode = "start"
+            next_phase = PHASE_RUNNING_CREATE_PARENT
+    else:
+        mode = "start"
+        if job_phase not in (PHASE_IDLE, PHASE_COMPLETED):
+            return None
+        next_phase = PHASE_RUNNING_CREATE_PARENT
+
+    workflow_id = _build_workflow_id()
+    _set_phase_locked(next_phase)
+    waiting_reason = ""
+    enabled = True
+    workflow_thread = threading.Thread(target=_run_workflow_once, args=(workflow_id, mode), daemon=True)
+    active_workflow_thread = workflow_thread
+    return workflow_thread
+
+
+def start_workflow_once(*, allow_resume: bool = False) -> bool:
+    workflow_thread = None
+    with status_lock:
+        workflow_thread = _begin_workflow_locked(allow_resume=allow_resume)
+
+    if workflow_thread is None:
+        return False
+
+    try:
+        workflow_thread.start()
+        return True
+    except Exception as exc:  # noqa: BLE001
         with status_lock:
-            worker_enabled = enabled
-        if not worker_enabled:
-            time.sleep(5)
-            continue
-        run_one_cycle(tokens_dir)
-        sleep_seconds = random.randint(sleep_min, sleep_max)
-        print(f"[codex-register] 休眠 {sleep_seconds} 秒后继续下一轮", flush=True)
-        time.sleep(sleep_seconds)
+            global enabled, active_workflow_thread
+            enabled = False
+            set_waiting_manual_locked(f"thread_start_failed:{type(exc).__name__}")
+            active_workflow_thread = None
+        append_log("error", f"thread_start_failed:{exc}")
+        return False
+
+
+def _finalize_workflow_once(workflow_token: str, *, success: bool, reason: str = "") -> None:
+    global waiting_reason, enabled, active_workflow_thread
+
+    with status_lock:
+        if workflow_id != workflow_token:
+            _refresh_workflow_thread_locked()
+            return
+
+        if job_phase == PHASE_ABANDONED:
+            enabled = False
+            active_workflow_thread = None
+            return
+
+        if success:
+            _set_phase_locked(PHASE_COMPLETED)
+            waiting_reason = ""
+        else:
+            set_waiting_manual_locked(reason)
+
+        enabled = False
+        active_workflow_thread = None
+
+
+def _transition_workflow_phase(workflow_token: str, phase: str) -> bool:
+    with status_lock:
+        if workflow_id != workflow_token:
+            _refresh_workflow_thread_locked()
+            return False
+        if job_phase == PHASE_ABANDONED:
+            return False
+        _set_phase_locked(phase)
+        return True
+
+
+def _mark_parent_upgrade_waiting(workflow_token: str) -> None:
+    global enabled, active_workflow_thread
+    with status_lock:
+        if workflow_id != workflow_token:
+            _refresh_workflow_thread_locked()
+            return
+        if job_phase == PHASE_ABANDONED:
+            enabled = False
+            active_workflow_thread = None
+            return
+        set_waiting_manual_locked("parent_upgrade")
+        enabled = False
+        active_workflow_thread = None
+
+
+def _run_workflow_once(workflow_token: str, mode: str) -> None:
+    with status_lock:
+        tokens_dir = tokens_dir_global
+
+    if tokens_dir is None:
+        _finalize_workflow_once(workflow_token, success=False, reason="tokens_dir_unavailable")
+        return
+
+    if mode == "start":
+        if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_CREATE_PARENT):
+            return
+        success, reason = run_one_cycle(tokens_dir)
+        if success:
+            _mark_parent_upgrade_waiting(workflow_token)
+        else:
+            _finalize_workflow_once(workflow_token, success=False, reason=reason)
+        return
+
+    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_PRE_RESUME_CHECK):
+        return
+    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_INVITE_CHILDREN):
+        return
+    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_ACCEPT_AND_SWITCH):
+        return
+    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_VERIFY_AND_BIND):
+        return
+
+    success, reason = run_one_cycle(tokens_dir)
+    _finalize_workflow_once(workflow_token, success=success, reason=reason)
+
+
+def get_latest_parent_record() -> JSONDict:
+    conn = create_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT email, account_id, refresh_token, access_token "
+            "FROM codex_register_accounts WHERE source = 'codex-register' "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        if not row:
+            return {}
+
+        email = str(row[0] or "").strip()
+        account_id = str(row[1] or "").strip()
+        parent_record: JSONDict = {
+            "email": email,
+            "account_id": account_id,
+            "has_refresh_token": bool(str(row[2] or "").strip()),
+            "has_access_token": bool(str(row[3] or "").strip()),
+        }
+
+        cur.execute(
+            "SELECT credentials, extra FROM accounts WHERE platform = 'openai' AND type = 'oauth' "
+            "AND ((%s <> '' AND credentials ->> 'email' = %s) "
+            "OR (%s <> '' AND credentials ->> 'account_id' = %s)) "
+            "ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT 1",
+            (email, email, account_id, account_id),
+        )
+        account_row = cur.fetchone()
+        if account_row is None:
+            return parent_record
+
+        credentials = ensure_dict(account_row[0])
+        extra = ensure_dict(account_row[1])
+
+        plan_type = (
+            extra.get("plan_type")
+            or extra.get("codex_parent_plan_type")
+            or credentials.get("plan_type")
+            or credentials.get("codex_parent_plan_type")
+            or ""
+        )
+        organization_id = (
+            extra.get("organization_id")
+            or extra.get("org_id")
+            or extra.get("codex_parent_organization_id")
+            or credentials.get("organization_id")
+            or credentials.get("org_id")
+            or credentials.get("codex_parent_organization_id")
+            or ""
+        )
+
+        parent_record["plan_type"] = str(plan_type or "").strip().lower() or None
+        parent_record["organization_id"] = str(organization_id or "").strip() or None
+
+        if "workspace_reachable" in extra:
+            parent_record["workspace_reachable"] = bool(extra.get("workspace_reachable"))
+        if "members_page_accessible" in extra:
+            parent_record["members_page_accessible"] = bool(extra.get("members_page_accessible"))
+
+        return parent_record
+    except Exception as exc:  # noqa: BLE001
+        append_log("error", f"parent_record_read_failed:{exc}")
+        return {}
+    finally:
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def evaluate_resume_gate(parent_record: JSONDict) -> str:
+    with status_lock:
+        _refresh_workflow_thread_locked()
+        if active_workflow_thread is not None and active_workflow_thread.is_alive():
+            return "already_running"
+        if tokens_dir_global is None:
+            return "tokens_dir_unavailable"
+        if job_phase == PHASE_ABANDONED:
+            return "abandoned"
+
+    plan_type = str(parent_record.get("plan_type") or "").strip().lower()
+    if not plan_type:
+        return "plan_type_missing"
+    if plan_type not in VALID_PARENT_PLAN_TYPES:
+        return "plan_type_invalid"
+
+    organization_id = str(parent_record.get("organization_id") or "").strip()
+    if not organization_id:
+        return "organization_id_missing"
+
+    if parent_record.get("workspace_reachable") is False:
+        return "workspace_unreachable"
+
+    if parent_record.get("members_page_accessible") is False:
+        return "members_page_inaccessible"
+
+    return ""
 
 
 def get_status_payload() -> JSONDict:
     proxy = get_env("CODEX_PROXY", "")
     with status_lock:
+        _refresh_workflow_thread_locked()
+        can_resume = is_waiting_phase(job_phase)
+        can_start = job_phase in (PHASE_IDLE, PHASE_COMPLETED)
+        can_abandon = job_phase != PHASE_ABANDONED
         return {
             "enabled": enabled,
             "sleep_min": sleep_min_global,
@@ -1210,6 +1541,12 @@ def get_status_payload() -> JSONDict:
             "last_updated_email": last_updated_email or None,
             "last_updated_account_id": last_updated_account_id or None,
             "last_processed_records": last_processed_records,
+            "job_phase": job_phase,
+            "workflow_id": workflow_id or None,
+            "waiting_reason": waiting_reason or None,
+            "can_start": can_start,
+            "can_resume": can_resume,
+            "can_abandon": can_abandon,
         }
 
 
@@ -1278,10 +1615,10 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"error":"not_found"}')
 
     def do_POST(self) -> None:  # noqa: N802
-        global enabled, tokens_dir_global
+        global enabled, waiting_reason
+
         if self.path == "/enable":
-            with status_lock:
-                enabled = True
+            start_workflow_once(allow_resume=False)
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -1289,9 +1626,12 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
         if self.path == "/disable":
             with status_lock:
                 enabled = False
+                _set_phase_locked(PHASE_ABANDONED)
+                waiting_reason = "disabled"
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -1299,12 +1639,40 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
         if self.path == "/run-once":
-            with status_lock:
-                run_once_tokens_dir = tokens_dir_global
-            if run_once_tokens_dir is not None:
-                run_one_cycle(run_once_tokens_dir)
+            start_workflow_once(allow_resume=False)
             body = json.dumps(get_status_payload()).encode("utf-8")
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path == "/resume":
+            current_status = get_status_payload()
+            if not is_waiting_phase(current_status.get("job_phase")):
+                body = json.dumps(current_status).encode("utf-8")
+            else:
+                resume_phase = str(current_status.get("job_phase") or "")
+                resume_reason = str(current_status.get("waiting_reason") or "")
+                needs_parent_gate = resume_phase == PHASE_WAITING_PARENT_UPGRADE or resume_reason == "parent_upgrade"
+
+                if needs_parent_gate:
+                    latest_parent = get_latest_parent_record()
+                    gate_reason = evaluate_resume_gate(latest_parent)
+                    if gate_reason:
+                        with status_lock:
+                            if job_phase != PHASE_ABANDONED:
+                                enabled = False
+                                set_waiting_manual_locked(gate_reason)
+                    else:
+                        start_workflow_once(allow_resume=True)
+                else:
+                    start_workflow_once(allow_resume=True)
+                body = json.dumps(get_status_payload()).encode("utf-8")
+
             self.send_response(200)
             self._cors_headers()
             self.send_header("Content-Type", "application/json")
@@ -1356,9 +1724,6 @@ def main() -> None:
     with status_lock:
         tokens_dir_global = tokens_dir
 
-    worker = threading.Thread(target=worker_loop, args=(tokens_dir, sleep_min, sleep_max), daemon=True)
-    worker.start()
-
     port = int(get_env("CODEX_HTTP_PORT", "5000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), CodexRequestHandler)
     print(f"[codex-register] HTTP 服务启动于 0.0.0.0:{port}", flush=True)
@@ -1367,3 +1732,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
