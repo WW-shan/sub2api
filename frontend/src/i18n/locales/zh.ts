@@ -1006,7 +1006,8 @@ export default {
         start: '开启',
         stop: '关闭',
         runOnce: '手动执行一次',
-        refreshing: '刷新中…'
+        refreshing: '刷新中…',
+        copy: '复制'
       },
       summary: {
         totalCreated: '累计生成账号数',
@@ -1038,6 +1039,19 @@ export default {
         eventsDescription: '展示服务最近的运行记录和错误，便于快速排查容器执行情况。',
         eventCount: '{count} 条记录',
         emptyEvents: '暂无事件'
+      },
+      accounts: {
+        title: '已创建账户',
+        description: '仅展示 codex-register 自动创建的账户记录',
+        empty: '暂无账户记录',
+        columns: {
+          email: '邮箱',
+          password: '密码',
+          accessToken: 'Access Token',
+          refreshToken: 'Refresh Token',
+          accountId: 'Account ID',
+          createdAt: '创建时间'
+        }
       }
     },
 

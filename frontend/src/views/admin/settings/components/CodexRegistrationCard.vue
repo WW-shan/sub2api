@@ -206,6 +206,69 @@
           </div>
         </section>
       </div>
+
+      <section class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20">
+        <div class="flex items-center justify-between gap-3 border-b border-gray-200 px-6 py-4 dark:border-dark-700">
+          <div>
+            <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.codexRegister.accounts.title') }}</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.codexRegister.accounts.description') }}</p>
+          </div>
+          <span class="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300">
+            {{ t('admin.codexRegister.panels.eventCount', { count: accounts.length }) }}
+          </span>
+        </div>
+
+        <div class="p-6">
+          <div
+            v-if="accounts.length === 0"
+            class="rounded-xl border border-dashed border-gray-200 px-6 py-10 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-gray-400"
+          >
+            {{ t('admin.codexRegister.accounts.empty') }}
+          </div>
+          <div
+            v-else
+            class="overflow-auto rounded-xl border border-gray-200 bg-white dark:border-dark-700 dark:bg-dark-900/40"
+          >
+            <table class="min-w-full divide-y divide-gray-200 text-xs dark:divide-dark-700">
+              <thead class="bg-gray-50 dark:bg-dark-800/60">
+                <tr>
+                  <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.email') }}</th>
+                  <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.password') }}</th>
+                  <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.accessToken') }}</th>
+                  <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.refreshToken') }}</th>
+                  <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.accountId') }}</th>
+                  <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.createdAt') }}</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100 dark:divide-dark-800">
+                <tr v-for="account in accounts" :key="account.id">
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200">{{ account.email }}</td>
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200 break-all">
+                    <div class="flex items-center gap-2">
+                      <span>{{ account.password }}</span>
+                      <button type="button" class="btn btn-secondary btn-xs" @click="copyText(account.password)">{{ t('admin.codexRegister.actions.copy') }}</button>
+                    </div>
+                  </td>
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200 break-all">
+                    <div class="flex items-center gap-2">
+                      <span>{{ account.access_token }}</span>
+                      <button type="button" class="btn btn-secondary btn-xs" @click="copyText(account.access_token)">{{ t('admin.codexRegister.actions.copy') }}</button>
+                    </div>
+                  </td>
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200 break-all">
+                    <div class="flex items-center gap-2">
+                      <span>{{ account.refresh_token }}</span>
+                      <button type="button" class="btn btn-secondary btn-xs" @click="copyText(account.refresh_token)">{{ t('admin.codexRegister.actions.copy') }}</button>
+                    </div>
+                  </td>
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200">{{ account.account_id || '-' }}</td>
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200">{{ account.created_at || '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </template>
@@ -214,7 +277,7 @@
 import { computed, h, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
-import type { CodexLogEntry, CodexStatus } from '@/api/admin/codex'
+import type { CodexLogEntry, CodexRegisterAccount, CodexStatus } from '@/api/admin/codex'
 import StatCard from '@/components/common/StatCard.vue'
 
 const props = defineProps({
@@ -230,6 +293,7 @@ const status = ref<CodexStatus | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 const logs = ref<CodexLogEntry[]>([])
+const accounts = ref<CodexRegisterAccount[]>([])
 const refreshing = ref(false)
 let timer: number | undefined
 const POLL_INTERVAL = 10000
@@ -354,11 +418,26 @@ async function fetchLogs() {
   }
 }
 
+async function fetchAccounts() {
+  try {
+    const data = await adminAPI.codex.getAccounts()
+    accounts.value = data
+  } catch (errorValue) {
+    accounts.value = []
+    error.value = getErrorMessage(errorValue)
+  }
+}
+
+async function copyText(value: string) {
+  if (!value) return
+  await navigator.clipboard.writeText(value)
+}
+
 async function refreshAll() {
   if (refreshing.value) return
   refreshing.value = true
   try {
-    await Promise.all([fetchStatus(), fetchLogs()])
+    await Promise.all([fetchStatus(), fetchLogs(), fetchAccounts()])
   } finally {
     refreshing.value = false
   }

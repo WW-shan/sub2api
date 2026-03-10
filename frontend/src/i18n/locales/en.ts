@@ -984,7 +984,8 @@ export default {
         start: 'Start',
         stop: 'Stop',
         runOnce: 'Run Once',
-        refreshing: 'Refreshing…'
+        refreshing: 'Refreshing…',
+        copy: 'Copy'
       },
       summary: {
         totalCreated: 'Total Accounts Created',
@@ -1016,6 +1017,19 @@ export default {
         eventsDescription: 'Shows recent runtime records and failures so you can quickly inspect container behavior.',
         eventCount: '{count} records',
         emptyEvents: 'No events yet'
+      },
+      accounts: {
+        title: 'Created Accounts',
+        description: 'Only codex-register auto-created account records are shown',
+        empty: 'No account records yet',
+        columns: {
+          email: 'Email',
+          password: 'Password',
+          accessToken: 'Access Token',
+          refreshToken: 'Refresh Token',
+          accountId: 'Account ID',
+          createdAt: 'Created At'
+        }
       }
     },
 

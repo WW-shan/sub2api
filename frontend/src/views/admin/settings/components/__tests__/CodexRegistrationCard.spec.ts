@@ -11,6 +11,7 @@ const StatCardStub = {
 const codexApiMocks = vi.hoisted(() => ({
   getStatus: vi.fn(),
   getLogs: vi.fn(),
+  getAccounts: vi.fn(),
   enable: vi.fn(),
   disable: vi.fn(),
   runOnce: vi.fn()
@@ -38,6 +39,7 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.actions.stop': '关闭',
     'admin.codexRegister.actions.runOnce': '手动执行一次',
     'admin.codexRegister.actions.refreshing': '刷新中…',
+    'admin.codexRegister.actions.copy': '复制',
     'admin.codexRegister.summary.totalCreated': '累计生成账号数',
     'admin.codexRegister.summary.lastSuccess': '最近成功时间',
     'admin.codexRegister.summary.proxy': '是否配置代理',
@@ -61,7 +63,16 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.panels.noErrors': '最近没有错误输出，服务状态看起来正常。',
     'admin.codexRegister.panels.eventsTitle': '最近事件',
     'admin.codexRegister.panels.eventsDescription': 'events description',
-    'admin.codexRegister.panels.emptyEvents': '暂无事件'
+    'admin.codexRegister.panels.emptyEvents': '暂无事件',
+    'admin.codexRegister.accounts.title': '已创建账户',
+    'admin.codexRegister.accounts.description': '仅展示 codex-register 自动创建记录',
+    'admin.codexRegister.accounts.empty': '暂无账号记录',
+    'admin.codexRegister.accounts.columns.email': '邮箱',
+    'admin.codexRegister.accounts.columns.password': '密码',
+    'admin.codexRegister.accounts.columns.accessToken': 'Access Token',
+    'admin.codexRegister.accounts.columns.refreshToken': 'Refresh Token',
+    'admin.codexRegister.accounts.columns.accountId': 'Account ID',
+    'admin.codexRegister.accounts.columns.createdAt': '创建时间'
   }
 
   return {
@@ -108,6 +119,20 @@ describe('CodexRegistrationCard', () => {
         message: 'run completed'
       }
     ])
+
+    codexApiMocks.getAccounts.mockResolvedValue([
+      {
+        id: 1,
+        email: 'a@example.com',
+        password: 'pw-123',
+        access_token: 'at-123',
+        refresh_token: 'rt-123',
+        account_id: 'acct-1',
+        source: 'codex-register',
+        created_at: '2026-03-06T10:00:01Z',
+        updated_at: '2026-03-06T10:00:01Z'
+      }
+    ])
   })
 
   afterEach(() => {
@@ -133,6 +158,7 @@ describe('CodexRegistrationCard', () => {
 
     expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(1)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.getAccounts).toHaveBeenCalledTimes(1)
 
     const cardText = wrapper.text()
 
@@ -146,6 +172,11 @@ describe('CodexRegistrationCard', () => {
     expect(cardText).toContain('最近错误日志')
     expect(cardText).toContain('最近事件')
     expect(cardText).toContain('run completed')
+    expect(cardText).toContain('已创建账户')
+    expect(cardText).toContain('a@example.com')
+    expect(cardText).toContain('pw-123')
+    expect(cardText).toContain('at-123')
+    expect(cardText).toContain('rt-123')
 
     wrapper.unmount()
     expect(clearIntervalSpy).toHaveBeenCalled()
@@ -178,6 +209,7 @@ describe('CodexRegistrationCard', () => {
 
     expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(1)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.getAccounts).toHaveBeenCalledTimes(1)
     expect(setIntervalSpy).toHaveBeenCalledTimes(1)
 
     vi.advanceTimersByTime(10000)
@@ -185,6 +217,7 @@ describe('CodexRegistrationCard', () => {
 
     expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(2)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.getAccounts).toHaveBeenCalledTimes(2)
 
     await wrapper.setProps({ active: false })
     await flushPromises()
@@ -196,14 +229,34 @@ describe('CodexRegistrationCard', () => {
 
     expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(2)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.getAccounts).toHaveBeenCalledTimes(2)
 
     setIntervalSpy.mockRestore()
     clearIntervalSpy.mockRestore()
   })
 
+  it('copies account secrets with copy action', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const copyButtons = wrapper.findAll('button').filter((btn) => btn.text() === '复制')
+    expect(copyButtons.length).toBeGreaterThan(0)
+
+    await copyButtons[0].trigger('click')
+    expect(writeText).toHaveBeenCalled()
+  })
+
   it('shows error details when initial requests fail', async () => {
     codexApiMocks.getStatus.mockRejectedValueOnce(new Error('status failed'))
     codexApiMocks.getLogs.mockRejectedValueOnce(new Error('logs failed'))
+    codexApiMocks.getAccounts.mockResolvedValueOnce([])
 
     const wrapper = mount(CodexRegistrationCard, {
       props: {

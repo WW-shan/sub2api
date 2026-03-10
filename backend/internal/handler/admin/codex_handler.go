@@ -75,6 +75,10 @@ func (h *CodexHandler) GetLogs(c *gin.Context) {
 	h.proxyGet(c, "/logs")
 }
 
+func (h *CodexHandler) GetAccounts(c *gin.Context) {
+	h.proxyGet(c, "/accounts")
+}
+
 func (h *CodexHandler) Enable(c *gin.Context) {
 	h.proxyPost(c, "/enable")
 }

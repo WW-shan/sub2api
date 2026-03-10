@@ -10,28 +10,32 @@ import (
 )
 
 func TestInit_DualOutput(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir, err := os.MkdirTemp("", "logger-dual-output-")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
 	logPath := filepath.Join(tmpDir, "logs", "sub2api.log")
+	stdoutPath := filepath.Join(tmpDir, "stdout.log")
+	stderrPath := filepath.Join(tmpDir, "stderr.log")
 
 	origStdout := os.Stdout
 	origStderr := os.Stderr
-	stdoutR, stdoutW, err := os.Pipe()
+	stdoutFile, err := os.Create(stdoutPath)
 	if err != nil {
-		t.Fatalf("create stdout pipe: %v", err)
+		t.Fatalf("create stdout file: %v", err)
 	}
-	stderrR, stderrW, err := os.Pipe()
+	stderrFile, err := os.Create(stderrPath)
 	if err != nil {
-		t.Fatalf("create stderr pipe: %v", err)
+		t.Fatalf("create stderr file: %v", err)
 	}
-	os.Stdout = stdoutW
-	os.Stderr = stderrW
+	os.Stdout = stdoutFile
+	os.Stderr = stderrFile
 	t.Cleanup(func() {
 		os.Stdout = origStdout
 		os.Stderr = origStderr
-		_ = stdoutR.Close()
-		_ = stderrR.Close()
-		_ = stdoutW.Close()
-		_ = stderrW.Close()
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
 	})
 
 	err = Init(InitOptions{
@@ -59,10 +63,10 @@ func TestInit_DualOutput(t *testing.T) {
 	L().Warn("dual-output-warn")
 	Sync()
 
-	_ = stdoutW.Close()
-	_ = stderrW.Close()
-	stdoutBytes, _ := io.ReadAll(stdoutR)
-	stderrBytes, _ := io.ReadAll(stderrR)
+	_ = stdoutFile.Sync()
+	_ = stderrFile.Sync()
+	stdoutBytes, _ := os.ReadFile(stdoutPath)
+	stderrBytes, _ := os.ReadFile(stderrPath)
 	stdoutText := string(stdoutBytes)
 	stderrText := string(stderrBytes)
 
@@ -80,6 +84,10 @@ func TestInit_DualOutput(t *testing.T) {
 	fileText := string(fileBytes)
 	if !strings.Contains(fileText, "dual-output-info") || !strings.Contains(fileText, "dual-output-warn") {
 		t.Fatalf("file missing logs: %s", fileText)
+	}
+
+	if err := Init(InitOptions{Output: OutputOptions{ToStdout: true, ToFile: false}}); err != nil {
+		t.Fatalf("reset logger after test: %v", err)
 	}
 }
 
@@ -166,7 +174,6 @@ func TestInit_CallerShouldPointToCallsite(t *testing.T) {
 	}
 
 	L().Info("caller-check")
-	Sync()
 	_ = stdoutW.Close()
 	logBytes, _ := io.ReadAll(stdoutR)
 

@@ -28,7 +28,7 @@ def get_requests_module():
     return importlib.import_module("curl_cffi.requests")
 
 
-enabled = True
+enabled = False
 last_run = None
 last_success = None
 last_error = ""
@@ -237,13 +237,13 @@ def _mailtm_domains(proxies: Any = None) -> List[str]:
     return domains
 
 
-def get_email_and_token(proxies: Any = None) -> tuple[str, str]:
+def get_email_and_token(proxies: Any = None) -> tuple[str, str, str]:
     requests = get_requests_module()
     try:
         domains = _mailtm_domains(proxies)
         if not domains:
             print("[Error] Mail.tm 没有可用域名")
-            return "", ""
+            return "", "", ""
         domain = random.choice(domains)
 
         for _ in range(5):
@@ -273,13 +273,13 @@ def get_email_and_token(proxies: Any = None) -> tuple[str, str]:
             if token_resp.status_code == 200:
                 token = str(token_resp.json().get("token") or "").strip()
                 if token:
-                    return email, token
+                    return email, token, password
 
         print("[Error] Mail.tm 邮箱创建成功但获取 Token 失败")
-        return "", ""
+        return "", "", ""
     except Exception as exc:
         print(f"[Error] 请求 Mail.tm API 出错: {exc}")
-        return "", ""
+        return "", "", ""
 
 
 def get_oai_code(token: str, email: str, proxies: Any = None) -> str:
@@ -548,6 +548,35 @@ def submit_callback_url(*, callback_url: str, expected_state: str, code_verifier
     return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
 
 
+def extract_session_access_token(session_payload: JSONDict) -> str:
+    if not isinstance(session_payload, dict):
+        return ""
+    return str(session_payload.get("accessToken") or "").strip()
+
+
+def fetch_session_access_token(session: Any) -> str:
+    try:
+        response = session.get("https://chatgpt.com/api/auth/session", timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        append_log("warn", f"session_access_token_request_failed:{exc}")
+        return ""
+
+    if getattr(response, "status_code", 0) != 200:
+        append_log("warn", f"session_access_token_status:{getattr(response, 'status_code', 0)}")
+        return ""
+
+    try:
+        payload = response.json()
+    except Exception as exc:  # noqa: BLE001
+        append_log("warn", f"session_access_token_parse_failed:{exc}")
+        return ""
+
+    token = extract_session_access_token(payload)
+    if not token:
+        append_log("warn", "session_access_token_missing")
+    return token
+
+
 def run(proxy: Optional[str]) -> Optional[str]:
     requests = get_requests_module()
     proxies: Any = None
@@ -566,7 +595,7 @@ def run(proxy: Optional[str]) -> Optional[str]:
         print(f"[Error] 网络连接检查失败: {exc}")
         return None
 
-    email, dev_token = get_email_and_token(proxies)
+    email, dev_token, password = get_email_and_token(proxies)
     if not email or not dev_token:
         return None
     print(f"[*] 成功获取 Mail.tm 邮箱与授权: {email}")
@@ -698,12 +727,23 @@ def run(proxy: Optional[str]) -> Optional[str]:
 
             next_url = urllib.parse.urljoin(current_url, location)
             if "code=" in next_url and "state=" in next_url:
-                return submit_callback_url(
+                token_json = submit_callback_url(
                     callback_url=next_url,
                     code_verifier=oauth.code_verifier,
                     redirect_uri=oauth.redirect_uri,
                     expected_state=oauth.state,
                 )
+                try:
+                    token_payload = ensure_dict(token_json)
+                    token_payload["password"] = password
+                    session_access_token = fetch_session_access_token(session)
+                    if session_access_token:
+                        token_payload["session_access_token"] = session_access_token
+                        token_payload["access_token"] = session_access_token
+                    return json.dumps(token_payload, ensure_ascii=False, separators=(",", ":"))
+                except Exception as exc:  # noqa: BLE001
+                    append_log("warn", f"token_payload_augment_failed:{exc}")
+                    return token_json
             current_url = next_url
 
         print("[Error] 未能在重定向链中捕获到最终 Callback URL")
@@ -775,6 +815,42 @@ def create_db_connection():
     )
     conn.autocommit = True
     return conn
+
+
+def list_codex_register_accounts() -> List[JSONDict]:
+    conn = create_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT id, email, password, refresh_token, access_token, account_id, source, created_at, updated_at "
+            "FROM codex_register_accounts WHERE source = 'codex-register' ORDER BY created_at DESC"
+        )
+        rows = cur.fetchall()
+        records: List[JSONDict] = []
+        for row in rows:
+            records.append(
+                {
+                    "id": row[0],
+                    "email": row[1],
+                    "password": row[2],
+                    "refresh_token": row[3],
+                    "access_token": row[4],
+                    "account_id": row[5],
+                    "source": row[6],
+                    "created_at": row[7].isoformat() + "Z" if row[7] is not None else None,
+                    "updated_at": row[8].isoformat() + "Z" if row[8] is not None else None,
+                }
+            )
+        return records
+    finally:
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def pg_json(value):
@@ -950,6 +1026,27 @@ def build_extra(existing: JSONDict, token_info: JSONDict) -> JSONDict:
     return extra
 
 
+def upsert_codex_register_account(cur, token_info: JSONDict) -> None:
+    email = str(token_info.get("email") or "").strip()
+    if not email:
+        append_log("warn", "codex_register_account_missing_email")
+        return
+
+    password = str(token_info.get("password") or "").strip()
+    refresh_token = str(token_info.get("refresh_token") or "").strip()
+    access_token = str(token_info.get("session_access_token") or token_info.get("access_token") or "").strip()
+    account_id = str(token_info.get("account_id") or "").strip() or None
+
+    cur.execute(
+        "INSERT INTO codex_register_accounts (email, password, refresh_token, access_token, account_id, source, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, 'codex-register', NOW(), NOW()) "
+        "ON CONFLICT (email, source) DO UPDATE "
+        "SET password = EXCLUDED.password, refresh_token = EXCLUDED.refresh_token, access_token = EXCLUDED.access_token, "
+        "account_id = EXCLUDED.account_id, updated_at = NOW()",
+        (email, password, refresh_token, access_token, account_id),
+    )
+
+
 def upsert_account(cur, token_info: JSONDict) -> str:
     email = token_info.get("email") or ""
     account_id = token_info.get("account_id") or ""
@@ -1032,6 +1129,7 @@ def run_one_cycle(tokens_dir: Path) -> None:
                             with status_lock:
                                 last_token_email = identifier
                         action = upsert_account(cur, token_info)
+                        upsert_codex_register_account(cur, token_info)
                         if action == "created":
                             with status_lock:
                                 total_created += 1
@@ -1139,6 +1237,25 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             with status_lock:
                 logs = list(recent_logs)
             body = json.dumps({"logs": logs}).encode("utf-8")
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/accounts":
+            try:
+                accounts = list_codex_register_accounts()
+            except Exception as exc:  # noqa: BLE001
+                append_log("error", f"list_codex_register_accounts_failed:{exc}")
+                body = json.dumps({"error": str(exc)}).encode("utf-8")
+                self.send_response(500)
+                self._cors_headers()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            body = json.dumps({"accounts": accounts}).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
             self.send_header("Content-Type", "application/json")

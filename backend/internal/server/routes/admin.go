@@ -287,6 +287,7 @@ func registerCodexRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	{
 		codex.GET("/status", h.Admin.Codex.GetStatus)
 		codex.GET("/logs", h.Admin.Codex.GetLogs)
+		codex.GET("/accounts", h.Admin.Codex.GetAccounts)
 		codex.POST("/enable", h.Admin.Codex.Enable)
 		codex.POST("/disable", h.Admin.Codex.Disable)
 		codex.POST("/run-once", h.Admin.Codex.RunOnce)

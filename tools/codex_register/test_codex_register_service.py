@@ -30,6 +30,39 @@ class _FakeConn:
 
 
 class CodexRegisterServiceTests(unittest.TestCase):
+    def test_extract_session_access_token_returns_value(self):
+        self.assertEqual(service.extract_session_access_token({"accessToken": "abc123"}), "abc123")
+
+    def test_extract_session_access_token_returns_empty_when_missing(self):
+        self.assertEqual(service.extract_session_access_token({"user": {"id": "x"}}), "")
+
+    def test_upsert_codex_register_account_uses_upsert_sql(self):
+        cur = mock.Mock()
+
+        service.upsert_codex_register_account(
+            cur,
+            {
+                "email": "a@example.com",
+                "password": "pw",
+                "refresh_token": "rt",
+                "session_access_token": "at",
+                "account_id": "acct-1",
+            },
+        )
+
+        sql = cur.execute.call_args[0][0]
+        params = cur.execute.call_args[0][1]
+        self.assertIn("INSERT INTO codex_register_accounts", sql)
+        self.assertIn("ON CONFLICT (email, source) DO UPDATE", sql)
+        self.assertEqual(params[0], "a@example.com")
+        self.assertEqual(params[1], "pw")
+        self.assertEqual(params[2], "rt")
+        self.assertEqual(params[3], "at")
+        self.assertEqual(params[4], "acct-1")
+
+    def test_service_default_disabled_until_enable(self):
+        self.assertFalse(service.enabled)
+
     def _build_default_model_mapping(self):
         with mock.patch.dict("os.environ", {"CODEX_MODEL_MAPPING_JSON": ""}, clear=False):
             return service.build_model_mapping()

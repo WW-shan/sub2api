@@ -16,6 +16,18 @@ export interface CodexLogEntry {
   message: string
 }
 
+export interface CodexRegisterAccount {
+  id: number
+  email: string
+  password: string
+  refresh_token: string
+  access_token: string
+  account_id: string | null
+  source: string
+  created_at: string | null
+  updated_at: string | null
+}
+
 export async function getStatus(): Promise<CodexStatus> {
   const res = await apiClient.get<CodexStatus>('/admin/codex/status')
   return res.data
@@ -24,6 +36,11 @@ export async function getStatus(): Promise<CodexStatus> {
 export async function getLogs(): Promise<CodexLogEntry[]> {
   const res = await apiClient.get<{ logs: CodexLogEntry[] }>('/admin/codex/logs')
   return res.data?.logs ?? []
+}
+
+export async function getAccounts(): Promise<CodexRegisterAccount[]> {
+  const res = await apiClient.get<{ accounts: CodexRegisterAccount[] }>('/admin/codex/accounts')
+  return res.data?.accounts ?? []
 }
 
 export async function enable(): Promise<CodexStatus> {
@@ -44,6 +61,7 @@ export async function runOnce(): Promise<CodexStatus> {
 export default {
   getStatus,
   getLogs,
+  getAccounts,
   enable,
   disable,
   runOnce
