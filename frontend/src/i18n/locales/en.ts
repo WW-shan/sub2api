@@ -983,6 +983,7 @@ export default {
       actions: {
         start: 'Start',
         stop: 'Stop',
+        resume: 'Resume',
         runOnce: 'Run Once',
         refreshing: 'Refreshing…',
         copy: 'Copy'
@@ -1008,6 +1009,9 @@ export default {
         proxyConfig: 'Proxy Configuration',
         proxyConfiguredDetail: 'Proxy is configured and the container can register through the current egress path.',
         proxyMissingDetail: 'No proxy is configured. Confirm whether the container requires a dedicated network exit.',
+        phaseTitle: 'Workflow Phase',
+        waitingReasonTitle: 'Waiting Reason',
+        waitingReasonEmpty: 'Not waiting',
         lastSuccessTitle: 'Last Success Time',
         lastSuccessEmpty: 'No successful runs yet',
         sleepRangeTitle: 'Sleep Range',

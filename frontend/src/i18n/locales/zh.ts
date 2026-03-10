@@ -1005,6 +1005,7 @@ export default {
       actions: {
         start: '开启',
         stop: '关闭',
+        resume: '恢复',
         runOnce: '手动执行一次',
         refreshing: '刷新中…',
         copy: '复制'
@@ -1030,6 +1031,9 @@ export default {
         proxyConfig: '代理配置',
         proxyConfiguredDetail: '已配置代理，容器可按当前出口执行注册',
         proxyMissingDetail: '未配置代理，请确认网络出口要求',
+        phaseTitle: '工作流阶段',
+        waitingReasonTitle: '等待原因',
+        waitingReasonEmpty: '当前无需等待',
         lastSuccessTitle: '最近成功时间',
         lastSuccessEmpty: '暂无成功记录',
         sleepRangeTitle: '休眠区间',

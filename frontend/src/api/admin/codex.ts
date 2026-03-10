@@ -8,6 +8,12 @@ export interface CodexStatus {
   last_success: string | null
   last_error: string | null
   proxy: boolean
+  job_phase: string
+  workflow_id: string | null
+  waiting_reason: string | null
+  can_start: boolean
+  can_resume: boolean
+  can_abandon: boolean
 }
 
 export interface CodexLogEntry {
@@ -58,11 +64,17 @@ export async function runOnce(): Promise<CodexStatus> {
   return res.data
 }
 
+export async function resume(): Promise<CodexStatus> {
+  const res = await apiClient.post<CodexStatus>('/admin/codex/resume')
+  return res.data
+}
+
 export default {
   getStatus,
   getLogs,
   getAccounts,
   enable,
   disable,
-  runOnce
+  runOnce,
+  resume
 }

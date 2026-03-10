@@ -14,7 +14,8 @@ const codexApiMocks = vi.hoisted(() => ({
   getAccounts: vi.fn(),
   enable: vi.fn(),
   disable: vi.fn(),
-  runOnce: vi.fn()
+  runOnce: vi.fn(),
+  resume: vi.fn()
 }))
 
 vi.mock('@/api/admin', () => ({
@@ -37,6 +38,7 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.badge.healthy': '暂无错误',
     'admin.codexRegister.actions.start': '开启',
     'admin.codexRegister.actions.stop': '关闭',
+    'admin.codexRegister.actions.resume': '恢复',
     'admin.codexRegister.actions.runOnce': '手动执行一次',
     'admin.codexRegister.actions.refreshing': '刷新中…',
     'admin.codexRegister.actions.copy': '复制',
@@ -56,6 +58,9 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.panels.proxyConfig': '代理配置',
     'admin.codexRegister.panels.proxyConfiguredDetail': '已配置代理，容器可按当前出口执行注册',
     'admin.codexRegister.panels.proxyMissingDetail': '未配置代理，请确认网络出口要求',
+    'admin.codexRegister.panels.phaseTitle': '工作流阶段',
+    'admin.codexRegister.panels.waitingReasonTitle': '等待原因',
+    'admin.codexRegister.panels.waitingReasonEmpty': '当前无需等待',
     'admin.codexRegister.panels.lastSuccessTitle': '最近成功时间',
     'admin.codexRegister.panels.lastSuccessEmpty': '暂无成功记录',
     'admin.codexRegister.panels.sleepRangeTitle': '休眠区间',
@@ -109,7 +114,13 @@ describe('CodexRegistrationCard', () => {
       total_created: 18,
       last_success: '2026-03-06 10:00:00',
       last_error: 'sample failure',
-      proxy: true
+      proxy: true,
+      job_phase: 'waiting_manual:db_connect_failed',
+      workflow_id: 'wf-1',
+      waiting_reason: 'db_connect_failed',
+      can_start: false,
+      can_resume: true,
+      can_abandon: true
     })
 
     codexApiMocks.getLogs.mockResolvedValue([
@@ -164,11 +175,16 @@ describe('CodexRegistrationCard', () => {
 
     expect(cardText).toContain('当前状态')
     expect(cardText).toContain('手动执行一次')
+    expect(cardText).toContain('恢复')
     expect(cardText).toContain('12 - 34 秒')
     expect(cardText).toContain('18')
     expect(cardText).toContain('最近成功时间')
     expect(cardText).toContain('是否配置代理')
     expect(cardText).toContain('休眠区间（秒）')
+    expect(cardText).toContain('工作流阶段')
+    expect(cardText).toContain('waiting_manual:db_connect_failed')
+    expect(cardText).toContain('等待原因')
+    expect(cardText).toContain('db_connect_failed')
     expect(cardText).toContain('最近错误日志')
     expect(cardText).toContain('最近事件')
     expect(cardText).toContain('run completed')
@@ -177,6 +193,17 @@ describe('CodexRegistrationCard', () => {
     expect(cardText).toContain('pw-123')
     expect(cardText).toContain('at-123')
     expect(cardText).toContain('rt-123')
+
+    const buttons = wrapper.findAll('button')
+    const startButton = buttons.find((btn) => btn.text() === '开启')
+    const stopButton = buttons.find((btn) => btn.text() === '关闭')
+    const resumeButton = buttons.find((btn) => btn.text() === '恢复')
+    const runOnceButton = buttons.find((btn) => btn.text() === '手动执行一次')
+
+    expect(startButton?.attributes('disabled')).toBeDefined()
+    expect(stopButton?.attributes('disabled')).toBeUndefined()
+    expect(resumeButton?.attributes('disabled')).toBeUndefined()
+    expect(runOnceButton?.attributes('disabled')).toBeDefined()
 
     wrapper.unmount()
     expect(clearIntervalSpy).toHaveBeenCalled()
@@ -251,6 +278,44 @@ describe('CodexRegistrationCard', () => {
 
     await copyButtons[0].trigger('click')
     expect(writeText).toHaveBeenCalled()
+  })
+
+  it('calls resume endpoint when resume action is clicked', async () => {
+    codexApiMocks.resume.mockResolvedValueOnce({
+      enabled: true,
+      sleep_min: 12,
+      sleep_max: 34,
+      total_created: 19,
+      last_success: '2026-03-06 10:05:00',
+      last_error: null,
+      proxy: true,
+      job_phase: 'running:create_parent',
+      workflow_id: 'wf-2',
+      waiting_reason: null,
+      can_start: false,
+      can_resume: false,
+      can_abandon: true
+    })
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const resumeButton = wrapper
+      .findAll('button')
+      .find((btn) => btn.text() === '恢复')
+
+    expect(resumeButton).toBeDefined()
+
+    await resumeButton!.trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.resume).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('running:create_parent')
   })
 
   it('shows error details when initial requests fail', async () => {

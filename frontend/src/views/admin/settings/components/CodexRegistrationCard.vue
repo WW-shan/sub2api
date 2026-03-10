@@ -48,7 +48,7 @@
           <button
             type="button"
             class="btn btn-primary btn-sm"
-            :disabled="loading || status?.enabled"
+            :disabled="loading || !canStart"
             @click="toggleEnabled(true)"
           >
             {{ t('admin.codexRegister.actions.start') }}
@@ -56,7 +56,7 @@
           <button
             type="button"
             class="btn btn-secondary btn-sm"
-            :disabled="loading || !status?.enabled"
+            :disabled="loading || !canAbandon"
             @click="toggleEnabled(false)"
           >
             {{ t('admin.codexRegister.actions.stop') }}
@@ -64,7 +64,15 @@
           <button
             type="button"
             class="btn btn-secondary btn-sm"
-            :disabled="loading"
+            :disabled="loading || !canResume"
+            @click="resumeWorkflow"
+          >
+            {{ t('admin.codexRegister.actions.resume') }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-secondary btn-sm"
+            :disabled="loading || !canStart"
             @click="runOnce"
           >
             {{ t('admin.codexRegister.actions.runOnce') }}
@@ -103,6 +111,18 @@
                 <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.proxyConfig') }}</p>
                 <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
                   {{ proxyDetailLabel }}
+                </p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.phaseTitle') }}</p>
+                <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all">
+                  {{ codexPhaseLabel }}
+                </p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.waitingReasonTitle') }}</p>
+                <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all">
+                  {{ waitingReasonLabel }}
                 </p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
@@ -354,6 +374,26 @@ const sleepRangeDetailLabel = computed(() => {
   return error.value ? t('common.unknown') : t('common.loading')
 })
 
+const codexPhaseLabel = computed(() => {
+  if (!status.value) {
+    return error.value ? t('common.unknown') : t('common.loading')
+  }
+
+  return status.value.job_phase || t('common.unknown')
+})
+
+const waitingReasonLabel = computed(() => {
+  if (!status.value) {
+    return error.value ? t('common.unknown') : t('common.loading')
+  }
+
+  return status.value.waiting_reason || t('admin.codexRegister.panels.waitingReasonEmpty')
+})
+
+const canStart = computed(() => Boolean(status.value?.can_start))
+const canResume = computed(() => Boolean(status.value?.can_resume))
+const canAbandon = computed(() => Boolean(status.value?.can_abandon))
+
 const errorStateLabel = computed(() => {
   if (!status.value) {
     return error.value ? t('common.unknown') : t('common.loading')
@@ -458,6 +498,21 @@ async function toggleEnabled(value: boolean) {
   await fetchLogs()
 }
 
+async function resumeWorkflow() {
+  if (loading.value) return
+  loading.value = true
+  try {
+    const data = await adminAPI.codex.resume()
+    status.value = data
+    error.value = null
+  } catch (errorValue) {
+    error.value = getErrorMessage(errorValue)
+  } finally {
+    loading.value = false
+  }
+  await fetchLogs()
+}
+
 async function runOnce() {
   if (loading.value) return
   loading.value = true
@@ -522,6 +577,7 @@ defineExpose({
   sleepRangeDetailLabel,
   errorStateLabel,
   toggleEnabled,
+  resumeWorkflow,
   runOnce
 })
 </script>
