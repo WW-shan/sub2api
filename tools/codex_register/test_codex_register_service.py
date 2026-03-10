@@ -30,11 +30,26 @@ class _FakeConn:
 
 
 class CodexRegisterServiceTests(unittest.TestCase):
+    def _build_default_model_mapping(self):
+        with mock.patch.dict("os.environ", {"CODEX_MODEL_MAPPING_JSON": ""}, clear=False):
+            return service.build_model_mapping()
+
     def test_build_model_mapping_contains_supported_defaults(self):
-        self.assertEqual(service.build_model_mapping(), dict(service.DEFAULT_MODEL_MAPPING))
+        self.assertEqual(self._build_default_model_mapping(), dict(service.DEFAULT_MODEL_MAPPING))
+
+    def test_build_model_mapping_points_claude_to_52_codex(self):
+        mapping = self._build_default_model_mapping()
+
+        self.assertEqual(mapping["claude-haiku*"], "gpt-5.2-codex")
+        self.assertEqual(mapping["claude-sonnet*"], "gpt-5.2-codex")
+        self.assertEqual(mapping["claude-opus*"], "gpt-5.2-codex")
+
+        self.assertEqual(mapping["gpt-5.4"], "gpt-5.4")
+        self.assertEqual(mapping["gpt-5.3-codex-spark"], "gpt-5.3-codex-spark")
+        self.assertEqual(mapping["gpt-5-codex"], "gpt-5.1-codex")
 
     def test_build_model_mapping_includes_common_gpt_aliases(self):
-        mapping = service.build_model_mapping()
+        mapping = self._build_default_model_mapping()
 
         self.assertEqual(mapping["gpt-5"], "gpt-5")
         self.assertEqual(mapping["gpt-5-mini"], "gpt-5-mini")

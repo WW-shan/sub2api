@@ -49,9 +49,9 @@ status_lock = threading.Lock()
 JSONDict = Dict[str, Any]
 
 DEFAULT_MODEL_MAPPING: Dict[str, str] = {
-    "claude-haiku*": "gpt-5.3-codex-spark",
-    "claude-sonnet*": "gpt-5.4",
-    "claude-opus*": "gpt-5.4",
+    "claude-haiku*": "gpt-5.2-codex",
+    "claude-sonnet*": "gpt-5.2-codex",
+    "claude-opus*": "gpt-5.2-codex",
     "gpt-5.4": "gpt-5.4",
     "gpt-5.4-none": "gpt-5.4",
     "gpt-5.4-low": "gpt-5.4",
