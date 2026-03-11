@@ -113,6 +113,23 @@ class SmokeTestCodexRegisterFlowTests(unittest.TestCase):
         self.assertEqual(summary["child_invite_accept_count"], 2)
         self.assertEqual(summary["child_pool_count"], 2)
 
+    def test_verify_database_state_uses_parent_email_filter_when_provided(self):
+        conn = _FakeConn(
+            [
+                ("target-parent@example.com", "business", "org-1", "ws-business", True, True),
+                (1,),
+                (1,),
+                (1,),
+            ]
+        )
+
+        summary = smoke.verify_database_state(conn, min_children=1, parent_email="target-parent@example.com")
+
+        self.assertEqual(summary["parent_email"], "target-parent@example.com")
+        first_sql, first_params = conn.cursor_obj.executed[0]
+        self.assertIn("email = %s", first_sql)
+        self.assertEqual(first_params, ("target-parent@example.com",))
+
     def test_run_smoke_flow_calls_enable_resume_and_db_check(self):
         args = smoke.parse_args(
             [

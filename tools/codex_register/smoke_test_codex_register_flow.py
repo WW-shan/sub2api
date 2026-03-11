@@ -54,15 +54,25 @@ def create_db_connection():
     return service.create_db_connection()
 
 
-def verify_database_state(conn, *, min_children: int) -> JSONDict:
+def verify_database_state(conn, *, min_children: int, parent_email: str = "") -> JSONDict:
     cur = conn.cursor()
     try:
-        cur.execute(
-            "SELECT email, plan_type, organization_id, workspace_id, workspace_reachable, members_page_accessible "
-            "FROM codex_register_accounts "
-            "WHERE source = 'codex-register' AND codex_register_role = 'parent' "
-            "ORDER BY created_at DESC LIMIT 1"
-        )
+        normalized_parent_email = str(parent_email or "").strip()
+        if normalized_parent_email:
+            cur.execute(
+                "SELECT email, plan_type, organization_id, workspace_id, workspace_reachable, members_page_accessible "
+                "FROM codex_register_accounts "
+                "WHERE source = 'codex-register' AND codex_register_role = 'parent' AND email = %s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (normalized_parent_email,),
+            )
+        else:
+            cur.execute(
+                "SELECT email, plan_type, organization_id, workspace_id, workspace_reachable, members_page_accessible "
+                "FROM codex_register_accounts "
+                "WHERE source = 'codex-register' AND codex_register_role = 'parent' "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
         row = cur.fetchone()
         if not row:
             raise RuntimeError("parent record not found")
@@ -158,7 +168,11 @@ def run_smoke_flow(args: argparse.Namespace, *, out: Callable[[str], None] = pri
 
     conn = create_db_connection()
     try:
-        summary = verify_database_state(conn, min_children=args.min_children)
+        summary = verify_database_state(
+            conn,
+            min_children=args.min_children,
+            parent_email=args.parent_email,
+        )
     finally:
         conn_close = getattr(conn, "close", None)
         if callable(conn_close):
@@ -174,6 +188,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=600, help="Timeout seconds for each phase wait")
     parser.add_argument("--interval", type=int, default=5, help="Polling interval seconds")
     parser.add_argument("--min-children", type=int, default=1, help="Minimum child records required")
+    parser.add_argument("--parent-email", default="", help="Expected parent email for DB matching")
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
