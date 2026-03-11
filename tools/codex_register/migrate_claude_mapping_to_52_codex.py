@@ -5,7 +5,7 @@ import os
 from typing import Any, Dict, Tuple
 
 JSONDict = Dict[str, Any]
-TARGET_MODEL = "gpt-5.2-codex"
+TARGET_MODEL = "gpt-5.3-codex"
 
 
 def ensure_dict(value: object) -> JSONDict:
