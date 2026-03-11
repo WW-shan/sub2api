@@ -68,6 +68,11 @@ export async function resume(): Promise<CodexStatus> {
   return res.data
 }
 
+export async function retry(): Promise<CodexStatus> {
+  const res = await apiClient.post<CodexStatus>('/admin/codex/retry')
+  return res.data
+}
+
 export default {
   getStatus,
   getLogs,
@@ -75,5 +80,6 @@ export default {
   enable,
   disable,
   runOnce,
-  resume
+  resume,
+  retry
 }

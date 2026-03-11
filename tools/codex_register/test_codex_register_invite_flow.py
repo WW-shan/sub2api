@@ -1,4 +1,6 @@
 import io
+import json
+import os
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -51,20 +53,21 @@ class _FakeHTTPResponse:
 
 
 class _FakeRequestHandler:
-    def __init__(self, path: str):
+    def __init__(self, path: str, headers=None):
         self.path = path
+        self.headers = dict(headers or {})
         self.response_code = None
-        self.headers = []
+        self.response_headers = []
         self.wfile = io.BytesIO()
 
     def send_response(self, code):
         self.response_code = code
 
     def _cors_headers(self):
-        return None
+        return service.CodexRequestHandler._cors_headers(self)
 
     def send_header(self, key, value):
-        self.headers.append((key, value))
+        self.response_headers.append((key, value))
 
     def end_headers(self):
         return None
@@ -92,6 +95,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         service.last_transition = {}
         service.last_resume_gate_reason = ""
         service.active_workflow_thread = None
+        service.active_workflow_cancel_event.clear()
         service.tokens_dir_global = Path('/tmp')
 
     def test_invite_recent_children_requires_parent_account_id(self):
@@ -310,24 +314,182 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             'members_page_accessible': True,
         }
 
+        round_counter = {'value': 0}
+
+        def _run_one_cycle(*args, **kwargs):
+            round_counter['value'] += 1
+            service.last_processed_records = 1
+            service.last_token_email = f"child{round_counter['value']}@example.com"
+            return True, ''
+
         with mock.patch.object(service, 'get_latest_parent_record', return_value=parent_record), mock.patch.object(
             service, 'evaluate_resume_gate', return_value=''
         ), mock.patch.object(
-            service, 'run_one_cycle', return_value=(True, '')
-        ), mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(True, '')
+        ) as verify_parent_switch, mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(True, '')
+        ) as promote_parent, mock.patch.object(
+            service, 'run_one_cycle', side_effect=_run_one_cycle
+        ) as run_one_cycle, mock.patch.object(
             service, 'invite_recent_children', return_value=(True, '')
         ) as invite_recent_children, mock.patch.object(
             service, 'validate_recent_child_records', return_value=(True, '')
-        ), mock.patch.object(
+        ) as validate_recent_child_records, mock.patch.object(
             service, 'promote_recent_child_records_to_pool', return_value=(True, '')
+        ) as promote_recent_child_records_to_pool, mock.patch.object(
+            service, '_finalize_workflow_once'
+        ) as finalize:
+            service.last_processed_records = 1
+            service._run_workflow_once('wf-resume', 'resume')
+
+        verify_parent_switch.assert_called_once_with(parent_record)
+        promote_parent.assert_called_once_with(parent_record)
+        self.assertEqual(run_one_cycle.call_count, 5)
+        self.assertEqual(invite_recent_children.call_count, 5)
+        self.assertEqual(validate_recent_child_records.call_count, 5)
+        self.assertEqual(promote_recent_child_records_to_pool.call_count, 5)
+
+        invite_targets = [call.kwargs.get('target_email') for call in invite_recent_children.call_args_list]
+        validate_targets = [call.kwargs.get('target_email') for call in validate_recent_child_records.call_args_list]
+        promote_targets = [call.kwargs.get('target_email') for call in promote_recent_child_records_to_pool.call_args_list]
+        expected_targets = [
+            'child1@example.com',
+            'child2@example.com',
+            'child3@example.com',
+            'child4@example.com',
+            'child5@example.com',
+        ]
+        self.assertEqual(invite_targets, expected_targets)
+        self.assertEqual(validate_targets, expected_targets)
+        self.assertEqual(promote_targets, expected_targets)
+
+        finalize.assert_called_once_with('wf-resume', success=True, reason='')
+
+    def test_run_workflow_once_resume_blocks_when_parent_switch_verification_fails(self):
+        service.workflow_id = 'wf-resume'
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+
+        parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token',
+            'workspace_id': 'ws-1',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+        }
+
+        with mock.patch.object(service, 'get_latest_parent_record', return_value=parent_record), mock.patch.object(
+            service, 'evaluate_resume_gate', return_value=''
         ), mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(False, 'parent_switch_failed')
+        ) as verify_parent_switch, mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(True, '')
+        ) as promote_parent, mock.patch.object(
+            service, 'run_one_cycle', return_value=(True, '')
+        ) as run_one_cycle, mock.patch.object(
+            service, 'invite_recent_children', return_value=(True, '')
+        ) as invite_recent_children, mock.patch.object(
             service, '_finalize_workflow_once'
         ) as finalize:
             service.last_processed_records = 2
             service._run_workflow_once('wf-resume', 'resume')
 
-        invite_recent_children.assert_called_once_with(parent_record, expected_count=2)
-        finalize.assert_called_once_with('wf-resume', success=True, reason='')
+        verify_parent_switch.assert_called_once_with(parent_record)
+        promote_parent.assert_not_called()
+        run_one_cycle.assert_not_called()
+        invite_recent_children.assert_not_called()
+        finalize.assert_called_once_with('wf-resume', success=False, reason='parent_switch_failed')
+
+    def test_run_workflow_once_resume_blocks_when_parent_pool_promotion_fails(self):
+        service.workflow_id = 'wf-resume'
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+
+        parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token',
+            'workspace_id': 'ws-1',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+            'email': 'parent@example.com',
+            'refresh_token': 'parent-refresh-token',
+        }
+
+        with mock.patch.object(service, 'get_latest_parent_record', return_value=parent_record), mock.patch.object(
+            service, 'evaluate_resume_gate', return_value=''
+        ), mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(True, '')
+        ), mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(False, 'parent_pool_promote_failed')
+        ) as promote_parent, mock.patch.object(
+            service, 'run_one_cycle', return_value=(True, '')
+        ) as run_one_cycle, mock.patch.object(
+            service, '_finalize_workflow_once'
+        ) as finalize:
+            service.last_processed_records = 2
+            service._run_workflow_once('wf-resume', 'resume')
+
+        promote_parent.assert_called_once_with(parent_record)
+        run_one_cycle.assert_not_called()
+        finalize.assert_called_once_with('wf-resume', success=False, reason='parent_pool_promote_failed')
+
+    def test_run_workflow_once_resume_stops_on_failed_round(self):
+        service.workflow_id = 'wf-resume'
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+
+        parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token',
+            'workspace_id': 'ws-1',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+            'email': 'parent@example.com',
+            'refresh_token': 'parent-refresh-token',
+        }
+
+        invite_results = [(True, ''), (True, ''), (False, 'child_invite_incomplete')]
+
+        round_counter = {'value': 0}
+
+        def _run_one_cycle(*args, **kwargs):
+            round_counter['value'] += 1
+            service.last_processed_records = 1
+            service.last_token_email = f"child{round_counter['value']}@example.com"
+            return True, ''
+
+        with mock.patch.object(service, 'get_latest_parent_record', return_value=parent_record), mock.patch.object(
+            service, 'evaluate_resume_gate', return_value=''
+        ), mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(True, '')
+        ), mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(True, '')
+        ), mock.patch.object(
+            service, 'run_one_cycle', side_effect=_run_one_cycle
+        ) as run_one_cycle, mock.patch.object(
+            service, 'invite_recent_children', side_effect=invite_results
+        ) as invite_recent_children, mock.patch.object(
+            service, 'validate_recent_child_records', return_value=(True, '')
+        ) as validate_recent_child_records, mock.patch.object(
+            service, 'promote_recent_child_records_to_pool', return_value=(True, '')
+        ) as promote_recent_child_records_to_pool, mock.patch.object(
+            service, '_finalize_workflow_once'
+        ) as finalize:
+            service.last_processed_records = 1
+            service._run_workflow_once('wf-resume', 'resume')
+
+        self.assertEqual(run_one_cycle.call_count, 3)
+        self.assertEqual(invite_recent_children.call_count, 3)
+        self.assertEqual(validate_recent_child_records.call_count, 2)
+        self.assertEqual(promote_recent_child_records_to_pool.call_count, 2)
+        finalize.assert_called_once_with(
+            'wf-resume',
+            success=False,
+            reason='child_round_failed:round=3:child_invite_incomplete',
+        )
 
     def test_do_post_resume_logs_not_waiting_state(self):
         handler = _FakeRequestHandler('/resume')
@@ -377,6 +539,149 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
                 for call in append_log.call_args_list
             )
         )
+
+    def test_run_one_cycle_child_stage_forces_child_role(self):
+        conn = _FakeConn([])
+        token = {
+            'email': 'child1@example.com',
+            'account_id': 'child-1',
+            'access_token': 'child-access-token',
+            'refresh_token': 'child-refresh-token',
+            'codex_register_role': 'parent',
+        }
+
+        with mock.patch.object(service, 'create_db_connection', return_value=conn), mock.patch.object(
+            service, 'run_codex_once', return_value=[(Path('/tmp/tokens/token_child.json'), [token])]
+        ), mock.patch.object(
+            service, 'archive_processed_file', return_value=Path('/tmp/tokens/processed/token_child.json')
+        ), mock.patch.object(
+            service, 'upsert_account', return_value='created'
+        ) as upsert_account, mock.patch.object(
+            service, 'upsert_codex_register_account'
+        ) as upsert_codex_register_account:
+            success, reason = service.run_one_cycle(Path('/tmp/tokens'), write_to_accounts=True, register_role='child')
+
+        self.assertTrue(success)
+        self.assertEqual(reason, '')
+        self.assertEqual(token.get('codex_register_role'), 'child')
+        upsert_account.assert_called_once()
+        self.assertEqual(upsert_account.call_args.kwargs.get('account_role'), 'child')
+        upsert_codex_register_account.assert_called_once()
+
+    def test_promote_recent_child_records_requires_complete_tokens(self):
+        conn = _FakeConn([[('child1@example.com', 'rt-1', 'at-1', 'child-1', 'business', 'org-1', 'ws-1')]])
+
+        with mock.patch.object(service, 'create_db_connection', return_value=conn), mock.patch.object(
+            service, 'upsert_account', return_value='updated'
+        ):
+            ok, reason = service.promote_recent_child_records_to_pool(
+                {'workspace_id': 'ws-1', 'organization_id': 'org-1', 'plan_type': 'business'},
+                expected_count=1,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, '')
+        self.assertTrue(conn.cursor_obj.executed)
+        first_sql = conn.cursor_obj.executed[0][0]
+        self.assertIn("COALESCE(refresh_token, '') <> ''", first_sql)
+        self.assertIn("COALESCE(access_token, '') <> ''", first_sql)
+        self.assertIn("COALESCE(account_id, '') <> ''", first_sql)
+
+    def test_promote_recent_child_records_counts_skipped_as_success(self):
+        conn = _FakeConn([[('child1@example.com', 'rt-1', 'at-1', 'child-1', 'business', 'org-1', 'ws-1')]])
+
+        with mock.patch.object(service, 'create_db_connection', return_value=conn), mock.patch.object(
+            service, 'upsert_account', return_value='skipped'
+        ):
+            ok, reason = service.promote_recent_child_records_to_pool(
+                {'workspace_id': 'ws-1', 'organization_id': 'org-1', 'plan_type': 'business'},
+                expected_count=1,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, '')
+
+    def test_do_post_disable_marks_cancel_waiting_when_workflow_running(self):
+        service.job_phase = service.PHASE_RUNNING_INVITE_CHILDREN
+        service.workflow_id = 'wf-active'
+        service.active_workflow_thread = mock.Mock(is_alive=mock.Mock(return_value=True))
+        handler = _FakeRequestHandler('/disable')
+
+        with mock.patch.object(service, 'append_log'):
+            service.CodexRequestHandler.do_POST(handler)
+
+        self.assertEqual(handler.response_code, 200)
+        self.assertTrue(service.is_waiting_phase(service.job_phase))
+        self.assertEqual(service.waiting_reason, 'cancelled')
+
+    def test_do_post_retry_starts_workflow_from_waiting_cancelled(self):
+        service.job_phase = service.build_waiting_phase('cancelled')
+        service.waiting_reason = 'cancelled'
+        handler = _FakeRequestHandler('/retry')
+
+        with mock.patch.object(service, 'start_workflow_once', return_value=True) as start_workflow_once:
+            service.CodexRequestHandler.do_POST(handler)
+
+        self.assertEqual(handler.response_code, 200)
+        start_workflow_once.assert_called_once_with(allow_resume=True)
+
+    def test_do_post_retry_logs_not_waiting_state(self):
+        service.job_phase = service.PHASE_IDLE
+        service.waiting_reason = ''
+        handler = _FakeRequestHandler('/retry')
+
+        with mock.patch.object(service, 'append_log') as append_log, mock.patch.object(
+            service, 'start_workflow_once'
+        ) as start_workflow_once:
+            service.CodexRequestHandler.do_POST(handler)
+
+        self.assertEqual(handler.response_code, 200)
+        start_workflow_once.assert_not_called()
+        self.assertTrue(
+            any(
+                call.args[0] == 'warn' and str(call.args[1]).startswith('retry_request_ignored:not_waiting:')
+                for call in append_log.call_args_list
+            )
+        )
+
+    def test_do_get_accounts_masks_tokens(self):
+        handler = _FakeRequestHandler('/accounts')
+
+        with mock.patch.object(
+            service,
+            'list_codex_register_accounts',
+            return_value=[
+                {
+                    'email': 'user@example.com',
+                    'refresh_token': 'refresh-token-123',
+                    'access_token': 'access-token-456',
+                }
+            ],
+        ):
+            service.CodexRequestHandler.do_GET(handler)
+
+        self.assertEqual(handler.response_code, 200)
+        payload = json.loads(handler.wfile.getvalue().decode('utf-8'))
+        account = payload['accounts'][0]
+        self.assertNotEqual(account['refresh_token'], 'refresh-token-123')
+        self.assertNotEqual(account['access_token'], 'access-token-456')
+
+    def test_do_get_accounts_rejects_when_auth_enabled_and_missing_api_key(self):
+        handler = _FakeRequestHandler('/accounts')
+
+        with mock.patch.dict(os.environ, {'CODEX_HTTP_API_KEY': 'secret-key'}, clear=False):
+            service.CodexRequestHandler.do_GET(handler)
+
+        self.assertEqual(handler.response_code, 401)
+
+    def test_do_options_allows_x_api_key_header(self):
+        handler = _FakeRequestHandler('/status')
+
+        service.CodexRequestHandler.do_OPTIONS(handler)
+
+        self.assertEqual(handler.response_code, 204)
+        allow_headers = [value for key, value in handler.response_headers if key == 'Access-Control-Allow-Headers']
+        self.assertTrue(any('X-API-Key' in value for value in allow_headers))
 
 
 if __name__ == '__main__':
