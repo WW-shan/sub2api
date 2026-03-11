@@ -1590,23 +1590,16 @@ def invite_recent_children(
         f"invite_recent_children_started:expected_count={expected_count}:workspace_id={workspace_id_value}:organization_id={organization_id}:plan_type={plan_type}",
     )
 
-    conn = create_db_connection()
-    cur = conn.cursor()
+    normalized_target_email = str(target_email or "").strip().lower()
+    conn = None
+    cur = None
     invited = 0
     try:
-        normalized_target_email = str(target_email or "").strip().lower()
         if normalized_target_email:
-            cur.execute(
-                "SELECT DISTINCT email FROM codex_register_accounts "
-                "WHERE source = 'codex-register' AND codex_register_role = 'child' "
-                "AND workspace_id = %s AND organization_id = %s AND plan_type = %s "
-                "AND LOWER(email) = %s "
-                "AND COALESCE(email, '') <> '' "
-                "AND created_at >= NOW() - INTERVAL '30 minutes' "
-                "ORDER BY created_at DESC LIMIT 1",
-                (workspace_id_value, organization_id, plan_type, normalized_target_email),
-            )
+            rows = [(normalized_target_email,)]
         else:
+            conn = create_db_connection()
+            cur = conn.cursor()
             cur.execute(
                 "SELECT DISTINCT email FROM codex_register_accounts "
                 "WHERE source = 'codex-register' AND codex_register_role = 'child' "
@@ -1616,7 +1609,7 @@ def invite_recent_children(
                 "ORDER BY created_at DESC LIMIT %s",
                 (workspace_id_value, organization_id, plan_type, max(1, int(expected_count or 1))),
             )
-        rows = cur.fetchall() or []
+            rows = cur.fetchall() or []
         append_log("info", f"invite_recent_children_targets:{len(rows)}")
         if not rows:
             return False, "child_invite_targets_missing"
@@ -1661,14 +1654,16 @@ def invite_recent_children(
         append_log("error", f"invite_recent_children_failed:{exc}")
         return False, "child_invite_failed"
     finally:
-        try:
-            cur.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def verify_child_business_plan_via_session_exchange(

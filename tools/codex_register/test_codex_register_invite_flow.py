@@ -146,6 +146,31 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         normalized_headers = {k.lower(): v for k, v in first_req.header_items()}
         self.assertEqual(normalized_headers.get('chatgpt-account-id'), 'parent-1')
 
+    def test_invite_recent_children_uses_target_email_without_db(self):
+        parent = {
+            "account_id": "parent-1",
+            "access_token": "bearer-parent-token",
+            "workspace_id": "ws-1",
+            "organization_id": "org-1",
+            "plan_type": "business",
+        }
+        captured = []
+
+        def _urlopen(req, timeout=0):
+            captured.append(req)
+            return _FakeHTTPResponse(200)
+
+        with mock.patch.object(service, "create_db_connection") as create_db, mock.patch.object(
+            service.urllib.request, "urlopen", side_effect=_urlopen
+        ):
+            ok, reason = service.invite_recent_children(parent, expected_count=1, target_email="child@example.com")
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        create_db.assert_not_called()
+        self.assertEqual(len(captured), 1)
+        self.assertIn("/backend-api/accounts/parent-1/invites", captured[0].full_url)
+
     def test_invite_recent_children_treats_409_as_invited(self):
         conn = _FakeConn([[('child1@example.com',)]])
 
