@@ -613,6 +613,23 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             )
         )
 
+    def test_register_child_once_returns_token_without_persist(self):
+        token_info = {
+            "email": "child@example.com",
+            "account_id": "child-1",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+            "workspace_id": "ws-1",
+        }
+        with mock.patch.object(service, "run_codex_once", return_value=[(Path("/tmp/t.json"), [token_info])]), mock.patch.object(
+            service, "upsert_codex_register_account"
+        ) as upsert:
+            ok, result = service.register_child_once(Path("/tmp"), email="child@example.com", password="pw", preferred_workspace_id="ws-1")
+
+        self.assertTrue(ok)
+        self.assertEqual(result.get("email"), "child@example.com")
+        upsert.assert_not_called()
+
     def test_run_one_cycle_child_stage_forces_child_role(self):
         conn = _FakeConn([])
         token = {

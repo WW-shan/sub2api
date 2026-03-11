@@ -976,7 +976,13 @@ def compute_group_binding_changes(current_group_ids: Set[int], next_group_ids: S
     return next_group_ids - current_group_ids, current_group_ids - next_group_ids
 
 
-def run_codex_once(tokens_dir: Path, *, preferred_workspace_id: str = "") -> List[Tuple[Path, List[JSONDict]]]:
+def run_codex_once(
+    tokens_dir: Path,
+    *,
+    preferred_workspace_id: str = "",
+    fixed_email: str = "",
+    fixed_password: str = "",
+) -> List[Tuple[Path, List[JSONDict]]]:
     service_file = Path(__file__).resolve()
     tokens_dir.mkdir(parents=True, exist_ok=True)
 
@@ -990,6 +996,13 @@ def run_codex_once(tokens_dir: Path, *, preferred_workspace_id: str = "") -> Lis
     workspace_override = str(preferred_workspace_id or "").strip()
     if workspace_override:
         env["CODEX_PARENT_WORKSPACE_ID"] = workspace_override
+
+    fixed_email_value = str(fixed_email or "").strip()
+    if fixed_email_value:
+        env["CODEX_FIXED_EMAIL"] = fixed_email_value
+    fixed_password_value = str(fixed_password or "").strip()
+    if fixed_password_value:
+        env["CODEX_FIXED_PASSWORD"] = fixed_password_value
 
     print("[codex-register] 启动注册脚本:", " ".join(cmd), flush=True)
 
@@ -1296,6 +1309,25 @@ def _refresh_workflow_thread_locked() -> None:
 
 def _build_workflow_id() -> str:
     return f"wf-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+
+
+def register_child_once(
+    tokens_dir: Path,
+    *,
+    email: str,
+    password: str,
+    preferred_workspace_id: str,
+) -> Tuple[bool, JSONDict]:
+    batches = run_codex_once(
+        tokens_dir,
+        preferred_workspace_id=preferred_workspace_id,
+        fixed_email=email,
+        fixed_password=password,
+    )
+    if not batches:
+        return False, {}
+    _source_file, token_infos = batches[0]
+    return True, ensure_dict(token_infos[0] if token_infos else {})
 
 
 def run_one_cycle(
