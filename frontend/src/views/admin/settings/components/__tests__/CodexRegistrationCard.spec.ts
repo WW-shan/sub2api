@@ -180,6 +180,39 @@ describe('CodexRegistrationCard', () => {
     expect(text).not.toContain('手动执行一次')
   })
 
+  it('renders top controlbar with status, primary action and secondary actions', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const controlbar = wrapper.find('[data-testid="codex-controlbar"]')
+    expect(controlbar.exists()).toBe(true)
+    expect(controlbar.find('[data-testid="codex-controlbar-status"]').exists()).toBe(true)
+    expect(controlbar.find('[data-testid="codex-controlbar-primary"]').text()).toContain('继续')
+
+    const secondaryText = controlbar.find('[data-testid="codex-controlbar-secondary"]').text()
+    expect(secondaryText).toContain('刷新')
+    expect(secondaryText).toContain('停止')
+  })
+
+  it('keeps exactly one primary CTA in controlbar center area', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const center = wrapper.find('[data-testid="codex-controlbar-primary"]')
+    const primaryButtons = center.findAll('button.btn-primary')
+
+    expect(primaryButtons).toHaveLength(1)
+    expect(primaryButtons[0].text()).toBe('继续')
+  })
+
   it('shows waiting_manual todo checklist for parent_upgrade', async () => {
     codexApiMocks.getStatus.mockResolvedValueOnce({
       enabled: false,
@@ -246,6 +279,38 @@ describe('CodexRegistrationCard', () => {
     expect(text).toContain('pw-1234567890-secret')
     expect(text).toContain('at-123...cret')
     expect(text).toContain('rt-123...cret')
+  })
+
+  it('shows disabled in-progress primary button without layout duplication', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce({
+      enabled: true,
+      sleep_min: 12,
+      sleep_max: 34,
+      total_created: 19,
+      last_success: '2026-03-06 10:05:00',
+      last_error: null,
+      proxy: true,
+      job_phase: 'running:create_parent',
+      workflow_id: 'wf-2',
+      waiting_reason: null,
+      can_start: false,
+      can_resume: false,
+      can_abandon: true
+    })
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const center = wrapper.find('[data-testid="codex-controlbar-primary"]')
+    const buttons = center.findAll('button')
+
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0].text()).toContain('进行中')
+    expect((buttons[0].element as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('calls resume endpoint when primary action is resume', async () => {

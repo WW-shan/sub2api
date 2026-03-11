@@ -6,59 +6,62 @@
     ]"
   >
     <div class="card-body space-y-6">
-      <div class="flex flex-col gap-4 border-b border-gray-100 pb-6 dark:border-dark-700 xl:flex-row xl:items-start xl:justify-between">
-        <div class="space-y-3">
-          <div class="flex flex-wrap items-center gap-3">
-            <span
-              :class="[
-                'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium',
-                statusBadgeToneClass
-              ]"
-            >
-              {{ statusBadgeLabel }}
-            </span>
-            <span class="inline-flex items-center rounded-full border border-primary-200 bg-primary-50 px-3 py-1 text-xs font-medium text-primary-700 dark:border-primary-900/60 dark:bg-primary-900/20 dark:text-primary-300">
-              {{ t('admin.codexRegister.badge.adminConsole') }}
-            </span>
-            <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300">
-              {{ t('admin.codexRegister.panels.polling', { seconds: 10 }) }}
-            </span>
-          </div>
-          <div class="space-y-1">
-            <p class="text-sm font-medium text-gray-700 dark:text-gray-200">
-              {{ serviceStatusLabel }}
+      <div
+        class="border-b border-gray-100 pb-6 dark:border-dark-700"
+        data-testid="codex-controlbar"
+      >
+        <div class="flex flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] xl:items-center">
+          <div class="space-y-3" data-testid="codex-controlbar-status">
+            <div class="flex flex-wrap items-center gap-3">
+              <span
+                :class="[
+                  'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium',
+                  statusBadgeToneClass
+                ]"
+              >
+                {{ statusBadgeLabel }}
+              </span>
+              <span class="inline-flex items-center rounded-full border border-primary-200 bg-primary-50 px-3 py-1 text-xs font-medium text-primary-700 dark:border-primary-900/60 dark:bg-primary-900/20 dark:text-primary-300">
+                {{ t('admin.codexRegister.badge.adminConsole') }}
+              </span>
+              <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300">
+                {{ t('admin.codexRegister.panels.polling', { seconds: 10 }) }}
+              </span>
+            </div>
+            <p class="truncate text-sm text-gray-500 dark:text-gray-400">
+              {{ controlbarSummaryLabel }}
             </p>
-            <p class="text-sm text-gray-500 dark:text-gray-400">
-              {{ proxyDetailLabel }}
-            </p>
           </div>
-        </div>
 
-        <div class="flex flex-wrap items-center gap-2 xl:justify-end">
-          <button
-            type="button"
-            class="btn btn-secondary"
-            :disabled="refreshing || loading"
-            @click="refreshAll"
-          >
-            {{ refreshing ? t('admin.codexRegister.actions.refreshing') : t('common.refresh') }}
-          </button>
-          <button
-            type="button"
-            class="btn btn-primary"
-            :disabled="loading || primaryAction === 'inProgress'"
-            @click="triggerPrimaryAction"
-          >
-            {{ primaryActionLabel }}
-          </button>
-          <button
-            type="button"
-            class="btn btn-secondary"
-            :disabled="loading || !canAbandon"
-            @click="toggleEnabled(false)"
-          >
-            {{ t('admin.codexRegister.actions.stop') }}
-          </button>
+          <div class="flex justify-start xl:justify-center" data-testid="codex-controlbar-primary">
+            <button
+              type="button"
+              class="btn btn-primary min-w-32"
+              :disabled="loading || primaryAction === 'inProgress'"
+              @click="triggerPrimaryAction"
+            >
+              {{ primaryActionLabel }}
+            </button>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2 xl:justify-end" data-testid="codex-controlbar-secondary">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              :disabled="refreshing || loading"
+              @click="refreshAll"
+            >
+              {{ refreshing ? t('admin.codexRegister.actions.refreshing') : t('common.refresh') }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary"
+              :disabled="loading || !canAbandon"
+              @click="toggleEnabled(false)"
+            >
+              {{ t('admin.codexRegister.actions.stop') }}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -402,6 +405,18 @@ const statusBadgeToneClass = computed(() => {
 
 const statusBadgeLabel = computed(() => phaseState.value.label)
 const serviceStatusLabel = computed(() => phaseState.value.label)
+
+const controlbarSummaryLabel = computed(() => {
+  if (!status.value) {
+    return error.value ? t('common.unknown') : t('common.loading')
+  }
+
+  if (status.value.waiting_reason) {
+    return waitingReasonText(status.value.waiting_reason)
+  }
+
+  return proxyDetailLabel.value
+})
 
 const proxySummaryLabel = computed(() => {
   if (status.value) {
