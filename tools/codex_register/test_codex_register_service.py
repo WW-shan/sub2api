@@ -156,7 +156,6 @@ class CodexRegisterServiceTests(unittest.TestCase):
             cur,
             {
                 "email": "a@example.com",
-                "password": "pw",
                 "refresh_token": "rt",
                 "session_access_token": "at",
                 "account_id": "acct-1",
@@ -167,11 +166,11 @@ class CodexRegisterServiceTests(unittest.TestCase):
         params = cur.execute.call_args[0][1]
         self.assertIn("INSERT INTO codex_register_accounts", sql)
         self.assertIn("ON CONFLICT (email, source) DO UPDATE", sql)
+        self.assertNotIn("password", sql.lower())
         self.assertEqual(params[0], "a@example.com")
-        self.assertEqual(params[1], "pw")
-        self.assertEqual(params[2], "rt")
-        self.assertEqual(params[3], "at")
-        self.assertEqual(params[4], "acct-1")
+        self.assertEqual(params[1], "rt")
+        self.assertEqual(params[2], "at")
+        self.assertEqual(params[3], "acct-1")
 
     def test_service_default_disabled_until_enable(self):
         self.assertFalse(service.enabled)
@@ -369,6 +368,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
 
         payload = json.loads(token_json)
         self.assertNotIn("password", payload)
+        self.assertEqual(payload.get("codex_register_role"), "parent")
 
     def test_archive_processed_file_moves_json_out_of_active_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -448,6 +448,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
             {
                 "codex_auto_register": True,
                 "codex_auto_register_model_mapping": service.build_model_mapping(),
+                "codex_register_role": "child",
                 "codex_auto_register_updated_at": "2026-03-07T10:00:00Z",
             },
         )
@@ -462,6 +463,56 @@ class CodexRegisterServiceTests(unittest.TestCase):
         bind_groups.assert_called_once_with(cur, 9, [1])
         executed_sql = "\n".join(call.args[0] for call in cur.execute.call_args_list)
         self.assertNotIn("UPDATE accounts SET credentials", executed_sql)
+
+    def test_upsert_account_create_uses_identifier_name_and_child_note(self):
+        cur = mock.Mock()
+        cur.fetchone.return_value = [123]
+
+        with mock.patch.object(service, "get_existing_account", return_value=None), mock.patch.object(
+            service, "parse_group_ids", return_value=[1]
+        ), mock.patch.object(service, "bind_groups") as bind_groups, mock.patch.object(
+            service, "pg_json", side_effect=lambda value: SimpleNamespace(adapted=value)
+        ):
+            action = service.upsert_account(cur, {"email": "child@example.com", "access_token": "at"}, account_role="child")
+
+        self.assertEqual(action, "created")
+        sql = cur.execute.call_args_list[0].args[0]
+        params = cur.execute.call_args_list[0].args[1]
+        self.assertIn("INSERT INTO accounts (name, notes, platform, type, credentials, extra", sql)
+        self.assertEqual(params[0], "child@example.com")
+        self.assertFalse(str(params[0]).startswith("codex-"))
+        self.assertEqual(params[1], "codex-register 子号")
+        self.assertEqual(params[3].adapted["codex_register_role"], "child")
+        bind_groups.assert_called_once_with(cur, 123, [1])
+
+    def test_upsert_account_update_sets_parent_note_and_role(self):
+        existing = (
+            9,
+            "existing-name",
+            {
+                "email": "parent@example.com",
+                "access_token": "old",
+            },
+            {
+                "codex_auto_register": True,
+            },
+        )
+        cur = mock.Mock()
+
+        with mock.patch.object(service, "get_existing_account", return_value=existing), mock.patch.object(
+            service, "parse_group_ids", return_value=[1]
+        ), mock.patch.object(service, "bind_groups") as bind_groups, mock.patch.object(
+            service, "pg_json", side_effect=lambda value: SimpleNamespace(adapted=value)
+        ):
+            action = service.upsert_account(cur, {"email": "parent@example.com", "access_token": "new"}, account_role="parent")
+
+        self.assertEqual(action, "updated")
+        sql = cur.execute.call_args.args[0]
+        params = cur.execute.call_args.args[1]
+        self.assertIn("UPDATE accounts SET notes = %s, credentials = %s, extra = %s", sql)
+        self.assertEqual(params[0], "codex-register 母号")
+        self.assertEqual(params[2].adapted["codex_register_role"], "parent")
+        bind_groups.assert_called_once_with(cur, 9, [1])
 
     def test_canonical_phase_values_include_required_phases(self):
         self.assertIn(service.PHASE_IDLE, service.CANONICAL_JOB_PHASES)
@@ -528,6 +579,45 @@ class CodexRegisterServiceTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "token_process_failed:bad.json")
         archive_processed_file.assert_not_called()
+
+    def test_run_one_cycle_start_mode_skips_account_pool_upsert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp) / "tokens"
+            tokens_dir.mkdir(parents=True)
+            source = tokens_dir / "token.json"
+
+            cur = mock.Mock()
+            conn = _FakeConn(cur)
+
+            with mock.patch.object(service, "create_db_connection", return_value=conn), mock.patch.object(
+                service,
+                "run_codex_once",
+                return_value=[(source, [{"email": "parent@example.com", "account_id": "acct-parent"}])],
+            ), mock.patch.object(service, "upsert_account") as upsert_account, mock.patch.object(
+                service,
+                "upsert_codex_register_account",
+            ) as upsert_codex_register_account, mock.patch.object(service, "archive_processed_file") as archive_processed_file:
+                ok, reason = service.run_one_cycle(tokens_dir, write_to_accounts=False)
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        upsert_account.assert_not_called()
+        upsert_codex_register_account.assert_called_once()
+        archive_processed_file.assert_called_once()
+
+    def test_run_workflow_once_start_calls_run_cycle_without_account_upsert(self):
+        service.workflow_id = "wf-start"
+        service.job_phase = service.PHASE_RUNNING_CREATE_PARENT
+        service.tokens_dir_global = Path("/tmp")
+
+        with mock.patch.object(service, "run_one_cycle", return_value=(True, "")) as run_one_cycle, mock.patch.object(
+            service,
+            "_mark_parent_upgrade_waiting",
+        ) as mark_parent_waiting:
+            service._run_workflow_once("wf-start", "start")
+
+        run_one_cycle.assert_called_once_with(Path("/tmp"), write_to_accounts=False)
+        mark_parent_waiting.assert_called_once_with("wf-start")
 
     def test_run_one_cycle_surfaces_script_exit_nonzero_reason(self):
         with tempfile.TemporaryDirectory() as tmp:

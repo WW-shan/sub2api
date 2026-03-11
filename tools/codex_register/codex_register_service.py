@@ -734,6 +734,7 @@ def run(proxy: Optional[str]) -> Optional[str]:
                     if selected_organization_id:
                         token_payload["organization_id"] = selected_organization_id
                         token_payload["codex_parent_organization_id"] = selected_organization_id
+                    token_payload["codex_register_role"] = "parent"
                     session_access_token = fetch_session_access_token(session)
                     if session_access_token:
                         token_payload["session_access_token"] = session_access_token
@@ -1058,22 +1059,21 @@ def upsert_codex_register_account(cur, token_info: JSONDict) -> None:
         append_log("warn", "codex_register_account_missing_email")
         return
 
-    password = str(token_info.get("password") or "").strip()
     refresh_token = str(token_info.get("refresh_token") or "").strip()
     access_token = str(token_info.get("session_access_token") or token_info.get("access_token") or "").strip()
     account_id = str(token_info.get("account_id") or "").strip() or None
 
     cur.execute(
-        "INSERT INTO codex_register_accounts (email, password, refresh_token, access_token, account_id, source, created_at, updated_at) "
-        "VALUES (%s, %s, %s, %s, %s, 'codex-register', NOW(), NOW()) "
+        "INSERT INTO codex_register_accounts (email, refresh_token, access_token, account_id, source, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, 'codex-register', NOW(), NOW()) "
         "ON CONFLICT (email, source) DO UPDATE "
-        "SET password = EXCLUDED.password, refresh_token = EXCLUDED.refresh_token, access_token = EXCLUDED.access_token, "
+        "SET refresh_token = EXCLUDED.refresh_token, access_token = EXCLUDED.access_token, "
         "account_id = EXCLUDED.account_id, updated_at = NOW()",
-        (email, password, refresh_token, access_token, account_id),
+        (email, refresh_token, access_token, account_id),
     )
 
 
-def upsert_account(cur, token_info: JSONDict) -> str:
+def upsert_account(cur, token_info: JSONDict, *, account_role: str = "child") -> str:
     email = token_info.get("email") or ""
     account_id = token_info.get("account_id") or ""
     if not email and not account_id:
@@ -1081,12 +1081,16 @@ def upsert_account(cur, token_info: JSONDict) -> str:
         append_log("warn", "skip_missing_email_and_account_id")
         return "skipped"
 
+    role = "parent" if str(account_role or "").strip().lower() == "parent" else "child"
+    notes = "codex-register 母号" if role == "parent" else "codex-register 子号"
+
     existing = get_existing_account(cur, email, account_id)
     group_ids = parse_group_ids()
     if existing is not None:
         existing_id, _existing_name, existing_credentials, existing_extra = existing
         credentials = build_credentials(ensure_dict(existing_credentials), token_info)
         extra = build_extra(ensure_dict(existing_extra), token_info)
+        extra["codex_register_role"] = role
         current_credentials = ensure_dict(existing_credentials)
         current_extra = ensure_dict(existing_extra)
         if not should_update_account(current_credentials, credentials, current_extra, extra):
@@ -1097,8 +1101,8 @@ def upsert_account(cur, token_info: JSONDict) -> str:
 
         extra["codex_auto_register_updated_at"] = datetime.utcnow().isoformat() + "Z"
         cur.execute(
-            "UPDATE accounts SET credentials = %s, extra = %s, status = 'active', schedulable = true, updated_at = NOW() WHERE id = %s",
-            (pg_json(credentials), pg_json(extra), existing_id),
+            "UPDATE accounts SET notes = %s, credentials = %s, extra = %s, status = 'active', schedulable = true, updated_at = NOW() WHERE id = %s",
+            (notes, pg_json(credentials), pg_json(extra), existing_id),
         )
         bind_groups(cur, existing_id, group_ids)
         print(f"[codex-register] 已更新账号: {email or account_id}", flush=True)
@@ -1106,15 +1110,16 @@ def upsert_account(cur, token_info: JSONDict) -> str:
         return "updated"
 
     identifier = email or account_id
-    name = f"codex-{identifier}"
+    name = identifier
     credentials = build_credentials({}, token_info)
     extra = build_extra({}, token_info)
+    extra["codex_register_role"] = role
     extra["codex_auto_register_updated_at"] = datetime.utcnow().isoformat() + "Z"
 
     cur.execute(
-        "INSERT INTO accounts (name, platform, type, credentials, extra, concurrency, priority, rate_multiplier, status, schedulable, auto_pause_on_expired) "
-        "VALUES (%s, 'openai', 'oauth', %s, %s, 3, 50, 1.0, 'active', true, true) RETURNING id",
-        (name, pg_json(credentials), pg_json(extra)),
+        "INSERT INTO accounts (name, notes, platform, type, credentials, extra, concurrency, priority, rate_multiplier, status, schedulable, auto_pause_on_expired) "
+        "VALUES (%s, %s, 'openai', 'oauth', %s, %s, 3, 50, 1.0, 'active', true, true) RETURNING id",
+        (name, notes, pg_json(credentials), pg_json(extra)),
     )
     created_id = cur.fetchone()[0]
     bind_groups(cur, created_id, group_ids)
@@ -1158,7 +1163,7 @@ def _build_workflow_id() -> str:
     return f"wf-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
 
 
-def run_one_cycle(tokens_dir: Path) -> Tuple[bool, str]:
+def run_one_cycle(tokens_dir: Path, *, write_to_accounts: bool = True) -> Tuple[bool, str]:
     global last_run, last_success, last_error, total_created, total_updated, total_skipped
     global last_token_email, last_created_email, last_created_account_id, last_updated_email, last_updated_account_id
     global last_processed_records
@@ -1196,7 +1201,9 @@ def run_one_cycle(tokens_dir: Path) -> Tuple[bool, str]:
                         if identifier:
                             with status_lock:
                                 last_token_email = identifier
-                        action = upsert_account(cur, token_info)
+                        action = "skipped"
+                        if write_to_accounts:
+                            action = upsert_account(cur, token_info, account_role="child")
                         upsert_codex_register_account(cur, token_info)
                         if action == "created":
                             with status_lock:
@@ -1389,7 +1396,7 @@ def _run_workflow_once(workflow_token: str, mode: str) -> None:
     if mode == "start":
         if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_CREATE_PARENT):
             return
-        success, reason = run_one_cycle(tokens_dir)
+        success, reason = run_one_cycle(tokens_dir, write_to_accounts=False)
         if success:
             _mark_parent_upgrade_waiting(workflow_token)
         else:
