@@ -80,6 +80,7 @@ PARENT_RESUME_GATE_REASONS = {
     "plan_type_missing",
     "plan_type_invalid",
     "organization_id_missing",
+    "workspace_id_missing",
     "workspace_unreachable",
     "members_page_inaccessible",
 }
@@ -244,6 +245,19 @@ def workspace_organization_id(workspace: JSONDict) -> str:
         workspace.get("organizationId"),
         workspace.get("org_id"),
         workspace.get("id"),
+    ]
+    for item in candidates:
+        value = str(item or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def workspace_identifier(workspace: JSONDict) -> str:
+    candidates = [
+        workspace.get("id"),
+        workspace.get("workspace_id"),
+        workspace.get("workspaceId"),
     ]
     for item in candidates:
         value = str(item or "").strip()
@@ -683,12 +697,12 @@ def run(proxy: Optional[str]) -> Optional[str]:
             return None
         preferred_workspace_id = get_env("CODEX_PARENT_WORKSPACE_ID", "").strip()
         selected_workspace = select_parent_workspace(workspaces, preferred_workspace_id)
-        workspace_id = str((selected_workspace or {}).get("id") or "").strip()
-        if not workspace_id:
+        selected_workspace_id = workspace_identifier(selected_workspace)
+        if not selected_workspace_id:
             print("[Error] 无法解析 workspace_id")
             return None
 
-        select_body = f'{{"workspace_id":"{workspace_id}"}}'
+        select_body = f'{{"workspace_id":"{selected_workspace_id}"}}'
         select_resp = session.post(
             "https://auth.openai.com/api/accounts/workspace/select",
             headers={
@@ -731,9 +745,13 @@ def run(proxy: Optional[str]) -> Optional[str]:
                     if selected_plan_type:
                         token_payload["plan_type"] = selected_plan_type
                         token_payload["codex_parent_plan_type"] = selected_plan_type
+                    selected_workspace_id = workspace_identifier(selected_workspace)
                     if selected_organization_id:
                         token_payload["organization_id"] = selected_organization_id
                         token_payload["codex_parent_organization_id"] = selected_organization_id
+                    if selected_workspace_id:
+                        token_payload["workspace_id"] = selected_workspace_id
+                        token_payload["codex_parent_workspace_id"] = selected_workspace_id
                     token_payload["codex_register_role"] = "parent"
                     session_access_token = fetch_session_access_token(session)
                     if session_access_token:
@@ -890,7 +908,7 @@ def compute_group_binding_changes(current_group_ids: Set[int], next_group_ids: S
     return next_group_ids - current_group_ids, current_group_ids - next_group_ids
 
 
-def run_codex_once(tokens_dir: Path) -> List[Tuple[Path, List[JSONDict]]]:
+def run_codex_once(tokens_dir: Path, *, preferred_workspace_id: str = "") -> List[Tuple[Path, List[JSONDict]]]:
     service_file = Path(__file__).resolve()
     tokens_dir.mkdir(parents=True, exist_ok=True)
 
@@ -899,6 +917,11 @@ def run_codex_once(tokens_dir: Path) -> List[Tuple[Path, List[JSONDict]]]:
     cmd = [sys.executable, str(service_file), "--register-only", "--once", "--tokens-dir", str(tokens_dir)]
     if proxy:
         cmd.extend(["--proxy", proxy])
+
+    env = dict(os.environ)
+    workspace_override = str(preferred_workspace_id or "").strip()
+    if workspace_override:
+        env["CODEX_PARENT_WORKSPACE_ID"] = workspace_override
 
     print("[codex-register] 启动注册脚本:", " ".join(cmd), flush=True)
 
@@ -909,6 +932,7 @@ def run_codex_once(tokens_dir: Path) -> List[Tuple[Path, List[JSONDict]]]:
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         reason = "script_timeout"
@@ -1066,18 +1090,20 @@ def upsert_codex_register_account(cur, token_info: JSONDict) -> None:
     organization_id = (
         str(token_info.get("organization_id") or token_info.get("codex_parent_organization_id") or "").strip() or None
     )
+    workspace_id_value = str(token_info.get("workspace_id") or token_info.get("codex_parent_workspace_id") or "").strip() or None
     workspace_reachable = token_info.get("workspace_reachable")
     members_page_accessible = token_info.get("members_page_accessible")
     codex_register_role = str(token_info.get("codex_register_role") or "").strip().lower() or None
 
     cur.execute(
         "INSERT INTO codex_register_accounts "
-        "(email, refresh_token, access_token, account_id, plan_type, organization_id, workspace_reachable, members_page_accessible, codex_register_role, source, created_at, updated_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'codex-register', NOW(), NOW()) "
+        "(email, refresh_token, access_token, account_id, plan_type, organization_id, workspace_id, workspace_reachable, members_page_accessible, codex_register_role, source, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'codex-register', NOW(), NOW()) "
         "ON CONFLICT (email, source) DO UPDATE "
         "SET refresh_token = EXCLUDED.refresh_token, access_token = EXCLUDED.access_token, "
         "account_id = EXCLUDED.account_id, plan_type = COALESCE(EXCLUDED.plan_type, codex_register_accounts.plan_type), "
         "organization_id = COALESCE(EXCLUDED.organization_id, codex_register_accounts.organization_id), "
+        "workspace_id = COALESCE(EXCLUDED.workspace_id, codex_register_accounts.workspace_id), "
         "workspace_reachable = COALESCE(EXCLUDED.workspace_reachable, codex_register_accounts.workspace_reachable), "
         "members_page_accessible = COALESCE(EXCLUDED.members_page_accessible, codex_register_accounts.members_page_accessible), "
         "codex_register_role = COALESCE(EXCLUDED.codex_register_role, codex_register_accounts.codex_register_role), "
@@ -1089,6 +1115,7 @@ def upsert_codex_register_account(cur, token_info: JSONDict) -> None:
             account_id,
             plan_type,
             organization_id,
+            workspace_id_value,
             workspace_reachable,
             members_page_accessible,
             codex_register_role,
@@ -1186,7 +1213,13 @@ def _build_workflow_id() -> str:
     return f"wf-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
 
 
-def run_one_cycle(tokens_dir: Path, *, write_to_accounts: bool = True) -> Tuple[bool, str]:
+def run_one_cycle(
+    tokens_dir: Path,
+    *,
+    write_to_accounts: bool = True,
+    register_role: str = "child",
+    preferred_workspace_id: str = "",
+) -> Tuple[bool, str]:
     global last_run, last_success, last_error, total_created, total_updated, total_skipped
     global last_token_email, last_created_email, last_created_account_id, last_updated_email, last_updated_account_id
     global last_processed_records
@@ -1210,7 +1243,7 @@ def run_one_cycle(tokens_dir: Path, *, write_to_accounts: bool = True) -> Tuple[
     stage_reason = ""
 
     try:
-        batches = run_codex_once(tokens_dir)
+        batches = run_codex_once(tokens_dir, preferred_workspace_id=preferred_workspace_id)
         with status_lock:
             last_processed_records = sum(len(items) for _, items in batches)
 
@@ -1225,8 +1258,11 @@ def run_one_cycle(tokens_dir: Path, *, write_to_accounts: bool = True) -> Tuple[
                             with status_lock:
                                 last_token_email = identifier
                         action = "skipped"
+                        token_role = str(token_info.get("codex_register_role") or "").strip().lower()
+                        effective_role = token_role if token_role in {"parent", "child"} else register_role
+                        token_info["codex_register_role"] = effective_role
                         if write_to_accounts:
-                            action = upsert_account(cur, token_info, account_role="child")
+                            action = upsert_account(cur, token_info, account_role=effective_role)
                         upsert_codex_register_account(cur, token_info)
                         if action == "created":
                             with status_lock:
@@ -1408,6 +1444,98 @@ def _mark_parent_upgrade_waiting(workflow_token: str) -> None:
         active_workflow_thread = None
 
 
+def validate_recent_child_records(parent_record: JSONDict, *, expected_count: int) -> Tuple[bool, str]:
+    workspace_id_value = str(parent_record.get("workspace_id") or "").strip()
+    organization_id = str(parent_record.get("organization_id") or "").strip()
+    plan_type = str(parent_record.get("plan_type") or "").strip().lower()
+    if not workspace_id_value or not organization_id or not plan_type:
+        return False, "parent_metadata_incomplete"
+
+    conn = create_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT COUNT(*) FROM codex_register_accounts "
+            "WHERE source = 'codex-register' AND codex_register_role = 'child' "
+            "AND workspace_id = %s AND organization_id = %s AND plan_type = %s "
+            "AND created_at >= NOW() - INTERVAL '30 minutes'",
+            (workspace_id_value, organization_id, plan_type),
+        )
+        row = cur.fetchone()
+        count = int((row or [0])[0] or 0)
+        if count < max(1, int(expected_count or 1)):
+            return False, "child_workspace_not_confirmed"
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        append_log("error", f"validate_recent_child_records_failed:{exc}")
+        return False, "child_validation_failed"
+    finally:
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def promote_recent_child_records_to_pool(parent_record: JSONDict, *, expected_count: int) -> Tuple[bool, str]:
+    workspace_id_value = str(parent_record.get("workspace_id") or "").strip()
+    organization_id = str(parent_record.get("organization_id") or "").strip()
+    plan_type = str(parent_record.get("plan_type") or "").strip().lower()
+    if not workspace_id_value or not organization_id or not plan_type:
+        return False, "parent_metadata_incomplete"
+
+    conn = create_db_connection()
+    cur = conn.cursor()
+    promoted = 0
+    try:
+        cur.execute(
+            "SELECT email, refresh_token, access_token, account_id, plan_type, organization_id, workspace_id "
+            "FROM codex_register_accounts "
+            "WHERE source = 'codex-register' AND codex_register_role = 'child' "
+            "AND workspace_id = %s AND organization_id = %s AND plan_type = %s "
+            "AND created_at >= NOW() - INTERVAL '30 minutes' "
+            "ORDER BY created_at DESC LIMIT %s",
+            (workspace_id_value, organization_id, plan_type, max(1, int(expected_count or 1))),
+        )
+        rows = cur.fetchall() or []
+        if not rows:
+            return False, "no_child_records_to_promote"
+
+        for row in rows:
+            token_info: JSONDict = {
+                "email": str(row[0] or "").strip(),
+                "refresh_token": str(row[1] or "").strip(),
+                "access_token": str(row[2] or "").strip(),
+                "account_id": str(row[3] or "").strip(),
+                "plan_type": str(row[4] or "").strip().lower(),
+                "organization_id": str(row[5] or "").strip(),
+                "workspace_id": str(row[6] or "").strip(),
+                "codex_register_role": "child",
+            }
+            action = upsert_account(cur, token_info, account_role="child")
+            if action in {"created", "updated"}:
+                promoted += 1
+
+        if promoted < max(1, int(expected_count or 1)):
+            return False, "child_promotion_incomplete"
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        append_log("error", f"promote_recent_child_records_to_pool_failed:{exc}")
+        return False, "child_promotion_failed"
+    finally:
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _run_workflow_once(workflow_token: str, mode: str) -> None:
     with status_lock:
         tokens_dir = tokens_dir_global
@@ -1419,7 +1547,12 @@ def _run_workflow_once(workflow_token: str, mode: str) -> None:
     if mode == "start":
         if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_CREATE_PARENT):
             return
-        success, reason = run_one_cycle(tokens_dir, write_to_accounts=False)
+        success, reason = run_one_cycle(
+            tokens_dir,
+            write_to_accounts=False,
+            register_role="parent",
+            preferred_workspace_id="",
+        )
         if success:
             _mark_parent_upgrade_waiting(workflow_token)
         else:
@@ -1428,15 +1561,43 @@ def _run_workflow_once(workflow_token: str, mode: str) -> None:
 
     if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_PRE_RESUME_CHECK):
         return
-    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_INVITE_CHILDREN):
-        return
-    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_ACCEPT_AND_SWITCH):
-        return
-    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_VERIFY_AND_BIND):
+
+    parent_record = get_latest_parent_record()
+    gate_reason = evaluate_resume_gate(parent_record)
+    if gate_reason:
+        _finalize_workflow_once(workflow_token, success=False, reason=gate_reason)
         return
 
-    success, reason = run_one_cycle(tokens_dir)
-    _finalize_workflow_once(workflow_token, success=success, reason=reason)
+    preferred_workspace_id = str(parent_record.get("workspace_id") or "").strip()
+
+    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_INVITE_CHILDREN):
+        return
+    success, reason = run_one_cycle(
+        tokens_dir,
+        write_to_accounts=False,
+        register_role="child",
+        preferred_workspace_id=preferred_workspace_id,
+    )
+    if not success:
+        _finalize_workflow_once(workflow_token, success=False, reason=reason)
+        return
+
+    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_ACCEPT_AND_SWITCH):
+        return
+    child_expected_count = max(1, int(last_processed_records or 1))
+    accepted, accept_reason = validate_recent_child_records(parent_record, expected_count=child_expected_count)
+    if not accepted:
+        _finalize_workflow_once(workflow_token, success=False, reason=accept_reason)
+        return
+
+    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_VERIFY_AND_BIND):
+        return
+    promoted, promote_reason = promote_recent_child_records_to_pool(parent_record, expected_count=child_expected_count)
+    if not promoted:
+        _finalize_workflow_once(workflow_token, success=False, reason=promote_reason)
+        return
+
+    _finalize_workflow_once(workflow_token, success=True, reason="")
 
 
 def get_latest_parent_record() -> JSONDict:
@@ -1444,9 +1605,10 @@ def get_latest_parent_record() -> JSONDict:
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT email, account_id, refresh_token, access_token, plan_type, organization_id, "
+            "SELECT email, account_id, refresh_token, access_token, plan_type, organization_id, workspace_id, "
             "workspace_reachable, members_page_accessible, codex_register_role "
             "FROM codex_register_accounts WHERE source = 'codex-register' "
+            "AND (codex_register_role = 'parent' OR codex_register_role IS NULL) "
             "ORDER BY created_at DESC LIMIT 1"
         )
         row = cur.fetchone()
@@ -1457,6 +1619,7 @@ def get_latest_parent_record() -> JSONDict:
         account_id = str(row[1] or "").strip()
         register_plan_type = str(row[4] or "").strip().lower() or None
         register_org_id = str(row[5] or "").strip() or None
+        register_workspace_id = str(row[6] or "").strip() or None
         parent_record: JSONDict = {
             "email": email,
             "account_id": account_id,
@@ -1464,12 +1627,13 @@ def get_latest_parent_record() -> JSONDict:
             "has_access_token": bool(str(row[3] or "").strip()),
             "plan_type": register_plan_type,
             "organization_id": register_org_id,
-            "codex_register_role": str(row[8] or "").strip().lower() or None,
+            "workspace_id": register_workspace_id,
+            "codex_register_role": str(row[9] or "").strip().lower() or None,
         }
-        if row[6] is not None:
-            parent_record["workspace_reachable"] = bool(row[6])
         if row[7] is not None:
-            parent_record["members_page_accessible"] = bool(row[7])
+            parent_record["workspace_reachable"] = bool(row[7])
+        if row[8] is not None:
+            parent_record["members_page_accessible"] = bool(row[8])
 
         if not email and not account_id:
             return parent_record
@@ -1549,6 +1713,10 @@ def evaluate_resume_gate(parent_record: JSONDict) -> str:
     organization_id = str(parent_record.get("organization_id") or "").strip()
     if not organization_id:
         return "organization_id_missing"
+
+    workspace_id_value = str(parent_record.get("workspace_id") or "").strip()
+    if not workspace_id_value:
+        return "workspace_id_missing"
 
     if parent_record.get("workspace_reachable") is False:
         return "workspace_unreachable"

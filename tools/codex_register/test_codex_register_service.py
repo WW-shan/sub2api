@@ -161,6 +161,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
                 "account_id": "acct-1",
                 "plan_type": "business",
                 "organization_id": "org-1",
+                "workspace_id": "ws-business",
                 "workspace_reachable": True,
                 "members_page_accessible": True,
                 "codex_register_role": "parent",
@@ -178,9 +179,10 @@ class CodexRegisterServiceTests(unittest.TestCase):
         self.assertEqual(params[3], "acct-1")
         self.assertEqual(params[4], "business")
         self.assertEqual(params[5], "org-1")
-        self.assertEqual(params[6], True)
+        self.assertEqual(params[6], "ws-business")
         self.assertEqual(params[7], True)
-        self.assertEqual(params[8], "parent")
+        self.assertEqual(params[8], True)
+        self.assertEqual(params[9], "parent")
 
     def test_get_latest_parent_record_prefers_register_parent_metadata(self):
         cur = mock.Mock()
@@ -192,6 +194,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
                 "at",
                 "business",
                 "org-1",
+                "ws-business",
                 True,
                 True,
                 "parent",
@@ -207,10 +210,13 @@ class CodexRegisterServiceTests(unittest.TestCase):
         self.assertEqual(parent.get("account_id"), "acct-parent")
         self.assertEqual(parent.get("plan_type"), "business")
         self.assertEqual(parent.get("organization_id"), "org-1")
+        self.assertEqual(parent.get("workspace_id"), "ws-business")
         self.assertEqual(parent.get("workspace_reachable"), True)
         self.assertEqual(parent.get("members_page_accessible"), True)
         self.assertEqual(parent.get("codex_register_role"), "parent")
         self.assertEqual(cur.execute.call_count, 2)
+        first_sql = cur.execute.call_args_list[0].args[0]
+        self.assertIn("codex_register_role = 'parent'", first_sql)
 
     def test_service_default_disabled_until_enable(self):
         self.assertFalse(service.enabled)
@@ -350,6 +356,65 @@ class CodexRegisterServiceTests(unittest.TestCase):
             )
 
         self.assertNotIn("password", payload)
+
+    def test_run_keeps_selected_workspace_id_in_token_payload(self):
+        session = mock.Mock()
+        auth_payload = base64.urlsafe_b64encode(json.dumps({
+            "workspaces": [
+                {"id": "ws-personal", "plan_type": "personal", "organization_id": "org-personal"},
+                {"id": "ws-business", "plan_type": "business", "organization_id": "org-business-1"},
+            ]
+        }).encode("utf-8")).decode("ascii").rstrip("=")
+        auth_cookie = f"{auth_payload}.payload.signature"
+        session.cookies.get.side_effect = ["did-1", auth_cookie]
+        session.get.side_effect = [
+            mock.Mock(text="loc=US\n"),
+            mock.Mock(status_code=200),
+            mock.Mock(status_code=302, headers={"Location": "https://example.com/callback?code=abc&state=st"}),
+        ]
+        session.post.side_effect = [
+            mock.Mock(status_code=200, json=mock.Mock(return_value={"token": "sen-token"})),
+            mock.Mock(status_code=200),
+            mock.Mock(status_code=200),
+            mock.Mock(status_code=200),
+            mock.Mock(status_code=200, json=mock.Mock(return_value={"continue_url": "https://example.com/continue"})),
+        ]
+
+        requests = mock.Mock()
+        requests.Session.return_value = session
+        requests.post.return_value = mock.Mock(status_code=200, json=mock.Mock(return_value={"token": "sen-token"}))
+
+        callback_payload = {
+            "id_token": "id-1",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+            "account_id": "acct-1",
+            "email": "a@example.com",
+            "type": "codex",
+            "expired": "2099-01-01T00:00:00Z",
+        }
+
+        def fake_get_env(name, default=None, required=False):
+            mapping = {
+                "CODEX_MAIL_DOMAIN": "mail.example.com",
+                "CODEX_PARENT_WORKSPACE_ID": "",
+            }
+            value = mapping.get(name, default or "")
+            if required and not value:
+                raise RuntimeError(f"missing env:{name}")
+            return value
+
+        with mock.patch.object(service, "get_requests_module", return_value=requests), mock.patch.object(
+            service, "get_env", side_effect=fake_get_env
+        ), mock.patch.object(service, "get_email_and_token", return_value=("u@mail.example.com", "worker", "pw-secret")), mock.patch.object(
+            service, "get_oai_code", return_value="123456"
+        ), mock.patch.object(service, "generate_oauth_url", return_value=service.OAuthStart("https://auth.example/start", "st", "verifier", service.DEFAULT_REDIRECT_URI)), mock.patch.object(
+            service, "submit_callback_url", return_value=json.dumps(callback_payload)
+        ), mock.patch.object(service, "fetch_session_access_token", return_value="session-at"):
+            token_json = service.run(None)
+
+        payload = json.loads(token_json)
+        self.assertEqual(payload.get("workspace_id"), "ws-business")
 
     def test_run_does_not_attach_password_to_token_payload(self):
         session = mock.Mock()
@@ -656,8 +721,56 @@ class CodexRegisterServiceTests(unittest.TestCase):
         ) as mark_parent_waiting:
             service._run_workflow_once("wf-start", "start")
 
-        run_one_cycle.assert_called_once_with(Path("/tmp"), write_to_accounts=False)
+        run_one_cycle.assert_called_once_with(
+            Path("/tmp"),
+            write_to_accounts=False,
+            register_role="parent",
+            preferred_workspace_id="",
+        )
         mark_parent_waiting.assert_called_once_with("wf-start")
+
+    def test_run_workflow_once_resume_runs_invite_accept_and_verify_chain(self):
+        service.workflow_id = "wf-resume"
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+        service.tokens_dir_global = Path("/tmp")
+
+        parent_record = {
+            "plan_type": "business",
+            "organization_id": "org-1",
+            "workspace_id": "ws-business",
+            "workspace_reachable": True,
+            "members_page_accessible": True,
+        }
+
+        with mock.patch.object(service, "get_latest_parent_record", return_value=parent_record), mock.patch.object(
+            service,
+            "evaluate_resume_gate",
+            return_value="",
+        ), mock.patch.object(
+            service,
+            "run_one_cycle",
+            return_value=(True, ""),
+        ) as run_one_cycle, mock.patch.object(
+            service,
+            "validate_recent_child_records",
+            return_value=(True, ""),
+        ) as validate_recent_child_records, mock.patch.object(
+            service,
+            "promote_recent_child_records_to_pool",
+            return_value=(True, ""),
+        ) as promote_recent_child_records_to_pool, mock.patch.object(service, "_finalize_workflow_once") as finalize:
+            service.last_processed_records = 2
+            service._run_workflow_once("wf-resume", "resume")
+
+        run_one_cycle.assert_called_once_with(
+            Path("/tmp"),
+            write_to_accounts=False,
+            register_role="child",
+            preferred_workspace_id="ws-business",
+        )
+        validate_recent_child_records.assert_called_once_with(parent_record, expected_count=2)
+        promote_recent_child_records_to_pool.assert_called_once_with(parent_record, expected_count=2)
+        finalize.assert_called_once_with("wf-resume", success=True, reason="")
 
     def test_run_one_cycle_surfaces_script_exit_nonzero_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -695,6 +808,19 @@ class CodexRegisterServiceTests(unittest.TestCase):
                     service.run_codex_once(tokens_dir)
 
         append_log.assert_called_with("error", "script_timeout:12")
+
+    def test_run_codex_once_passes_workspace_override_to_subprocess_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp) / "tokens"
+            tokens_dir.mkdir(parents=True)
+            (tokens_dir / "token_1.json").write_text('{"email":"a@example.com"}', encoding="utf-8")
+
+            completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with mock.patch.object(service.subprocess, "run", return_value=completed) as sub_run:
+                service.run_codex_once(tokens_dir, preferred_workspace_id="ws-business")
+
+        env = sub_run.call_args.kwargs["env"]
+        self.assertEqual(env.get("CODEX_PARENT_WORKSPACE_ID"), "ws-business")
 
     def test_run_one_cycle_surfaces_script_timeout_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -838,6 +964,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
         parent_record = {
             "plan_type": "business",
             "organization_id": "org-1",
+            "workspace_id": "ws-business",
             "workspace_reachable": True,
             "members_page_accessible": True,
         }
@@ -868,6 +995,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
         parent_record = {
             "plan_type": "",
             "organization_id": "org-1",
+            "workspace_id": "ws-business",
             "workspace_reachable": True,
             "members_page_accessible": True,
         }
@@ -893,6 +1021,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
         parent_record = {
             "plan_type": "personal",
             "organization_id": "org-1",
+            "workspace_id": "ws-business",
             "workspace_reachable": True,
             "members_page_accessible": True,
         }
@@ -917,6 +1046,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
         parent_record = {
             "plan_type": "",
             "organization_id": "org-1",
+            "workspace_id": "ws-business",
             "workspace_reachable": True,
             "members_page_accessible": True,
         }
@@ -942,6 +1072,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
         parent_record = {
             "plan_type": "business",
             "organization_id": "org-1",
+            "workspace_id": "ws-business",
             "workspace_reachable": True,
             "members_page_accessible": True,
         }
@@ -1001,10 +1132,15 @@ class CodexRegisterServiceTests(unittest.TestCase):
             "organization_id_missing",
         )
         self.assertEqual(
+            service.evaluate_resume_gate({"plan_type": "business", "organization_id": "org-1"}),
+            "workspace_id_missing",
+        )
+        self.assertEqual(
             service.evaluate_resume_gate(
                 {
                     "plan_type": "business",
                     "organization_id": "org-1",
+                    "workspace_id": "ws-business",
                     "workspace_reachable": False,
                 }
             ),
@@ -1015,6 +1151,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
                 {
                     "plan_type": "business",
                     "organization_id": "org-1",
+                    "workspace_id": "ws-business",
                     "workspace_reachable": True,
                     "members_page_accessible": False,
                 }
