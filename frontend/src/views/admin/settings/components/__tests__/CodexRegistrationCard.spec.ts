@@ -18,6 +18,28 @@ const codexApiMocks = vi.hoisted(() => ({
   resume: vi.fn()
 }))
 
+function makeStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    enabled: false,
+    sleep_min: 12,
+    sleep_max: 34,
+    total_created: 18,
+    last_success: '2026-03-06 10:00:00',
+    last_error: 'sample failure',
+    proxy: true,
+    job_phase: 'waiting_manual:db_connect_failed',
+    workflow_id: 'wf-1',
+    waiting_reason: 'db_connect_failed',
+    can_start: false,
+    can_resume: true,
+    can_abandon: true,
+    last_transition: null,
+    last_resume_gate_reason: null,
+    recent_logs_tail: [],
+    ...overrides
+  }
+}
+
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     codex: codexApiMocks
@@ -91,7 +113,28 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.accounts.columns.accessToken': 'Access Token',
     'admin.codexRegister.accounts.columns.refreshToken': 'Refresh Token',
     'admin.codexRegister.accounts.columns.accountId': 'Account ID',
-    'admin.codexRegister.accounts.columns.createdAt': '创建时间'
+    'admin.codexRegister.accounts.columns.createdAt': '创建时间',
+    'admin.codexRegister.debug.snapshotTitle': 'Debug Snapshot',
+    'admin.codexRegister.debug.phaseLabel': 'Current Phase',
+    'admin.codexRegister.debug.waitingLabel': 'Waiting Reason',
+    'admin.codexRegister.debug.gateLabel': 'Resume Gate',
+    'admin.codexRegister.debug.gateClear': 'No gate block',
+    'admin.codexRegister.debug.transitionLabel': 'Last Transition',
+    'admin.codexRegister.debug.transitionReason': 'Reason',
+    'admin.codexRegister.debug.transitionTime': 'Time',
+    'admin.codexRegister.debug.transitionEmpty': 'No transition data',
+    'admin.codexRegister.debug.showRaw': 'Show raw fields',
+    'admin.codexRegister.debug.hideRaw': 'Hide raw fields',
+    'admin.codexRegister.debug.rawPhase': 'Raw phase',
+    'admin.codexRegister.debug.rawWaiting': 'Raw waiting reason',
+    'admin.codexRegister.debug.rawGate': 'Raw resume gate reason',
+    'admin.codexRegister.debug.logLevel': 'Level',
+    'admin.codexRegister.debug.logLimit': 'Limit',
+    'admin.codexRegister.debug.resumeOnly': 'Resume only',
+    'admin.codexRegister.debug.resumeIgnored': 'Resume ignored',
+    'admin.codexRegister.debug.resumeGateBlocked': 'Resume gate blocked: {reason}',
+    'admin.codexRegister.debug.resumeStarted': 'Resume started',
+    'admin.codexRegister.debug.resumeUnknown': 'Resume unknown'
   }
 
   return {
@@ -121,21 +164,7 @@ describe('CodexRegistrationCard', () => {
     vi.useFakeTimers()
     vi.clearAllMocks()
 
-    codexApiMocks.getStatus.mockResolvedValue({
-      enabled: false,
-      sleep_min: 12,
-      sleep_max: 34,
-      total_created: 18,
-      last_success: '2026-03-06 10:00:00',
-      last_error: 'sample failure',
-      proxy: true,
-      job_phase: 'waiting_manual:db_connect_failed',
-      workflow_id: 'wf-1',
-      waiting_reason: 'db_connect_failed',
-      can_start: false,
-      can_resume: true,
-      can_abandon: true
-    })
+    codexApiMocks.getStatus.mockResolvedValue(makeStatus())
 
     codexApiMocks.getLogs.mockResolvedValue([
       {
@@ -212,21 +241,12 @@ describe('CodexRegistrationCard', () => {
   })
 
   it('shows waiting_manual todo checklist for parent_upgrade', async () => {
-    codexApiMocks.getStatus.mockResolvedValueOnce({
-      enabled: false,
-      sleep_min: 12,
-      sleep_max: 34,
-      total_created: 18,
+    codexApiMocks.getStatus.mockResolvedValueOnce(makeStatus({
       last_success: null,
       last_error: null,
-      proxy: true,
       job_phase: 'waiting_manual:parent_upgrade',
-      workflow_id: 'wf-1',
-      waiting_reason: 'parent_upgrade',
-      can_start: false,
-      can_resume: true,
-      can_abandon: true
-    })
+      waiting_reason: 'parent_upgrade'
+    }))
 
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
@@ -277,21 +297,16 @@ describe('CodexRegistrationCard', () => {
   })
 
   it('shows disabled in-progress primary button without layout duplication', async () => {
-    codexApiMocks.getStatus.mockResolvedValueOnce({
+    codexApiMocks.getStatus.mockResolvedValueOnce(makeStatus({
       enabled: true,
-      sleep_min: 12,
-      sleep_max: 34,
       total_created: 19,
       last_success: '2026-03-06 10:05:00',
       last_error: null,
-      proxy: true,
       job_phase: 'running:create_parent',
       workflow_id: 'wf-2',
       waiting_reason: null,
-      can_start: false,
-      can_resume: false,
-      can_abandon: true
-    })
+      can_resume: false
+    }))
 
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
@@ -309,21 +324,16 @@ describe('CodexRegistrationCard', () => {
   })
 
   it('calls resume endpoint when primary action is resume', async () => {
-    codexApiMocks.resume.mockResolvedValueOnce({
+    codexApiMocks.resume.mockResolvedValueOnce(makeStatus({
       enabled: true,
-      sleep_min: 12,
-      sleep_max: 34,
       total_created: 19,
       last_success: '2026-03-06 10:05:00',
       last_error: null,
-      proxy: true,
       job_phase: 'running:create_parent',
       workflow_id: 'wf-2',
       waiting_reason: null,
-      can_start: false,
-      can_resume: false,
-      can_abandon: true
-    })
+      can_resume: false
+    }))
 
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
@@ -341,6 +351,259 @@ describe('CodexRegistrationCard', () => {
     expect(codexApiMocks.resume).toHaveBeenCalledTimes(1)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
     expect(wrapper.text()).toContain('正在创建母号')
+  })
+
+  it('passes selected level and limit to getLogs', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const levelSelect = wrapper.find('[data-testid="codex-log-level"]')
+    const limitSelect = wrapper.find('[data-testid="codex-log-limit"]')
+
+    await levelSelect.setValue('warn')
+    await limitSelect.setValue('50')
+    await flushPromises()
+
+    const lastCall = codexApiMocks.getLogs.mock.calls.at(-1)
+    expect(lastCall?.[0]).toEqual({ level: 'warn', limit: 50 })
+  })
+
+  it('renders debug snapshot before events and status sections', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const order = wrapper
+      .findAll('[data-section-order]')
+      .map((node) => node.attributes('data-section-order'))
+
+    expect(order).toEqual(['debug', 'events', 'status'])
+  })
+
+  it('renders phase/waiting/gate/transition cards with transition reason and time', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(
+      makeStatus({
+        last_transition: {
+          time: '2026-03-06 11:00:00',
+          from: 'waiting_manual:parent_upgrade',
+          to: 'running:pre_resume_check',
+          reason: 'resume'
+        },
+        last_resume_gate_reason: 'parent_upgrade'
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const snapshot = wrapper.find('[data-testid="codex-debug-snapshot"]')
+    const text = snapshot.text()
+    expect(text).toContain('Last Transition')
+    expect(text).toContain('waiting_manual:parent_upgrade → running:pre_resume_check')
+    expect(text).toContain('Reason')
+    expect(text).toContain('resume')
+    expect(text).toContain('Time')
+    expect(text).toContain('2026-03-06 11:00:00')
+    expect(text).toContain('Resume Gate')
+    expect(text).toContain('parent_upgrade')
+  })
+
+  it('hides raw fields by default and shows raw job_phase/waiting_reason/last_resume_gate_reason when toggled', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(
+      makeStatus({
+        waiting_reason: 'parent_upgrade',
+        last_resume_gate_reason: 'parent_upgrade'
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="codex-debug-raw-values"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="codex-debug-raw-toggle"]').trigger('click')
+    await flushPromises()
+
+    const raw = wrapper.find('[data-testid="codex-debug-raw-values"]').text()
+    expect(raw).toContain('waiting_manual:db_connect_failed')
+    expect(raw).toContain('parent_upgrade')
+  })
+
+  it('renders log limit options 50/100/200 and requests logs with selected level/limit', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const limitSelect = wrapper.find('[data-testid="codex-log-limit"]')
+    const options = limitSelect.findAll('option').map((option) => option.text())
+    expect(options).toEqual(['50', '100', '200'])
+
+    await limitSelect.setValue('100')
+    await flushPromises()
+
+    const lastCall = codexApiMocks.getLogs.mock.calls.at(-1)
+    expect(lastCall?.[0]).toEqual({ level: undefined, limit: 100 })
+  })
+
+  it('applies resume-only local filter without changing server query', async () => {
+    codexApiMocks.getLogs.mockResolvedValueOnce([
+      { level: 'info', time: '2026-03-06 10:00:01', message: 'resume_request_ignored:not_waiting' },
+      { level: 'info', time: '2026-03-06 10:00:02', message: 'other event' }
+    ])
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    await wrapper.find('[data-testid="codex-log-resume-only"]').setValue(true)
+    await flushPromises()
+
+    const logs = wrapper.findAll('[data-testid="codex-log-row"]')
+    expect(logs).toHaveLength(1)
+    expect(logs[0].text()).toContain('resume_request_ignored:not_waiting')
+
+    const lastCall = codexApiMocks.getLogs.mock.calls.at(-1)
+    expect(lastCall?.[0]).toEqual({ level: undefined, limit: 200 })
+  })
+
+  it('shows resume ignored diagnostic when not waiting', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(
+      makeStatus({
+        job_phase: 'running:create_parent',
+        waiting_reason: null,
+        last_resume_gate_reason: null,
+        recent_logs_tail: [
+          { level: 'warn', time: '2026-03-06 10:00:09', message: 'resume_request_ignored:not_waiting:phase=running:create_parent' }
+        ]
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const snapshot = wrapper.find('[data-testid="codex-debug-snapshot"]')
+    expect(snapshot.text()).toContain('Resume ignored')
+  })
+
+  it('shows resume gate blocked diagnostic when gate reason exists', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(
+      makeStatus({
+        job_phase: 'waiting_manual:parent_upgrade',
+        waiting_reason: 'parent_upgrade',
+        last_resume_gate_reason: 'parent_upgrade'
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const snapshot = wrapper.find('[data-testid="codex-debug-snapshot"]')
+    expect(snapshot.text()).toContain('Resume gate blocked')
+    expect(snapshot.text()).toContain('parent_upgrade')
+  })
+
+  it('shows resume started diagnostic when phase moves to running:pre_resume_check', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(
+      makeStatus({
+        job_phase: 'running:pre_resume_check',
+        waiting_reason: null,
+        last_resume_gate_reason: null
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const snapshot = wrapper.find('[data-testid="codex-debug-snapshot"]')
+    expect(snapshot.text()).toContain('Resume started')
+  })
+
+  it('keeps status snapshot visible when logs request fails', async () => {
+    codexApiMocks.getLogs.mockRejectedValueOnce(new Error('log failure'))
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="codex-debug-snapshot"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('log failure')
+  })
+
+  it('keeps log error visible even after later status success', async () => {
+    let resolveStatus: (value: ReturnType<typeof makeStatus>) => void
+    const statusPromise = new Promise<ReturnType<typeof makeStatus>>((resolve) => {
+      resolveStatus = resolve
+    })
+
+    codexApiMocks.getStatus.mockReturnValueOnce(statusPromise)
+    codexApiMocks.getLogs.mockRejectedValueOnce(new Error('log failure'))
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('log failure')
+
+    resolveStatus!(makeStatus({ job_phase: 'running:create_parent', waiting_reason: null }))
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('log failure')
+  })
+
+  it('keeps existing logs visible when status request fails', async () => {
+    codexApiMocks.getLogs.mockResolvedValueOnce([
+      { level: 'info', time: '2026-03-06 10:00:01', message: 'resume_started_after_gate' }
+    ])
+    codexApiMocks.getStatus.mockRejectedValueOnce(new Error('status failure'))
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-testid="codex-log-row"]').length).toBe(1)
+    expect(wrapper.text()).toContain('status failure')
   })
 
   it('polls only when active and stops when deactivated', async () => {

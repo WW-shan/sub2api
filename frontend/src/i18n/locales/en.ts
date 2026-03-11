@@ -1061,6 +1061,29 @@ export default {
           accountId: 'Account ID',
           createdAt: 'Created At'
         }
+      },
+      debug: {
+        snapshotTitle: 'Debug Snapshot',
+        phaseLabel: 'Current Phase',
+        waitingLabel: 'Waiting Reason',
+        gateLabel: 'Resume Gate',
+        gateClear: 'No gate block',
+        transitionLabel: 'Last Transition',
+        transitionReason: 'Reason',
+        transitionTime: 'Time',
+        transitionEmpty: 'No transition data',
+        showRaw: 'Show raw fields',
+        hideRaw: 'Hide raw fields',
+        rawPhase: 'Raw phase',
+        rawWaiting: 'Raw waiting reason',
+        rawGate: 'Raw resume gate reason',
+        logLevel: 'Level',
+        logLimit: 'Limit',
+        resumeOnly: 'Resume only',
+        resumeIgnored: 'Resume ignored',
+        resumeGateBlocked: 'Resume gate blocked: {reason}',
+        resumeStarted: 'Resume started',
+        resumeUnknown: 'Resume unknown'
       }
     },
 

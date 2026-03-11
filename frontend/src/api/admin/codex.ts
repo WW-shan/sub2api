@@ -1,5 +1,12 @@
 import { apiClient } from '@/api/client'
 
+export interface CodexTransition {
+  time: string
+  from: string
+  to: string
+  reason: string
+}
+
 export interface CodexStatus {
   enabled: boolean
   sleep_min: number
@@ -14,12 +21,20 @@ export interface CodexStatus {
   can_start: boolean
   can_resume: boolean
   can_abandon: boolean
+  last_transition: CodexTransition | null
+  last_resume_gate_reason: string | null
+  recent_logs_tail: CodexLogEntry[]
 }
 
 export interface CodexLogEntry {
   time: string
   level: string
   message: string
+}
+
+export interface CodexLogQuery {
+  level?: 'info' | 'warn' | 'error'
+  limit?: number
 }
 
 export interface CodexRegisterAccount {
@@ -38,8 +53,8 @@ export async function getStatus(): Promise<CodexStatus> {
   return res.data
 }
 
-export async function getLogs(): Promise<CodexLogEntry[]> {
-  const res = await apiClient.get<{ logs: CodexLogEntry[] }>('/admin/codex/logs')
+export async function getLogs(query: CodexLogQuery = {}): Promise<CodexLogEntry[]> {
+  const res = await apiClient.get<{ logs: CodexLogEntry[] }>('/admin/codex/logs', { params: query })
   return res.data?.logs ?? []
 }
 

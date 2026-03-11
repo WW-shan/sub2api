@@ -72,8 +72,8 @@
         <StatCard :title="t('admin.codexRegister.summary.sleepRange')" :value="sleepRangeSummaryLabel" :icon="PulseIcon" icon-variant="danger" />
       </div>
 
-      <p v-if="error" class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-300">
-        {{ error }}
+      <p v-if="combinedError" class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-300">
+        {{ combinedError }}
       </p>
 
       <section
@@ -94,141 +94,255 @@
         </p>
       </section>
 
-      <div class="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
-        <section class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20">
-          <div class="border-b border-gray-200 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.codexRegister.panels.statusTitle') }}</h2>
+<section
+        class="rounded-2xl border border-slate-200 bg-white/70 p-6 dark:border-dark-700 dark:bg-dark-900/40"
+        data-testid="codex-debug-snapshot"
+        data-section-order="debug"
+      >
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.codexRegister.debug.snapshotTitle') }}
+            </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              {{ t('admin.codexRegister.panels.statusDescription') }}
+              {{ resumeDiagnosticLabel }}
             </p>
           </div>
-          <div class="space-y-4 p-6">
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
-                <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.serviceStatus') }}</p>
-                <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
-                  {{ serviceStatusLabel }}
-                </p>
-              </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
-                <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.proxyConfig') }}</p>
-                <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
-                  {{ proxyDetailLabel }}
-                </p>
-              </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
-                <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.phaseTitle') }}</p>
-                <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all">
-                  {{ codexPhaseLabel }}
-                </p>
-              </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
-                <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.waitingReasonTitle') }}</p>
-                <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all">
-                  {{ waitingReasonLabel }}
-                </p>
-              </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
-                <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.lastSuccessTitle') }}</p>
-                <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
-                  {{ lastSuccessLabel }}
-                </p>
-              </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
-                <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.sleepRangeTitle') }}</p>
-                <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
-                  {{ sleepRangeDetailLabel }}
-                </p>
-              </div>
-            </div>
+          <button
+            type="button"
+            class="btn btn-secondary btn-sm"
+            data-testid="codex-debug-raw-toggle"
+            @click="showRawSnapshot = !showRawSnapshot"
+          >
+            {{ showRawSnapshot ? t('admin.codexRegister.debug.hideRaw') : t('admin.codexRegister.debug.showRaw') }}
+          </button>
+        </div>
 
+        <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60">
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t('admin.codexRegister.debug.phaseLabel') }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+              {{ codexPhaseLabel }}
+            </p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60">
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t('admin.codexRegister.debug.waitingLabel') }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+              {{ waitingReasonLabel }}
+            </p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60">
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t('admin.codexRegister.debug.gateLabel') }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all">
+              {{ resumeGateLabel }}
+            </p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60">
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t('admin.codexRegister.debug.transitionLabel') }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all">
+              {{ transitionMainLabel }}
+            </p>
+            <div class="mt-2 space-y-1 text-xs text-gray-500 dark:text-gray-400">
+              <p>{{ t('admin.codexRegister.debug.transitionReason') }}: {{ transitionReasonLabel }}</p>
+              <p>{{ t('admin.codexRegister.debug.transitionTime') }}: {{ transitionTimeLabel }}</p>
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-if="showRawSnapshot"
+          class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600 dark:border-dark-700 dark:bg-dark-900/60 dark:text-slate-200"
+          data-testid="codex-debug-raw-values"
+        >
+          <p>{{ t('admin.codexRegister.debug.rawPhase') }}: {{ status?.job_phase || '-' }}</p>
+          <p>{{ t('admin.codexRegister.debug.rawWaiting') }}: {{ status?.waiting_reason || '-' }}</p>
+          <p>{{ t('admin.codexRegister.debug.rawGate') }}: {{ status?.last_resume_gate_reason || '-' }}</p>
+        </div>
+      </section>
+
+      <section
+        class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20"
+        data-section-order="events"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-6 py-4 dark:border-dark-700">
+          <div>
+            <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.codexRegister.panels.eventsTitle') }}</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.codexRegister.panels.eventsDescription') }}</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <label class="text-xs font-medium text-gray-500 dark:text-gray-400">
+              {{ t('admin.codexRegister.debug.logLevel') }}
+              <select
+                v-model="selectedLogLevel"
+                class="ml-2 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs dark:border-dark-700 dark:bg-dark-900"
+                data-testid="codex-log-level"
+              >
+                <option value="all">all</option>
+                <option value="info">info</option>
+                <option value="warn">warn</option>
+                <option value="error">error</option>
+              </select>
+            </label>
+            <label class="text-xs font-medium text-gray-500 dark:text-gray-400">
+              {{ t('admin.codexRegister.debug.logLimit') }}
+              <select
+                v-model.number="selectedLogLimit"
+                class="ml-2 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs dark:border-dark-700 dark:bg-dark-900"
+                data-testid="codex-log-limit"
+              >
+                <option :value="50">50</option>
+                <option :value="100">100</option>
+                <option :value="200">200</option>
+              </select>
+            </label>
+            <label class="flex items-center gap-2 text-xs font-medium text-gray-500 dark:text-gray-400">
+              <input v-model="resumeOnly" type="checkbox" class="rounded border-gray-300" data-testid="codex-log-resume-only" />
+              {{ t('admin.codexRegister.debug.resumeOnly') }}
+            </label>
+            <span class="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300">
+              {{ t('admin.codexRegister.panels.eventCount', { count: visibleLogs.length }) }}
+            </span>
+          </div>
+        </div>
+
+        <div class="p-6">
+          <div
+            v-if="visibleLogs.length === 0"
+            class="rounded-xl border border-dashed border-gray-200 px-6 py-10 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-gray-400"
+          >
+            {{ t('admin.codexRegister.panels.emptyEvents') }}
+          </div>
+          <div
+            v-else
+            class="max-h-[28rem] overflow-auto rounded-xl border border-gray-200 bg-white dark:border-dark-700 dark:bg-dark-900/40"
+          >
             <div
-              :class="[
-                'rounded-xl border p-4',
-                status?.last_error
-                  ? 'border-red-200 bg-red-50 dark:border-red-900/60 dark:bg-red-900/20'
-                  : 'border-emerald-200 bg-emerald-50 dark:border-emerald-900/60 dark:bg-emerald-900/10'
-              ]"
+              v-for="(log, idx) in visibleLogs"
+              :key="`${log.time}-${log.level}-${log.message}-${idx}`"
+              class="border-b border-gray-100 px-4 py-3 last:border-b-0 dark:border-dark-800"
+              data-testid="codex-log-row"
             >
-              <div class="flex items-center justify-between gap-3">
-                <h3
-                  :class="[
-                    'text-sm font-semibold',
-                    status?.last_error ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'
-                  ]"
-                >
-                  {{ t('admin.codexRegister.panels.errorTitle') }}
-                </h3>
+              <div class="flex items-center justify-between gap-3 text-[11px]">
                 <span
                   :class="[
-                    'text-xs',
-                    status?.last_error ? 'text-red-500 dark:text-red-400' : 'text-emerald-500 dark:text-emerald-400'
+                    'inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide',
+                    log.level === 'error'
+                      ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                      : log.level === 'warn'
+                        ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                        : 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
                   ]"
                 >
-                  {{ errorStateLabel }}
+                  {{ log.level }}
                 </span>
+                <span class="text-gray-400 dark:text-gray-500">{{ log.time }}</span>
               </div>
-              <pre
-                v-if="status?.last_error"
-                class="mt-3 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border border-red-200/80 bg-white/70 p-3 text-[11px] leading-snug text-red-800 dark:border-red-900/60 dark:bg-dark-950/60 dark:text-red-200"
-              >{{ status.last_error }}</pre>
-              <p v-else class="mt-3 text-sm text-emerald-700 dark:text-emerald-300">
-                {{ t('admin.codexRegister.panels.noErrors') }}
+              <p class="mt-2 whitespace-pre-wrap break-words text-xs leading-6 text-gray-700 dark:text-gray-200">
+                {{ log.message }}
               </p>
             </div>
           </div>
-        </section>
+        </div>
+      </section>
 
-        <section class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20">
-          <div class="flex items-center justify-between gap-3 border-b border-gray-200 px-6 py-4 dark:border-dark-700">
-            <div>
-              <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.codexRegister.panels.eventsTitle') }}</h2>
-              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.codexRegister.panels.eventsDescription') }}</p>
+      <section
+        class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20"
+        data-section-order="status"
+      >
+        <div class="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+          <section class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20">
+            <div class="border-b border-gray-200 px-6 py-4 dark:border-dark-700">
+              <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.codexRegister.panels.statusTitle') }}</h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                {{ t('admin.codexRegister.panels.statusDescription') }}
+              </p>
             </div>
-            <span class="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300">
-              {{ t('admin.codexRegister.panels.eventCount', { count: logs.length }) }}
-            </span>
-          </div>
+            <div class="space-y-4 p-6">
+              <div class="grid gap-3 sm:grid-cols-2">
+                <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.serviceStatus') }}</p>
+                  <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+                    {{ serviceStatusLabel }}
+                  </p>
+                </div>
+                <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.proxyConfig') }}</p>
+                  <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+                    {{ proxyDetailLabel }}
+                  </p>
+                </div>
+                <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.phaseTitle') }}</p>
+                  <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all">
+                    {{ codexPhaseLabel }}
+                  </p>
+                </div>
+                <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.waitingReasonTitle') }}</p>
+                  <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all">
+                    {{ waitingReasonLabel }}
+                  </p>
+                </div>
+                <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.lastSuccessTitle') }}</p>
+                  <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+                    {{ lastSuccessLabel }}
+                  </p>
+                </div>
+                <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40">
+                  <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">{{ t('admin.codexRegister.panels.sleepRangeTitle') }}</p>
+                  <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+                    {{ sleepRangeDetailLabel }}
+                  </p>
+                </div>
+              </div>
 
-          <div class="p-6">
-            <div
-              v-if="logs.length === 0"
-              class="rounded-xl border border-dashed border-gray-200 px-6 py-10 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-gray-400"
-            >
-              {{ t('admin.codexRegister.panels.emptyEvents') }}
-            </div>
-            <div
-              v-else
-              class="max-h-[28rem] overflow-auto rounded-xl border border-gray-200 bg-white dark:border-dark-700 dark:bg-dark-900/40"
-            >
               <div
-                v-for="(log, idx) in logs"
-                :key="`${log.time}-${log.level}-${log.message}-${idx}`"
-                class="border-b border-gray-100 px-4 py-3 last:border-b-0 dark:border-dark-800"
+                :class="[
+                  'rounded-xl border p-4',
+                  status?.last_error
+                    ? 'border-red-200 bg-red-50 dark:border-red-900/60 dark:bg-red-900/20'
+                    : 'border-emerald-200 bg-emerald-50 dark:border-emerald-900/60 dark:bg-emerald-900/10'
+                ]"
               >
-                <div class="flex items-center justify-between gap-3 text-[11px]">
-                  <span
+                <div class="flex items-center justify-between gap-3">
+                  <h3
                     :class="[
-                      'inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide',
-                      log.level === 'error'
-                        ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
-                        : log.level === 'warn'
-                          ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
-                          : 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
+                      'text-sm font-semibold',
+                      status?.last_error ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'
                     ]"
                   >
-                    {{ log.level }}
+                    {{ t('admin.codexRegister.panels.errorTitle') }}
+                  </h3>
+                  <span
+                    :class="[
+                      'text-xs',
+                      status?.last_error ? 'text-red-500 dark:text-red-400' : 'text-emerald-500 dark:text-emerald-400'
+                    ]"
+                  >
+                    {{ errorStateLabel }}
                   </span>
-                  <span class="text-gray-400 dark:text-gray-500">{{ log.time }}</span>
                 </div>
-                <p class="mt-2 whitespace-pre-wrap break-words text-xs leading-6 text-gray-700 dark:text-gray-200">
-                  {{ log.message }}
+                <pre
+                  v-if="status?.last_error"
+                  class="mt-3 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border border-red-200/80 bg-white/70 p-3 text-[11px] leading-snug text-red-800 dark:border-red-900/60 dark:bg-dark-950/60 dark:text-red-200"
+                >{{ status.last_error }}</pre>
+                <p v-else class="mt-3 text-sm text-emerald-700 dark:text-emerald-300">
+                  {{ t('admin.codexRegister.panels.noErrors') }}
                 </p>
               </div>
             </div>
-          </div>
-        </section>
-      </div>
+          </section>
+        </div>
+      </section>
 
       <section class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20">
         <div class="flex items-center justify-between gap-3 border-b border-gray-200 px-6 py-4 dark:border-dark-700">
@@ -314,11 +428,18 @@ const { t } = useI18n()
 const status = ref<CodexStatus | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
+const statusError = ref<string | null>(null)
+const logsError = ref<string | null>(null)
+const accountsError = ref<string | null>(null)
 const logs = ref<CodexLogEntry[]>([])
 const accounts = ref<CodexRegisterAccount[]>([])
 const refreshing = ref(false)
 let timer: number | undefined
 const POLL_INTERVAL = 10000
+const selectedLogLevel = ref<'all' | 'info' | 'warn' | 'error'>('all')
+const selectedLogLimit = ref(200)
+const resumeOnly = ref(false)
+const showRawSnapshot = ref(false)
 
 type PhaseTone = 'neutral' | 'running' | 'waiting' | 'failed'
 type PrimaryAction = 'start' | 'resume' | 'inProgress'
@@ -398,7 +519,7 @@ const serviceStatusLabel = computed(() => phaseState.value.label)
 
 const controlbarSummaryLabel = computed(() => {
   if (!status.value) {
-    return error.value ? t('common.unknown') : t('common.loading')
+    return combinedError.value ? t('common.unknown') : t('common.loading')
   }
 
   if (status.value.waiting_reason) {
@@ -450,7 +571,7 @@ const sleepRangeDetailLabel = computed(() => {
 
 const codexPhaseLabel = computed(() => {
   if (!status.value) {
-    return error.value ? t('common.unknown') : t('common.loading')
+    return combinedError.value ? t('common.unknown') : t('common.loading')
   }
 
   return phaseInfo(status.value.job_phase).label
@@ -458,10 +579,50 @@ const codexPhaseLabel = computed(() => {
 
 const waitingReasonLabel = computed(() => {
   if (!status.value) {
-    return error.value ? t('common.unknown') : t('common.loading')
+    return combinedError.value ? t('common.unknown') : t('common.loading')
   }
 
   return waitingReasonText(status.value.waiting_reason)
+})
+
+const snapshotTransition = computed(() => status.value?.last_transition ?? null)
+const transitionMainLabel = computed(() => {
+  const transition = snapshotTransition.value
+  return transition
+    ? `${transition.from} → ${transition.to}`
+    : t('admin.codexRegister.debug.transitionEmpty')
+})
+const transitionReasonLabel = computed(() => snapshotTransition.value?.reason || '-')
+const transitionTimeLabel = computed(() => snapshotTransition.value?.time || '-')
+const resumeGateLabel = computed(() => status.value?.last_resume_gate_reason || t('admin.codexRegister.debug.gateClear'))
+const resumeDiagnosticLabel = computed(() => {
+  if (!status.value) {
+    return t('admin.codexRegister.debug.resumeUnknown')
+  }
+
+  const phase = status.value.job_phase || ''
+  const gate = status.value.last_resume_gate_reason || ''
+  const tail = status.value.recent_logs_tail || []
+
+  if (tail.some((item) => String(item.message || '').includes('resume_request_ignored:not_waiting'))) {
+    return t('admin.codexRegister.debug.resumeIgnored')
+  }
+  if (gate) {
+    return t('admin.codexRegister.debug.resumeGateBlocked', { reason: gate })
+  }
+  if (phase.startsWith('running:')) {
+    return t('admin.codexRegister.debug.resumeStarted')
+  }
+
+  return t('admin.codexRegister.debug.resumeUnknown')
+})
+
+const visibleLogs = computed(() => {
+  if (!resumeOnly.value) return logs.value
+  return logs.value.filter((item) => {
+    const msg = String(item.message || '')
+    return msg.includes('resume_') || msg.includes('resume_gate_') || msg.includes('http_post_received:path=/resume')
+  })
 })
 
 const isWaitingManual = computed(() => Boolean(status.value?.job_phase?.startsWith('waiting_manual:')))
@@ -524,9 +685,10 @@ function secretDisplayValue(account: CodexRegisterAccount, field: SecretField): 
   return isSecretRevealed(account.id, field) ? value : maskSecret(value)
 }
 
+const combinedError = computed(() => logsError.value || statusError.value || accountsError.value)
 const errorStateLabel = computed(() => {
   if (!status.value) {
-    return error.value ? t('common.unknown') : t('common.loading')
+    return combinedError.value ? t('common.unknown') : t('common.loading')
   }
 
   return status.value.last_error ? t('admin.codexRegister.badge.attention') : t('admin.codexRegister.badge.healthy')
@@ -571,20 +733,26 @@ async function fetchStatus() {
   try {
     const data = await adminAPI.codex.getStatus()
     status.value = data
+    statusError.value = null
     error.value = null
   } catch (errorValue) {
-    status.value = null
-    error.value = getErrorMessage(errorValue)
+    statusError.value = getErrorMessage(errorValue)
+    error.value = statusError.value
   }
 }
 
 async function fetchLogs() {
   try {
-    const data = await adminAPI.codex.getLogs()
+    const data = await adminAPI.codex.getLogs({
+      level: selectedLogLevel.value === 'all' ? undefined : selectedLogLevel.value,
+      limit: selectedLogLimit.value
+    })
     logs.value = data
+    logsError.value = null
+    error.value = null
   } catch (errorValue) {
-    logs.value = []
-    error.value = getErrorMessage(errorValue)
+    logsError.value = getErrorMessage(errorValue)
+    error.value = logsError.value
   }
 }
 
@@ -592,9 +760,12 @@ async function fetchAccounts() {
   try {
     const data = await adminAPI.codex.getAccounts()
     accounts.value = data
+    accountsError.value = null
+    error.value = null
   } catch (errorValue) {
     accounts.value = []
-    error.value = getErrorMessage(errorValue)
+    accountsError.value = getErrorMessage(errorValue)
+    error.value = accountsError.value
   }
 }
 
@@ -670,6 +841,10 @@ function stopPolling() {
     timer = undefined
   }
 }
+
+watch([selectedLogLevel, selectedLogLimit], () => {
+  void fetchLogs()
+})
 
 watch(
   () => props.active,

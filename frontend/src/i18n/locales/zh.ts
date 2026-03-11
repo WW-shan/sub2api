@@ -1083,6 +1083,29 @@ export default {
           accountId: 'Account ID',
           createdAt: '创建时间'
         }
+      },
+      debug: {
+        snapshotTitle: '调试快照',
+        phaseLabel: '当前阶段',
+        waitingLabel: '等待原因',
+        gateLabel: '继续阻塞原因',
+        gateClear: '无阻塞',
+        transitionLabel: '最近状态变化',
+        transitionReason: '原因',
+        transitionTime: '时间',
+        transitionEmpty: '暂无变化记录',
+        showRaw: '显示原始字段',
+        hideRaw: '隐藏原始字段',
+        rawPhase: '原始阶段值',
+        rawWaiting: '原始等待原因',
+        rawGate: '原始继续阻塞原因',
+        logLevel: '级别',
+        logLimit: '数量',
+        resumeOnly: '仅展示继续相关',
+        resumeIgnored: '继续请求已忽略',
+        resumeGateBlocked: '继续被阻塞：{reason}',
+        resumeStarted: '继续流程已启动',
+        resumeUnknown: '继续状态未知'
       }
     },
 
