@@ -48,9 +48,15 @@ recent_logs = []
 workflow_id = ""
 job_phase = "idle"
 waiting_reason = ""
+last_transition: Dict[str, Any] = {}
+last_resume_gate_reason = ""
 active_workflow_thread = None
 status_lock = threading.Lock()
 JSONDict = Dict[str, Any]
+STATUS_LOG_TAIL_LIMIT = 50
+LOGS_ENDPOINT_DEFAULT_LIMIT = 200
+LOGS_ENDPOINT_MAX_LIMIT = 1000
+VALID_LOG_LEVELS = {"info", "warn", "error"}
 WAITING_MANUAL_PREFIX = "waiting_manual:"
 PHASE_IDLE = "idle"
 PHASE_RUNNING_CREATE_PARENT = "running:create_parent"
@@ -83,6 +89,8 @@ PARENT_RESUME_GATE_REASONS = {
     "workspace_id_missing",
     "workspace_unreachable",
     "members_page_inaccessible",
+    "parent_account_id_missing",
+    "parent_access_token_missing",
 }
 
 DEFAULT_MODEL_MAPPING: Dict[str, str] = {
@@ -152,17 +160,45 @@ DEFAULT_MODEL_MAPPING: Dict[str, str] = {
 }
 
 
+def _append_log_locked(level: str, message: str) -> None:
+    recent_logs.append(
+        {
+            "time": datetime.utcnow().isoformat() + "Z",
+            "level": level,
+            "message": message,
+        }
+    )
+    if len(recent_logs) > 100:
+        del recent_logs[0 : len(recent_logs) - 100]
+
+
 def append_log(level: str, message: str) -> None:
     with status_lock:
-        recent_logs.append(
-            {
-                "time": datetime.utcnow().isoformat() + "Z",
-                "level": level,
-                "message": message,
-            }
-        )
-        if len(recent_logs) > 100:
-            del recent_logs[0 : len(recent_logs) - 100]
+        _append_log_locked(level, message)
+
+
+def _safe_parent_record_summary(parent_record: JSONDict) -> JSONDict:
+    return {
+        "email": str(parent_record.get("email") or "").strip(),
+        "account_id": str(parent_record.get("account_id") or "").strip(),
+        "plan_type": str(parent_record.get("plan_type") or "").strip().lower(),
+        "organization_id": str(parent_record.get("organization_id") or "").strip(),
+        "workspace_id": str(parent_record.get("workspace_id") or "").strip(),
+        "workspace_reachable": parent_record.get("workspace_reachable"),
+        "members_page_accessible": parent_record.get("members_page_accessible"),
+        "has_access_token": bool(str(parent_record.get("session_access_token") or parent_record.get("access_token") or "").strip()),
+    }
+
+
+def _log_resume_gate_decision(gate_reason: str, parent_record: JSONDict) -> None:
+    global last_resume_gate_reason
+    decision = {
+        "gate_reason": gate_reason or "",
+        "parent": _safe_parent_record_summary(parent_record),
+    }
+    with status_lock:
+        last_resume_gate_reason = gate_reason or ""
+        _append_log_locked("info", f"resume_gate_decision:{json.dumps(decision, ensure_ascii=False)}")
 
 
 def ensure_dict(value: object) -> JSONDict:
@@ -1191,16 +1227,33 @@ def is_waiting_phase(phase: str) -> bool:
 
 
 def set_waiting_manual_locked(reason: str) -> None:
-    global job_phase, waiting_reason
+    global job_phase, waiting_reason, last_transition
     reason_code = normalize_reason_code(reason)
-    job_phase = build_waiting_phase(reason_code)
+    previous_phase = job_phase
+    next_phase = build_waiting_phase(reason_code)
+    job_phase = next_phase
     waiting_reason = reason_code
+    last_transition = {
+        "time": datetime.utcnow().isoformat() + "Z",
+        "from": previous_phase,
+        "to": next_phase,
+        "reason": reason_code,
+    }
+    _append_log_locked("warn", f"phase_transition:{previous_phase}->{next_phase}:reason={reason_code}")
 
 
 def _set_phase_locked(phase: str) -> None:
-    global job_phase
+    global job_phase, last_transition
     if phase in CANONICAL_JOB_PHASES:
+        previous_phase = job_phase
         job_phase = phase
+        last_transition = {
+            "time": datetime.utcnow().isoformat() + "Z",
+            "from": previous_phase,
+            "to": phase,
+            "reason": "",
+        }
+        _append_log_locked("info", f"phase_transition:{previous_phase}->{phase}")
 
 
 def _refresh_workflow_thread_locked() -> None:
@@ -1226,6 +1279,10 @@ def run_one_cycle(
 
     with status_lock:
         last_run = datetime.utcnow()
+    append_log(
+        "info",
+        f"run_one_cycle_started:write_to_accounts={write_to_accounts}:register_role={register_role}:preferred_workspace_id={preferred_workspace_id}:tokens_dir={tokens_dir}",
+    )
 
     try:
         conn = create_db_connection()
@@ -1244,8 +1301,10 @@ def run_one_cycle(
 
     try:
         batches = run_codex_once(tokens_dir, preferred_workspace_id=preferred_workspace_id)
+        append_log("info", f"run_codex_once_batches:{len(batches)}")
         with status_lock:
             last_processed_records = sum(len(items) for _, items in batches)
+        append_log("info", f"run_one_cycle_processed_records:{last_processed_records}")
 
         if batches:
             processed_dir = tokens_dir / "processed"
@@ -1257,6 +1316,10 @@ def run_one_cycle(
                         if identifier:
                             with status_lock:
                                 last_token_email = identifier
+                        append_log(
+                            "info",
+                            f"token_process_started:file={source_file.name}:identifier={identifier}:register_role={register_role}:write_to_accounts={write_to_accounts}",
+                        )
                         action = "skipped"
                         token_role = str(token_info.get("codex_register_role") or "").strip().lower()
                         effective_role = token_role if token_role in {"parent", "child"} else register_role
@@ -1264,6 +1327,10 @@ def run_one_cycle(
                         if write_to_accounts:
                             action = upsert_account(cur, token_info, account_role=effective_role)
                         upsert_codex_register_account(cur, token_info)
+                        append_log(
+                            "info",
+                            f"token_process_completed:file={source_file.name}:identifier={identifier}:action={action}:effective_role={effective_role}",
+                        )
                         if action == "created":
                             with status_lock:
                                 total_created += 1
@@ -1340,17 +1407,20 @@ def run_one_cycle(
 
 
 def _begin_workflow_locked(*, allow_resume: bool) -> Optional[threading.Thread]:
-    global workflow_id, waiting_reason, enabled, active_workflow_thread
+    global workflow_id, waiting_reason, enabled, active_workflow_thread, last_resume_gate_reason
 
     _refresh_workflow_thread_locked()
     if active_workflow_thread is not None and active_workflow_thread.is_alive():
+        _append_log_locked("warn", f"workflow_begin_rejected:already_running:job_phase={job_phase}")
         return None
 
     if job_phase == PHASE_ABANDONED:
+        _append_log_locked("warn", "workflow_begin_rejected:abandoned")
         return None
 
     if allow_resume:
         if not is_waiting_phase(job_phase):
+            _append_log_locked("warn", f"workflow_begin_rejected:not_waiting:job_phase={job_phase}")
             return None
 
         if job_phase == PHASE_WAITING_PARENT_UPGRADE or waiting_reason == "parent_upgrade":
@@ -1362,28 +1432,35 @@ def _begin_workflow_locked(*, allow_resume: bool) -> Optional[threading.Thread]:
     else:
         mode = "start"
         if job_phase not in (PHASE_IDLE, PHASE_COMPLETED):
+            _append_log_locked("warn", f"workflow_begin_rejected:invalid_phase_for_start:job_phase={job_phase}")
             return None
         next_phase = PHASE_RUNNING_CREATE_PARENT
 
     workflow_id = _build_workflow_id()
     _set_phase_locked(next_phase)
     waiting_reason = ""
+    last_resume_gate_reason = ""
     enabled = True
     workflow_thread = threading.Thread(target=_run_workflow_once, args=(workflow_id, mode), daemon=True)
     active_workflow_thread = workflow_thread
+    _append_log_locked("info", f"workflow_begin_accepted:workflow_id={workflow_id}:mode={mode}:next_phase={next_phase}")
     return workflow_thread
-
-
 def start_workflow_once(*, allow_resume: bool = False) -> bool:
+    append_log("info", f"start_workflow_once_requested:allow_resume={allow_resume}")
     workflow_thread = None
     with status_lock:
         workflow_thread = _begin_workflow_locked(allow_resume=allow_resume)
 
     if workflow_thread is None:
+        append_log(
+            "warn",
+            f"start_workflow_once_rejected:allow_resume={allow_resume}:job_phase={job_phase}:waiting_reason={waiting_reason}",
+        )
         return False
 
     try:
         workflow_thread.start()
+        append_log("info", f"workflow_thread_started:allow_resume={allow_resume}:workflow_id={workflow_id}")
         return True
     except Exception as exc:  # noqa: BLE001
         with status_lock:
@@ -1393,6 +1470,7 @@ def start_workflow_once(*, allow_resume: bool = False) -> bool:
             active_workflow_thread = None
         append_log("error", f"thread_start_failed:{exc}")
         return False
+
 
 
 def _finalize_workflow_once(workflow_token: str, *, success: bool, reason: str = "") -> None:
@@ -1444,6 +1522,196 @@ def _mark_parent_upgrade_waiting(workflow_token: str) -> None:
         active_workflow_thread = None
 
 
+def invite_recent_children(parent_record: JSONDict, *, expected_count: int) -> Tuple[bool, str]:
+    parent_account_id = str(parent_record.get("account_id") or "").strip()
+    if not parent_account_id:
+        return False, "parent_account_id_missing"
+
+    parent_access_token = str(parent_record.get("session_access_token") or parent_record.get("access_token") or "").strip()
+    if not parent_access_token:
+        return False, "parent_access_token_missing"
+
+    workspace_id_value = str(parent_record.get("workspace_id") or "").strip()
+    organization_id = str(parent_record.get("organization_id") or "").strip()
+    plan_type = str(parent_record.get("plan_type") or "").strip().lower()
+    if not workspace_id_value or not organization_id or not plan_type:
+        return False, "parent_metadata_incomplete"
+
+    append_log(
+        "info",
+        f"invite_recent_children_started:expected_count={expected_count}:workspace_id={workspace_id_value}:organization_id={organization_id}:plan_type={plan_type}",
+    )
+
+    conn = create_db_connection()
+    cur = conn.cursor()
+    invited = 0
+    try:
+        cur.execute(
+            "SELECT DISTINCT email FROM codex_register_accounts "
+            "WHERE source = 'codex-register' AND codex_register_role = 'child' "
+            "AND workspace_id = %s AND organization_id = %s AND plan_type = %s "
+            "AND COALESCE(email, '') <> '' "
+            "AND created_at >= NOW() - INTERVAL '30 minutes' "
+            "ORDER BY email LIMIT %s",
+            (workspace_id_value, organization_id, plan_type, max(1, int(expected_count or 1))),
+        )
+        rows = cur.fetchall() or []
+        append_log("info", f"invite_recent_children_targets:{len(rows)}")
+        if not rows:
+            return False, "child_invite_targets_missing"
+
+        base_url = str(get_env("CODEX_CHATGPT_BASE_URL", "https://chatgpt.com") or "https://chatgpt.com").rstrip("/")
+        invite_url = f"{base_url}/backend-api/accounts/{parent_account_id}/invites"
+
+        for row in rows:
+            child_email = str((row or [""])[0] or "").strip()
+            if not child_email:
+                continue
+            payload = json.dumps({"email": child_email}).encode("utf-8")
+            req = urllib.request.Request(
+                invite_url,
+                data=payload,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {parent_access_token}",
+                    "chatgpt-account-id": parent_account_id,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
+                    status = int(getattr(resp, "status", 0) or 0)
+                append_log("info", f"invite_child:{child_email}:{status}")
+                if status in {200, 201, 202, 204, 409}:
+                    invited += 1
+            except urllib.error.HTTPError as exc:
+                append_log("warn", f"invite_child_http_error:{child_email}:{exc.code}")
+                if int(getattr(exc, "code", 0) or 0) == 409:
+                    invited += 1
+            except Exception as exc:  # noqa: BLE001
+                append_log("warn", f"invite_child_request_failed:{child_email}:{exc}")
+
+        append_log("info", f"invite_recent_children_completed:invited={invited}:expected={max(1, int(expected_count or 1))}")
+        if invited < max(1, int(expected_count or 1)):
+            return False, "child_invite_incomplete"
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        append_log("error", f"invite_recent_children_failed:{exc}")
+        return False, "child_invite_failed"
+    finally:
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def verify_child_business_plan_via_session_exchange(
+    token_info: JSONDict,
+    *,
+    workspace_id: str,
+    parent_account_id: str = "",
+) -> Tuple[bool, str]:
+    child_access_token = str(token_info.get("session_access_token") or token_info.get("access_token") or "").strip()
+    if not child_access_token:
+        return False, "child_access_token_missing"
+
+    target_workspace_id = str(workspace_id or "").strip()
+    if not target_workspace_id:
+        return False, "workspace_id_missing"
+
+    base_url = str(get_env("CODEX_CHATGPT_BASE_URL", "https://chatgpt.com") or "https://chatgpt.com").rstrip("/")
+    workspace_candidates: List[str] = [target_workspace_id]
+    fallback_workspace_id = str(parent_account_id or "").strip()
+    if fallback_workspace_id and fallback_workspace_id not in workspace_candidates:
+        workspace_candidates.append(fallback_workspace_id)
+
+    raw = ""
+    last_error: Exception | None = None
+    for candidate_workspace_id in workspace_candidates:
+        query = urllib.parse.urlencode(
+            {
+                "exchange_workspace_token": "true",
+                "workspace_id": candidate_workspace_id,
+                "reason": "setCurrentAccount",
+            }
+        )
+        url = f"{base_url}/api/auth/session?{query}"
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={
+                "Authorization": f"Bearer {child_access_token}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
+                raw = resp.read().decode("utf-8")
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            append_log("warn", f"child_session_exchange_failed:{candidate_workspace_id}:{exc}")
+            continue
+
+    if not raw:
+        if last_error is not None:
+            append_log("warn", f"child_session_exchange_failed_final:{last_error}")
+        return False, "child_session_exchange_failed"
+
+    try:
+        payload = ensure_dict(raw)
+    except Exception:  # noqa: BLE001
+        payload = {}
+
+    user = ensure_dict(payload.get("user"))
+    account = ensure_dict(user.get("account"))
+    current_account = ensure_dict(account.get("current_account") or account.get("currentAccount"))
+    workspace = ensure_dict(current_account.get("workspace"))
+    subscription = ensure_dict(workspace.get("subscription"))
+
+    current_workspace_id = str(
+        workspace.get("id")
+        or workspace.get("workspace_id")
+        or workspace.get("workspaceId")
+        or current_account.get("workspace_id")
+        or ""
+    ).strip()
+    if current_workspace_id and current_workspace_id not in workspace_candidates:
+        return False, "child_workspace_mismatch"
+
+    plan_type = str(
+        subscription.get("plan_type")
+        or subscription.get("planType")
+        or workspace.get("plan_type")
+        or workspace.get("planType")
+        or current_account.get("plan_type")
+        or ""
+    ).strip().lower()
+
+    if not plan_type:
+        accounts_map = ensure_dict(payload.get("accounts"))
+        selected_account = ensure_dict(accounts_map.get(target_workspace_id))
+        selected_account_payload = ensure_dict(selected_account.get("account"))
+        if not selected_account_payload and fallback_workspace_id:
+            fallback_account = ensure_dict(accounts_map.get(fallback_workspace_id))
+            selected_account_payload = ensure_dict(fallback_account.get("account"))
+        plan_type = str(
+            selected_account_payload.get("plan_type")
+            or selected_account_payload.get("workspace_plan_type")
+            or ""
+        ).strip().lower()
+
+    if plan_type not in VALID_PARENT_PLAN_TYPES:
+        return False, "child_plan_not_business"
+
+    return True, ""
+
+
 def validate_recent_child_records(parent_record: JSONDict, *, expected_count: int) -> Tuple[bool, str]:
     workspace_id_value = str(parent_record.get("workspace_id") or "").strip()
     organization_id = str(parent_record.get("organization_id") or "").strip()
@@ -1451,20 +1719,49 @@ def validate_recent_child_records(parent_record: JSONDict, *, expected_count: in
     if not workspace_id_value or not organization_id or not plan_type:
         return False, "parent_metadata_incomplete"
 
+    append_log(
+        "info",
+        f"validate_recent_child_records_started:expected_count={expected_count}:workspace_id={workspace_id_value}:organization_id={organization_id}:plan_type={plan_type}",
+    )
+
     conn = create_db_connection()
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT COUNT(*) FROM codex_register_accounts "
+            "SELECT email, refresh_token, access_token, account_id "
+            "FROM codex_register_accounts "
             "WHERE source = 'codex-register' AND codex_register_role = 'child' "
             "AND workspace_id = %s AND organization_id = %s AND plan_type = %s "
-            "AND created_at >= NOW() - INTERVAL '30 minutes'",
-            (workspace_id_value, organization_id, plan_type),
+            "AND COALESCE(refresh_token, '') <> '' AND COALESCE(access_token, '') <> '' AND COALESCE(account_id, '') <> '' "
+            "AND created_at >= NOW() - INTERVAL '30 minutes' "
+            "ORDER BY created_at DESC LIMIT %s",
+            (workspace_id_value, organization_id, plan_type, max(1, int(expected_count or 1))),
         )
-        row = cur.fetchone()
-        count = int((row or [0])[0] or 0)
-        if count < max(1, int(expected_count or 1)):
-            return False, "child_workspace_not_confirmed"
+        rows = cur.fetchall() or []
+        append_log("info", f"validate_recent_child_records_candidates:{len(rows)}")
+        if len(rows) < max(1, int(expected_count or 1)):
+            return False, "child_invite_acceptance_incomplete"
+
+        for row in rows:
+            token_info: JSONDict = {
+                "email": str(row[0] or "").strip(),
+                "refresh_token": str(row[1] or "").strip(),
+                "access_token": str(row[2] or "").strip(),
+                "account_id": str(row[3] or "").strip(),
+            }
+            verified, verify_reason = verify_child_business_plan_via_session_exchange(
+                token_info,
+                workspace_id=workspace_id_value,
+                parent_account_id=str(parent_record.get("account_id") or "").strip(),
+            )
+            append_log(
+                "info",
+                f"validate_child_session_exchange_result:email={token_info.get('email')}:account_id={token_info.get('account_id')}:verified={verified}:reason={verify_reason}",
+            )
+            if not verified:
+                return False, verify_reason
+
+        append_log("info", "validate_recent_child_records_completed")
         return True, ""
     except Exception as exc:  # noqa: BLE001
         append_log("error", f"validate_recent_child_records_failed:{exc}")
@@ -1487,6 +1784,11 @@ def promote_recent_child_records_to_pool(parent_record: JSONDict, *, expected_co
     if not workspace_id_value or not organization_id or not plan_type:
         return False, "parent_metadata_incomplete"
 
+    append_log(
+        "info",
+        f"promote_recent_child_records_started:expected_count={expected_count}:workspace_id={workspace_id_value}:organization_id={organization_id}:plan_type={plan_type}",
+    )
+
     conn = create_db_connection()
     cur = conn.cursor()
     promoted = 0
@@ -1501,6 +1803,7 @@ def promote_recent_child_records_to_pool(parent_record: JSONDict, *, expected_co
             (workspace_id_value, organization_id, plan_type, max(1, int(expected_count or 1))),
         )
         rows = cur.fetchall() or []
+        append_log("info", f"promote_recent_child_records_candidates:{len(rows)}")
         if not rows:
             return False, "no_child_records_to_promote"
 
@@ -1516,9 +1819,14 @@ def promote_recent_child_records_to_pool(parent_record: JSONDict, *, expected_co
                 "codex_register_role": "child",
             }
             action = upsert_account(cur, token_info, account_role="child")
+            append_log(
+                "info",
+                f"promote_child_result:email={token_info.get('email')}:account_id={token_info.get('account_id')}:action={action}",
+            )
             if action in {"created", "updated"}:
                 promoted += 1
 
+        append_log("info", f"promote_recent_child_records_completed:promoted={promoted}:expected={max(1, int(expected_count or 1))}")
         if promoted < max(1, int(expected_count or 1)):
             return False, "child_promotion_incomplete"
         return True, ""
@@ -1537,15 +1845,18 @@ def promote_recent_child_records_to_pool(parent_record: JSONDict, *, expected_co
 
 
 def _run_workflow_once(workflow_token: str, mode: str) -> None:
+    append_log("info", f"workflow_run_started:workflow_id={workflow_token}:mode={mode}")
     with status_lock:
         tokens_dir = tokens_dir_global
 
     if tokens_dir is None:
+        append_log("error", f"workflow_run_failed:workflow_id={workflow_token}:reason=tokens_dir_unavailable")
         _finalize_workflow_once(workflow_token, success=False, reason="tokens_dir_unavailable")
         return
 
     if mode == "start":
         if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_CREATE_PARENT):
+            append_log("warn", f"workflow_run_stopped:workflow_id={workflow_token}:reason=transition_rejected:{PHASE_RUNNING_CREATE_PARENT}")
             return
         success, reason = run_one_cycle(
             tokens_dir,
@@ -1553,6 +1864,7 @@ def _run_workflow_once(workflow_token: str, mode: str) -> None:
             register_role="parent",
             preferred_workspace_id="",
         )
+        append_log("info", f"workflow_parent_cycle_result:workflow_id={workflow_token}:success={success}:reason={reason}")
         if success:
             _mark_parent_upgrade_waiting(workflow_token)
         else:
@@ -1560,10 +1872,13 @@ def _run_workflow_once(workflow_token: str, mode: str) -> None:
         return
 
     if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_PRE_RESUME_CHECK):
+        append_log("warn", f"workflow_run_stopped:workflow_id={workflow_token}:reason=transition_rejected:{PHASE_RUNNING_PRE_RESUME_CHECK}")
         return
 
     parent_record = get_latest_parent_record()
+    append_log("info", f"workflow_resume_parent_record:{json.dumps(_safe_parent_record_summary(parent_record), ensure_ascii=False)}")
     gate_reason = evaluate_resume_gate(parent_record)
+    _log_resume_gate_decision(gate_reason, parent_record)
     if gate_reason:
         _finalize_workflow_once(workflow_token, success=False, reason=gate_reason)
         return
@@ -1571,6 +1886,7 @@ def _run_workflow_once(workflow_token: str, mode: str) -> None:
     preferred_workspace_id = str(parent_record.get("workspace_id") or "").strip()
 
     if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_INVITE_CHILDREN):
+        append_log("warn", f"workflow_run_stopped:workflow_id={workflow_token}:reason=transition_rejected:{PHASE_RUNNING_INVITE_CHILDREN}")
         return
     success, reason = run_one_cycle(
         tokens_dir,
@@ -1578,25 +1894,37 @@ def _run_workflow_once(workflow_token: str, mode: str) -> None:
         register_role="child",
         preferred_workspace_id=preferred_workspace_id,
     )
+    append_log("info", f"workflow_child_cycle_result:workflow_id={workflow_token}:success={success}:reason={reason}")
     if not success:
         _finalize_workflow_once(workflow_token, success=False, reason=reason)
         return
 
     if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_ACCEPT_AND_SWITCH):
+        append_log("warn", f"workflow_run_stopped:workflow_id={workflow_token}:reason=transition_rejected:{PHASE_RUNNING_ACCEPT_AND_SWITCH}")
         return
     child_expected_count = max(1, int(last_processed_records or 1))
+    append_log("info", f"workflow_child_expected_count:workflow_id={workflow_token}:expected={child_expected_count}")
+    invited, invite_reason = invite_recent_children(parent_record, expected_count=child_expected_count)
+    append_log("info", f"workflow_invite_result:workflow_id={workflow_token}:invited={invited}:reason={invite_reason}")
+    if not invited:
+        _finalize_workflow_once(workflow_token, success=False, reason=invite_reason)
+        return
     accepted, accept_reason = validate_recent_child_records(parent_record, expected_count=child_expected_count)
+    append_log("info", f"workflow_acceptance_result:workflow_id={workflow_token}:accepted={accepted}:reason={accept_reason}")
     if not accepted:
         _finalize_workflow_once(workflow_token, success=False, reason=accept_reason)
         return
 
     if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_VERIFY_AND_BIND):
+        append_log("warn", f"workflow_run_stopped:workflow_id={workflow_token}:reason=transition_rejected:{PHASE_RUNNING_VERIFY_AND_BIND}")
         return
     promoted, promote_reason = promote_recent_child_records_to_pool(parent_record, expected_count=child_expected_count)
+    append_log("info", f"workflow_promote_result:workflow_id={workflow_token}:promoted={promoted}:reason={promote_reason}")
     if not promoted:
         _finalize_workflow_once(workflow_token, success=False, reason=promote_reason)
         return
 
+    append_log("info", f"workflow_run_completed:workflow_id={workflow_token}")
     _finalize_workflow_once(workflow_token, success=True, reason="")
 
 
@@ -1620,11 +1948,16 @@ def get_latest_parent_record() -> JSONDict:
         register_plan_type = str(row[4] or "").strip().lower() or None
         register_org_id = str(row[5] or "").strip() or None
         register_workspace_id = str(row[6] or "").strip() or None
+        register_refresh_token = str(row[2] or "").strip()
+        register_access_token = str(row[3] or "").strip()
         parent_record: JSONDict = {
             "email": email,
             "account_id": account_id,
-            "has_refresh_token": bool(str(row[2] or "").strip()),
-            "has_access_token": bool(str(row[3] or "").strip()),
+            "refresh_token": register_refresh_token,
+            "access_token": register_access_token,
+            "session_access_token": register_access_token,
+            "has_refresh_token": bool(register_refresh_token),
+            "has_access_token": bool(register_access_token),
             "plan_type": register_plan_type,
             "organization_id": register_org_id,
             "workspace_id": register_workspace_id,
@@ -1679,6 +2012,7 @@ def get_latest_parent_record() -> JSONDict:
         if "members_page_accessible" in extra:
             parent_record["members_page_accessible"] = bool(extra.get("members_page_accessible"))
 
+        append_log("info", f"latest_parent_record_loaded:{json.dumps(_safe_parent_record_summary(parent_record), ensure_ascii=False)}")
         return parent_record
     except Exception as exc:  # noqa: BLE001
         append_log("error", f"parent_record_read_failed:{exc}")
@@ -1724,6 +2058,14 @@ def evaluate_resume_gate(parent_record: JSONDict) -> str:
     if parent_record.get("members_page_accessible") is False:
         return "members_page_inaccessible"
 
+    parent_account_id = str(parent_record.get("account_id") or "").strip()
+    if not parent_account_id:
+        return "parent_account_id_missing"
+
+    parent_access_token = str(parent_record.get("session_access_token") or parent_record.get("access_token") or "").strip()
+    if not parent_access_token:
+        return "parent_access_token_missing"
+
     return ""
 
 
@@ -1757,7 +2099,28 @@ def get_status_payload() -> JSONDict:
             "can_start": can_start,
             "can_resume": can_resume,
             "can_abandon": can_abandon,
+            "last_transition": dict(last_transition) if isinstance(last_transition, dict) else None,
+            "last_resume_gate_reason": last_resume_gate_reason or None,
+            "recent_logs_tail": list(recent_logs[-STATUS_LOG_TAIL_LIMIT:]),
         }
+
+
+def _parse_logs_query(path: str) -> Tuple[str, int]:
+    parsed = urllib.parse.urlparse(path)
+    query = urllib.parse.parse_qs(parsed.query or "")
+    level = str((query.get("level") or [""])[0] or "").strip().lower()
+    if level and level not in VALID_LOG_LEVELS:
+        level = ""
+
+    default_limit = max(1, int(LOGS_ENDPOINT_DEFAULT_LIMIT))
+    max_limit = max(default_limit, int(LOGS_ENDPOINT_MAX_LIMIT))
+    limit_raw = str((query.get("limit") or [default_limit])[0] or default_limit).strip()
+    try:
+        limit = int(limit_raw)
+    except Exception:  # noqa: BLE001
+        limit = default_limit
+    limit = max(1, min(max_limit, limit))
+    return level, limit
 
 
 class CodexRequestHandler(BaseHTTPRequestHandler):
@@ -1772,7 +2135,9 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/status":
+        parsed_path = urllib.parse.urlparse(self.path).path
+
+        if parsed_path == "/status":
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -1780,17 +2145,21 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/logs":
+        if parsed_path == "/logs":
+            level, limit = _parse_logs_query(self.path)
             with status_lock:
                 logs = list(recent_logs)
-            body = json.dumps({"logs": logs}).encode("utf-8")
+            if level:
+                logs = [item for item in logs if str(item.get("level") or "").strip().lower() == level]
+            logs = logs[-limit:]
+            body = json.dumps({"logs": logs, "level": level or None, "limit": limit}).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/accounts":
+        if parsed_path == "/accounts":
             try:
                 accounts = list_codex_register_accounts()
             except Exception as exc:  # noqa: BLE001
@@ -1809,7 +2178,7 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/health":
+        if parsed_path == "/health":
             body = json.dumps({"ok": True}).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -1827,8 +2196,11 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         global enabled, waiting_reason
 
+        append_log("info", f"http_post_received:path={self.path}")
+
         if self.path == "/enable":
-            start_workflow_once(allow_resume=False)
+            started = start_workflow_once(allow_resume=False)
+            append_log("info", f"http_post_enable_result:started={started}")
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -1842,6 +2214,7 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
                 enabled = False
                 _set_phase_locked(PHASE_IDLE)
                 waiting_reason = ""
+            append_log("info", "http_post_disable_result:stopped")
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -1851,7 +2224,8 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/run-once":
-            start_workflow_once(allow_resume=False)
+            started = start_workflow_once(allow_resume=False)
+            append_log("info", f"http_post_run_once_result:started={started}")
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
@@ -1862,25 +2236,40 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
 
         if self.path == "/resume":
             current_status = get_status_payload()
-            if not is_waiting_phase(current_status.get("job_phase")):
+            resume_phase = str(current_status.get("job_phase") or "")
+            resume_reason = str(current_status.get("waiting_reason") or "")
+            append_log("info", f"resume_request_received:phase={resume_phase}:waiting_reason={resume_reason}")
+
+            if not is_waiting_phase(resume_phase):
+                append_log("warn", f"resume_request_ignored:not_waiting:phase={resume_phase}:waiting_reason={resume_reason}")
                 body = json.dumps(current_status).encode("utf-8")
             else:
-                resume_phase = str(current_status.get("job_phase") or "")
-                resume_reason = str(current_status.get("waiting_reason") or "")
                 needs_parent_gate = resume_phase == PHASE_WAITING_PARENT_UPGRADE or resume_reason in PARENT_RESUME_GATE_REASONS
+                append_log(
+                    "info",
+                    f"resume_request_gate_check:needs_parent_gate={needs_parent_gate}:phase={resume_phase}:waiting_reason={resume_reason}",
+                )
 
                 if needs_parent_gate:
                     latest_parent = get_latest_parent_record()
+                    append_log(
+                        "info",
+                        f"resume_parent_record:{json.dumps(_safe_parent_record_summary(latest_parent), ensure_ascii=False)}",
+                    )
                     gate_reason = evaluate_resume_gate(latest_parent)
+                    _log_resume_gate_decision(gate_reason, latest_parent)
                     if gate_reason:
                         with status_lock:
                             if job_phase != PHASE_ABANDONED:
                                 enabled = False
                                 set_waiting_manual_locked(gate_reason)
+                        append_log("warn", f"resume_gate_blocked:{gate_reason}")
                     else:
-                        start_workflow_once(allow_resume=True)
+                        started = start_workflow_once(allow_resume=True)
+                        append_log("info", f"resume_started_after_gate:started={started}")
                 else:
-                    start_workflow_once(allow_resume=True)
+                    started = start_workflow_once(allow_resume=True)
+                    append_log("info", f"resume_started_without_gate:started={started}")
                 body = json.dumps(get_status_payload()).encode("utf-8")
 
             self.send_response(200)
