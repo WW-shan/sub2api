@@ -715,6 +715,92 @@ class CodexRegisterServiceTests(unittest.TestCase):
             "members_page_inaccessible",
         )
 
+    def test_get_email_and_token_uses_custom_domain(self):
+        with mock.patch.dict("os.environ", {"CODEX_MAIL_DOMAIN": "mail.example.com"}, clear=False):
+            email, worker_token, password = service.get_email_and_token()
+
+        self.assertTrue(email.endswith("@mail.example.com"))
+        self.assertEqual(worker_token, "worker")
+        self.assertTrue(password)
+
+    def test_get_oai_code_returns_code_when_worker_returns_200(self):
+        requests = mock.Mock()
+        requests.get.return_value = mock.Mock(status_code=200, json=mock.Mock(return_value={"ok": True, "code": "123456"}))
+
+        def fake_get_env(name, default=None, required=False):
+            mapping = {
+                "CODEX_MAIL_WORKER_BASE_URL": "https://worker.example.com",
+                "CODEX_MAIL_WORKER_TOKEN": "secret-token",
+                "CODEX_MAIL_POLL_SECONDS": "1",
+                "CODEX_MAIL_POLL_MAX_ATTEMPTS": "3",
+            }
+            value = mapping.get(name, default or "")
+            if required and not value:
+                raise RuntimeError(f"missing env:{name}")
+            return value
+
+        with mock.patch.object(service, "get_requests_module", return_value=requests), mock.patch.object(
+            service, "get_env", side_effect=fake_get_env
+        ), mock.patch.object(service.time, "sleep") as sleep_mock:
+            code = service.get_oai_code("unused", "oc123@mail.example.com")
+
+        self.assertEqual(code, "123456")
+        self.assertIn("/v1/code?email=oc123%40mail.example.com", requests.get.call_args.kwargs["url"])
+        self.assertEqual(requests.get.call_args.kwargs["headers"]["Authorization"], "Bearer secret-token")
+        sleep_mock.assert_not_called()
+
+    def test_get_oai_code_retries_on_404_then_succeeds(self):
+        requests = mock.Mock()
+        requests.get.side_effect = [
+            mock.Mock(status_code=404, json=mock.Mock(return_value={"ok": False, "error": "code_not_ready"})),
+            mock.Mock(status_code=200, json=mock.Mock(return_value={"ok": True, "code": "654321"})),
+        ]
+
+        def fake_get_env(name, default=None, required=False):
+            mapping = {
+                "CODEX_MAIL_WORKER_BASE_URL": "https://worker.example.com",
+                "CODEX_MAIL_WORKER_TOKEN": "secret-token",
+                "CODEX_MAIL_POLL_SECONDS": "1",
+                "CODEX_MAIL_POLL_MAX_ATTEMPTS": "4",
+            }
+            value = mapping.get(name, default or "")
+            if required and not value:
+                raise RuntimeError(f"missing env:{name}")
+            return value
+
+        with mock.patch.object(service, "get_requests_module", return_value=requests), mock.patch.object(
+            service, "get_env", side_effect=fake_get_env
+        ), mock.patch.object(service.time, "sleep") as sleep_mock:
+            code = service.get_oai_code("unused", "oc123@mail.example.com")
+
+        self.assertEqual(code, "654321")
+        self.assertEqual(requests.get.call_count, 2)
+        sleep_mock.assert_called_once_with(1)
+
+    def test_get_oai_code_returns_empty_on_401(self):
+        requests = mock.Mock()
+        requests.get.return_value = mock.Mock(status_code=401, json=mock.Mock(return_value={"ok": False, "error": "unauthorized"}))
+
+        def fake_get_env(name, default=None, required=False):
+            mapping = {
+                "CODEX_MAIL_WORKER_BASE_URL": "https://worker.example.com",
+                "CODEX_MAIL_WORKER_TOKEN": "secret-token",
+                "CODEX_MAIL_POLL_SECONDS": "1",
+                "CODEX_MAIL_POLL_MAX_ATTEMPTS": "2",
+            }
+            value = mapping.get(name, default or "")
+            if required and not value:
+                raise RuntimeError(f"missing env:{name}")
+            return value
+
+        with mock.patch.object(service, "get_requests_module", return_value=requests), mock.patch.object(
+            service, "get_env", side_effect=fake_get_env
+        ), mock.patch.object(service.time, "sleep") as sleep_mock:
+            code = service.get_oai_code("unused", "oc123@mail.example.com")
+
+        self.assertEqual(code, "")
+        sleep_mock.assert_not_called()
+
     def test_main_removes_infinite_worker_loop(self):
         args = SimpleNamespace(
             register_only=False,

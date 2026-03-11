@@ -223,7 +223,6 @@ def get_env(name: str, default=None, required: bool = False) -> str:
     return value or ""
 
 
-MAILTM_BASE = "https://api.mail.tm"
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -231,161 +230,69 @@ DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
 DEFAULT_SCOPE = "openid email profile offline_access"
 
 
-def _mailtm_headers(*, token: str = "", use_json: bool = False) -> Dict[str, Any]:
-    headers = {"Accept": "application/json"}
-    if use_json:
-        headers["Content-Type"] = "application/json"
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
-def _mailtm_domains(proxies: Any = None) -> List[str]:
-    requests = get_requests_module()
-    resp = requests.get(
-        f"{MAILTM_BASE}/domains",
-        headers=_mailtm_headers(),
-        proxies=proxies,
-        impersonate="chrome",
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"获取 Mail.tm 域名失败，状态码: {resp.status_code}")
-
-    data = resp.json()
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        items = data.get("hydra:member") or data.get("items") or []
-    else:
-        items = []
-
-    domains: List[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        domain = str(item.get("domain") or "").strip()
-        is_active = item.get("isActive", True)
-        is_private = item.get("isPrivate", False)
-        if domain and is_active and not is_private:
-            domains.append(domain)
-
-    return domains
+def _worker_headers(worker_token: str) -> Dict[str, Any]:
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {worker_token}",
+    }
 
 
 def get_email_and_token(proxies: Any = None) -> tuple[str, str, str]:
-    requests = get_requests_module()
+    del proxies
     try:
-        domains = _mailtm_domains(proxies)
-        if not domains:
-            print("[Error] Mail.tm 没有可用域名")
-            return "", "", ""
-        domain = random.choice(domains)
-
-        for _ in range(5):
-            local = f"oc{secrets.token_hex(5)}"
-            email = f"{local}@{domain}"
-            password = secrets.token_urlsafe(18)
-
-            create_resp = requests.post(
-                f"{MAILTM_BASE}/accounts",
-                headers=_mailtm_headers(use_json=True),
-                json={"address": email, "password": password},
-                proxies=proxies,
-                impersonate="chrome",
-                timeout=15,
-            )
-            if create_resp.status_code not in (200, 201):
-                continue
-
-            token_resp = requests.post(
-                f"{MAILTM_BASE}/token",
-                headers=_mailtm_headers(use_json=True),
-                json={"address": email, "password": password},
-                proxies=proxies,
-                impersonate="chrome",
-                timeout=15,
-            )
-            if token_resp.status_code == 200:
-                token = str(token_resp.json().get("token") or "").strip()
-                if token:
-                    return email, token, password
-
-        print("[Error] Mail.tm 邮箱创建成功但获取 Token 失败")
-        return "", "", ""
+        domain = get_env("CODEX_MAIL_DOMAIN", required=True).strip().lower()
+        local = f"oc{secrets.token_hex(5)}"
+        email = f"{local}@{domain}"
+        password = secrets.token_urlsafe(18)
+        return email, "worker", password
     except Exception as exc:
-        print(f"[Error] 请求 Mail.tm API 出错: {exc}")
+        print(f"[Error] 生成自定义域名邮箱失败: {exc}")
         return "", "", ""
 
 
 def get_oai_code(token: str, email: str, proxies: Any = None) -> str:
+    del token
     requests = get_requests_module()
-    url_list = f"{MAILTM_BASE}/messages"
-    regex = r"(?<!\d)(\d{6})(?!\d)"
-    seen_ids: set[str] = set()
+
+    worker_base = get_env("CODEX_MAIL_WORKER_BASE_URL", required=True).rstrip("/")
+    worker_token = get_env("CODEX_MAIL_WORKER_TOKEN", required=True).strip()
+    poll_seconds = max(1, int(get_env("CODEX_MAIL_POLL_SECONDS", "3")))
+    max_attempts = max(1, int(get_env("CODEX_MAIL_POLL_MAX_ATTEMPTS", "40")))
+
+    query_url = f"{worker_base}/v1/code?email={urllib.parse.quote(email)}"
 
     print(f"[*] 正在等待邮箱 {email} 的验证码...", end="", flush=True)
-    for _ in range(40):
+    for _ in range(max_attempts):
         print(".", end="", flush=True)
         try:
             resp = requests.get(
-                url_list,
-                headers=_mailtm_headers(token=token),
+                url=query_url,
+                headers=_worker_headers(worker_token),
                 proxies=proxies,
                 impersonate="chrome",
                 timeout=15,
             )
-            if resp.status_code != 200:
-                time.sleep(3)
+
+            if resp.status_code == 200:
+                data = ensure_dict(resp.json())
+                code = str(data.get("code") or "").strip()
+                if code:
+                    print(" 抓到啦! 验证码:", code)
+                    return code
+                time.sleep(poll_seconds)
                 continue
 
-            data = resp.json()
-            if isinstance(data, list):
-                messages = data
-            elif isinstance(data, dict):
-                messages = data.get("hydra:member") or data.get("messages") or []
-            else:
-                messages = []
+            if resp.status_code == 404:
+                time.sleep(poll_seconds)
+                continue
 
-            for msg in messages:
-                if not isinstance(msg, dict):
-                    continue
-                msg_id = str(msg.get("id") or "").strip()
-                if not msg_id or msg_id in seen_ids:
-                    continue
-                seen_ids.add(msg_id)
-
-                read_resp = requests.get(
-                    f"{MAILTM_BASE}/messages/{msg_id}",
-                    headers=_mailtm_headers(token=token),
-                    proxies=proxies,
-                    impersonate="chrome",
-                    timeout=15,
-                )
-                if read_resp.status_code != 200:
-                    continue
-
-                mail_data = read_resp.json()
-                sender = str(((mail_data.get("from") or {}).get("address") or "")).lower()
-                subject = str(mail_data.get("subject") or "")
-                intro = str(mail_data.get("intro") or "")
-                text = str(mail_data.get("text") or "")
-                html = mail_data.get("html") or ""
-                if isinstance(html, list):
-                    html = "\n".join(str(x) for x in html)
-                content = "\n".join([subject, intro, text, str(html)])
-
-                if "openai" not in sender and "openai" not in content.lower():
-                    continue
-
-                match = re.search(regex, content)
-                if match:
-                    print(" 抓到啦! 验证码:", match.group(1))
-                    return match.group(1)
+            if resp.status_code == 401:
+                print(" [Error] Worker 鉴权失败，请检查 CODEX_MAIL_WORKER_TOKEN")
+                return ""
         except Exception:
             pass
 
-        time.sleep(3)
+        time.sleep(poll_seconds)
 
     print(" 超时，未收到验证码")
     return ""
