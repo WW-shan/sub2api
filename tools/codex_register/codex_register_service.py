@@ -1617,10 +1617,7 @@ def invite_recent_children(
         base_url = str(get_env("CODEX_CHATGPT_BASE_URL", "https://chatgpt.com") or "https://chatgpt.com").rstrip("/")
         invite_url = f"{base_url}/backend-api/accounts/{parent_account_id}/invites"
 
-        for row in rows:
-            child_email = str((row or [""])[0] or "").strip()
-            if not child_email:
-                continue
+        def _invite_once(child_email: str) -> bool:
             payload = json.dumps({"email": child_email}).encode("utf-8")
             req = urllib.request.Request(
                 invite_url,
@@ -1637,14 +1634,30 @@ def invite_recent_children(
                 with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
                     status = int(getattr(resp, "status", 0) or 0)
                 append_log("info", f"invite_child:{child_email}:{status}")
-                if status in {200, 201, 202, 204, 409}:
-                    invited += 1
+                return status in {200, 201, 202, 204, 409}
             except urllib.error.HTTPError as exc:
                 append_log("warn", f"invite_child_http_error:{child_email}:{exc.code}")
                 if int(getattr(exc, "code", 0) or 0) == 409:
-                    invited += 1
+                    try:
+                        body = exc.read().decode("utf-8", "replace")
+                    except Exception:  # noqa: BLE001
+                        body = ""
+                    if "already" in body.lower():
+                        return True
+                return False
             except Exception as exc:  # noqa: BLE001
                 append_log("warn", f"invite_child_request_failed:{child_email}:{exc}")
+                return False
+
+        for row in rows:
+            child_email = str((row or [""])[0] or "").strip()
+            if not child_email:
+                continue
+            ok = _invite_once(child_email)
+            if not ok:
+                ok = _invite_once(child_email)
+            if ok:
+                invited += 1
 
         append_log("info", f"invite_recent_children_completed:invited={invited}:expected={max(1, int(expected_count or 1))}")
         if invited < max(1, int(expected_count or 1)):

@@ -179,7 +179,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             code=409,
             msg='Conflict',
             hdrs=None,
-            fp=io.BytesIO(b'{}'),
+            fp=io.BytesIO(b'{"error":"already invited"}'),
         )
 
         with mock.patch.object(service, 'create_db_connection', return_value=conn), mock.patch.object(
@@ -198,6 +198,39 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(reason, '')
+
+    def test_invite_recent_children_retries_once_on_409_without_marker(self):
+        parent = {
+            "account_id": "parent-1",
+            "access_token": "bearer-parent-token",
+            "workspace_id": "ws-1",
+            "organization_id": "org-1",
+            "plan_type": "business",
+        }
+        http_409 = urllib.error.HTTPError(
+            url="https://chatgpt.com/backend-api/accounts/parent-1/invites",
+            code=409,
+            msg="Conflict",
+            hdrs=None,
+            fp=io.BytesIO(b"{\"error\":\"conflict\"}"),
+        )
+        calls = []
+
+        def _urlopen(req, timeout=0):
+            calls.append(req)
+            if len(calls) == 1:
+                raise http_409
+            return _FakeHTTPResponse(200)
+
+        with mock.patch.object(service, "create_db_connection") as create_db, mock.patch.object(
+            service.urllib.request, "urlopen", side_effect=_urlopen
+        ):
+            ok, reason = service.invite_recent_children(parent, expected_count=1, target_email="child@example.com")
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        self.assertEqual(len(calls), 2)
+        create_db.assert_not_called()
 
     def test_verify_child_business_plan_via_session_exchange_returns_true_for_matching_workspace_plan(self):
         status_json = b'{"user":{"account":{"current_account":{"id":"parent-1","workspace":{"id":"ws-1","subscription":{"plan_type":"business"}}}}}}'
