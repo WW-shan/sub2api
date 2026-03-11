@@ -234,6 +234,21 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, '')
 
+    def test_verify_child_business_plan_via_session_exchange_reads_root_account_plan_type(self):
+        status_json = b'{"account":{"id":"ws-1","planType":"team","organizationId":"org-1","structure":"workspace"}}'
+
+        with mock.patch.object(service.urllib.request, 'urlopen', return_value=_FakeHTTPResponse(200, body=status_json)):
+            ok, reason = service.verify_child_business_plan_via_session_exchange(
+                {
+                    'account_id': 'child-1',
+                    'access_token': 'child-access-token',
+                },
+                workspace_id='ws-1',
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, '')
+
     def test_verify_child_business_plan_via_session_exchange_falls_back_to_parent_account_id_workspace(self):
         first_error = urllib.error.HTTPError(
             url='https://chatgpt.com/api/auth/session',

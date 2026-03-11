@@ -1755,6 +1755,15 @@ def verify_child_business_plan_via_session_exchange(
     ).strip().lower()
 
     if not plan_type:
+        account_root = ensure_dict(payload.get("account"))
+        plan_type = str(
+            account_root.get("plan_type")
+            or account_root.get("planType")
+            or account_root.get("workspace_plan_type")
+            or ""
+        ).strip().lower()
+
+    if not plan_type:
         accounts_map = ensure_dict(payload.get("accounts"))
         selected_account = ensure_dict(accounts_map.get(target_workspace_id))
         selected_account_payload = ensure_dict(selected_account.get("account"))
