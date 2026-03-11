@@ -159,6 +159,11 @@ class CodexRegisterServiceTests(unittest.TestCase):
                 "refresh_token": "rt",
                 "session_access_token": "at",
                 "account_id": "acct-1",
+                "plan_type": "business",
+                "organization_id": "org-1",
+                "workspace_reachable": True,
+                "members_page_accessible": True,
+                "codex_register_role": "parent",
             },
         )
 
@@ -171,6 +176,41 @@ class CodexRegisterServiceTests(unittest.TestCase):
         self.assertEqual(params[1], "rt")
         self.assertEqual(params[2], "at")
         self.assertEqual(params[3], "acct-1")
+        self.assertEqual(params[4], "business")
+        self.assertEqual(params[5], "org-1")
+        self.assertEqual(params[6], True)
+        self.assertEqual(params[7], True)
+        self.assertEqual(params[8], "parent")
+
+    def test_get_latest_parent_record_prefers_register_parent_metadata(self):
+        cur = mock.Mock()
+        cur.fetchone.side_effect = [
+            (
+                "parent@example.com",
+                "acct-parent",
+                "rt",
+                "at",
+                "business",
+                "org-1",
+                True,
+                True,
+                "parent",
+            ),
+            None,
+        ]
+        conn = _FakeConn(cur)
+
+        with mock.patch.object(service, "create_db_connection", return_value=conn):
+            parent = service.get_latest_parent_record()
+
+        self.assertEqual(parent.get("email"), "parent@example.com")
+        self.assertEqual(parent.get("account_id"), "acct-parent")
+        self.assertEqual(parent.get("plan_type"), "business")
+        self.assertEqual(parent.get("organization_id"), "org-1")
+        self.assertEqual(parent.get("workspace_reachable"), True)
+        self.assertEqual(parent.get("members_page_accessible"), True)
+        self.assertEqual(parent.get("codex_register_role"), "parent")
+        self.assertEqual(cur.execute.call_count, 2)
 
     def test_service_default_disabled_until_enable(self):
         self.assertFalse(service.enabled)

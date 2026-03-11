@@ -1062,14 +1062,37 @@ def upsert_codex_register_account(cur, token_info: JSONDict) -> None:
     refresh_token = str(token_info.get("refresh_token") or "").strip()
     access_token = str(token_info.get("session_access_token") or token_info.get("access_token") or "").strip()
     account_id = str(token_info.get("account_id") or "").strip() or None
+    plan_type = str(token_info.get("plan_type") or token_info.get("codex_parent_plan_type") or "").strip().lower() or None
+    organization_id = (
+        str(token_info.get("organization_id") or token_info.get("codex_parent_organization_id") or "").strip() or None
+    )
+    workspace_reachable = token_info.get("workspace_reachable")
+    members_page_accessible = token_info.get("members_page_accessible")
+    codex_register_role = str(token_info.get("codex_register_role") or "").strip().lower() or None
 
     cur.execute(
-        "INSERT INTO codex_register_accounts (email, refresh_token, access_token, account_id, source, created_at, updated_at) "
-        "VALUES (%s, %s, %s, %s, 'codex-register', NOW(), NOW()) "
+        "INSERT INTO codex_register_accounts "
+        "(email, refresh_token, access_token, account_id, plan_type, organization_id, workspace_reachable, members_page_accessible, codex_register_role, source, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'codex-register', NOW(), NOW()) "
         "ON CONFLICT (email, source) DO UPDATE "
         "SET refresh_token = EXCLUDED.refresh_token, access_token = EXCLUDED.access_token, "
-        "account_id = EXCLUDED.account_id, updated_at = NOW()",
-        (email, refresh_token, access_token, account_id),
+        "account_id = EXCLUDED.account_id, plan_type = COALESCE(EXCLUDED.plan_type, codex_register_accounts.plan_type), "
+        "organization_id = COALESCE(EXCLUDED.organization_id, codex_register_accounts.organization_id), "
+        "workspace_reachable = COALESCE(EXCLUDED.workspace_reachable, codex_register_accounts.workspace_reachable), "
+        "members_page_accessible = COALESCE(EXCLUDED.members_page_accessible, codex_register_accounts.members_page_accessible), "
+        "codex_register_role = COALESCE(EXCLUDED.codex_register_role, codex_register_accounts.codex_register_role), "
+        "updated_at = NOW()",
+        (
+            email,
+            refresh_token,
+            access_token,
+            account_id,
+            plan_type,
+            organization_id,
+            workspace_reachable,
+            members_page_accessible,
+            codex_register_role,
+        ),
     )
 
 
@@ -1421,7 +1444,8 @@ def get_latest_parent_record() -> JSONDict:
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT email, account_id, refresh_token, access_token "
+            "SELECT email, account_id, refresh_token, access_token, plan_type, organization_id, "
+            "workspace_reachable, members_page_accessible, codex_register_role "
             "FROM codex_register_accounts WHERE source = 'codex-register' "
             "ORDER BY created_at DESC LIMIT 1"
         )
@@ -1431,12 +1455,24 @@ def get_latest_parent_record() -> JSONDict:
 
         email = str(row[0] or "").strip()
         account_id = str(row[1] or "").strip()
+        register_plan_type = str(row[4] or "").strip().lower() or None
+        register_org_id = str(row[5] or "").strip() or None
         parent_record: JSONDict = {
             "email": email,
             "account_id": account_id,
             "has_refresh_token": bool(str(row[2] or "").strip()),
             "has_access_token": bool(str(row[3] or "").strip()),
+            "plan_type": register_plan_type,
+            "organization_id": register_org_id,
+            "codex_register_role": str(row[8] or "").strip().lower() or None,
         }
+        if row[6] is not None:
+            parent_record["workspace_reachable"] = bool(row[6])
+        if row[7] is not None:
+            parent_record["members_page_accessible"] = bool(row[7])
+
+        if not email and not account_id:
+            return parent_record
 
         cur.execute(
             "SELECT credentials, extra FROM accounts WHERE platform = 'openai' AND type = 'oauth' "
@@ -1457,6 +1493,7 @@ def get_latest_parent_record() -> JSONDict:
             or extra.get("codex_parent_plan_type")
             or credentials.get("plan_type")
             or credentials.get("codex_parent_plan_type")
+            or parent_record.get("plan_type")
             or ""
         )
         organization_id = (
@@ -1466,6 +1503,7 @@ def get_latest_parent_record() -> JSONDict:
             or credentials.get("organization_id")
             or credentials.get("org_id")
             or credentials.get("codex_parent_organization_id")
+            or parent_record.get("organization_id")
             or ""
         )
 
