@@ -328,16 +328,33 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             'workspace_reachable': True,
             'members_page_accessible': True,
         }
+        reauthed_parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token-reauth',
+            'session_access_token': 'bearer-parent-token-reauth',
+            'workspace_id': 'ws-2',
+            'organization_id': 'org-2',
+            'plan_type': 'team',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+            'codex_register_role': 'parent',
+        }
 
         round_counter = {'value': 0}
 
         def _run_one_cycle(*args, **kwargs):
+            if kwargs.get('register_role') == 'parent':
+                return True, ''
             round_counter['value'] += 1
             service.last_processed_records = 1
             service.last_token_email = f"child{round_counter['value']}@example.com"
             return True, ''
 
-        with mock.patch.object(service, 'get_latest_parent_record', return_value=parent_record), mock.patch.object(
+        with mock.patch.object(
+            service,
+            'get_latest_parent_record',
+            side_effect=[parent_record, reauthed_parent_record],
+        ), mock.patch.object(
             service, 'evaluate_resume_gate', return_value=''
         ), mock.patch.object(
             service, 'verify_parent_business_context_after_resume', return_value=(True, '')
@@ -357,12 +374,22 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             service.last_processed_records = 1
             service._run_workflow_once('wf-resume', 'resume')
 
-        verify_parent_switch.assert_called_once_with(parent_record)
-        promote_parent.assert_called_once_with(parent_record)
-        self.assertEqual(run_one_cycle.call_count, 5)
+        first_cycle_kwargs = run_one_cycle.call_args_list[0].kwargs
+        self.assertEqual(first_cycle_kwargs.get('register_role'), 'parent')
+        self.assertEqual(first_cycle_kwargs.get('preferred_workspace_id'), '')
+
+        verify_parent_switch.assert_called_once_with(reauthed_parent_record)
+        promote_parent.assert_called_once_with(reauthed_parent_record)
+        self.assertEqual(run_one_cycle.call_count, 6)
         self.assertEqual(invite_recent_children.call_count, 5)
         self.assertEqual(validate_recent_child_records.call_count, 5)
         self.assertEqual(promote_recent_child_records_to_pool.call_count, 5)
+
+        child_cycle_workspace_ids = [
+            call.kwargs.get('preferred_workspace_id')
+            for call in run_one_cycle.call_args_list[1:]
+        ]
+        self.assertEqual(child_cycle_workspace_ids, ['ws-2'] * 5)
 
         invite_targets = [call.kwargs.get('target_email') for call in invite_recent_children.call_args_list]
         validate_targets = [call.kwargs.get('target_email') for call in validate_recent_child_records.call_args_list]
@@ -379,6 +406,172 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(promote_targets, expected_targets)
 
         finalize.assert_called_once_with('wf-resume', success=True, reason='')
+
+    def test_run_workflow_once_resume_short_circuits_when_parent_reauth_fails(self):
+        service.workflow_id = 'wf-resume'
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+
+        parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token',
+            'workspace_id': 'ws-1',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+        }
+
+        with mock.patch.object(service, 'get_latest_parent_record', return_value=parent_record), mock.patch.object(
+            service, 'evaluate_resume_gate', return_value=''
+        ), mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(True, '')
+        ) as verify_parent_switch, mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(True, '')
+        ) as promote_parent, mock.patch.object(
+            service, 'run_one_cycle', return_value=(False, 'db_connect_failed')
+        ) as run_one_cycle, mock.patch.object(
+            service, 'invite_recent_children', return_value=(True, '')
+        ) as invite_recent_children, mock.patch.object(
+            service, '_finalize_workflow_once'
+        ) as finalize:
+            service._run_workflow_once('wf-resume', 'resume')
+
+        run_one_cycle.assert_called_once()
+        verify_parent_switch.assert_not_called()
+        promote_parent.assert_not_called()
+        invite_recent_children.assert_not_called()
+        finalize.assert_called_once_with('wf-resume', success=False, reason='parent_reauth_failed')
+
+    def test_run_workflow_once_resume_stops_when_parent_reauth_account_mismatch(self):
+        service.workflow_id = 'wf-resume'
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+
+        parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token',
+            'workspace_id': 'ws-1',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+        }
+        reauthed_parent_record = {
+            'account_id': 'parent-2',
+            'access_token': 'bearer-parent-token-reauth',
+            'workspace_id': 'ws-2',
+            'organization_id': 'org-2',
+            'plan_type': 'business',
+            'codex_register_role': 'parent',
+        }
+
+        with mock.patch.object(
+            service,
+            'get_latest_parent_record',
+            side_effect=[parent_record, reauthed_parent_record],
+        ), mock.patch.object(
+            service, 'evaluate_resume_gate', return_value=''
+        ), mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(True, '')
+        ) as verify_parent_switch, mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(True, '')
+        ) as promote_parent, mock.patch.object(
+            service, 'run_one_cycle', return_value=(True, '')
+        ) as run_one_cycle, mock.patch.object(
+            service, '_finalize_workflow_once'
+        ) as finalize:
+            service._run_workflow_once('wf-resume', 'resume')
+
+        run_one_cycle.assert_called_once()
+        verify_parent_switch.assert_not_called()
+        promote_parent.assert_not_called()
+        finalize.assert_called_once_with('wf-resume', success=False, reason='parent_reauth_account_mismatch')
+
+    def test_run_workflow_once_resume_stops_when_parent_reauth_workspace_missing(self):
+        service.workflow_id = 'wf-resume'
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+
+        parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token',
+            'workspace_id': 'ws-1',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+        }
+        reauthed_parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token-reauth',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'codex_register_role': 'parent',
+        }
+
+        with mock.patch.object(
+            service,
+            'get_latest_parent_record',
+            side_effect=[parent_record, reauthed_parent_record],
+        ), mock.patch.object(
+            service, 'evaluate_resume_gate', return_value=''
+        ), mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(True, '')
+        ) as verify_parent_switch, mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(True, '')
+        ) as promote_parent, mock.patch.object(
+            service, 'run_one_cycle', return_value=(True, '')
+        ) as run_one_cycle, mock.patch.object(
+            service, '_finalize_workflow_once'
+        ) as finalize:
+            service._run_workflow_once('wf-resume', 'resume')
+
+        run_one_cycle.assert_called_once()
+        verify_parent_switch.assert_not_called()
+        promote_parent.assert_not_called()
+        finalize.assert_called_once_with('wf-resume', success=False, reason='parent_reauth_workspace_missing')
+
+    def test_run_workflow_once_resume_stops_when_parent_reauth_not_team(self):
+        service.workflow_id = 'wf-resume'
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+
+        parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token',
+            'workspace_id': 'ws-1',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+        }
+        reauthed_parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token-reauth',
+            'workspace_id': 'ws-1',
+            'organization_id': 'org-1',
+            'plan_type': 'free',
+            'codex_register_role': 'parent',
+        }
+
+        with mock.patch.object(
+            service,
+            'get_latest_parent_record',
+            side_effect=[parent_record, reauthed_parent_record],
+        ), mock.patch.object(
+            service, 'evaluate_resume_gate', return_value=''
+        ), mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(True, '')
+        ) as verify_parent_switch, mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(True, '')
+        ) as promote_parent, mock.patch.object(
+            service, 'run_one_cycle', return_value=(True, '')
+        ) as run_one_cycle, mock.patch.object(
+            service, '_finalize_workflow_once'
+        ) as finalize:
+            service._run_workflow_once('wf-resume', 'resume')
+
+        run_one_cycle.assert_called_once()
+        verify_parent_switch.assert_not_called()
+        promote_parent.assert_not_called()
+        finalize.assert_called_once_with('wf-resume', success=False, reason='parent_reauth_not_team')
 
     def test_run_workflow_once_resume_blocks_when_parent_switch_verification_fails(self):
         service.workflow_id = 'wf-resume'
@@ -410,9 +603,14 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             service.last_processed_records = 2
             service._run_workflow_once('wf-resume', 'resume')
 
-        verify_parent_switch.assert_called_once_with(parent_record)
+        verify_parent_switch.assert_called_once()
+        parent_switch_record = verify_parent_switch.call_args.args[0]
+        self.assertEqual(parent_switch_record.get('account_id'), parent_record.get('account_id'))
+        self.assertEqual(parent_switch_record.get('workspace_id'), parent_record.get('workspace_id'))
+        self.assertEqual(parent_switch_record.get('plan_type'), parent_record.get('plan_type'))
+        self.assertEqual(parent_switch_record.get('codex_register_role'), 'parent')
         promote_parent.assert_not_called()
-        run_one_cycle.assert_not_called()
+        run_one_cycle.assert_called_once()
         invite_recent_children.assert_not_called()
         finalize.assert_called_once_with('wf-resume', success=False, reason='parent_switch_failed')
 
@@ -446,8 +644,13 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             service.last_processed_records = 2
             service._run_workflow_once('wf-resume', 'resume')
 
-        promote_parent.assert_called_once_with(parent_record)
-        run_one_cycle.assert_not_called()
+        promote_parent.assert_called_once()
+        promoted_parent_record = promote_parent.call_args.args[0]
+        self.assertEqual(promoted_parent_record.get('account_id'), parent_record.get('account_id'))
+        self.assertEqual(promoted_parent_record.get('workspace_id'), parent_record.get('workspace_id'))
+        self.assertEqual(promoted_parent_record.get('plan_type'), parent_record.get('plan_type'))
+        self.assertEqual(promoted_parent_record.get('codex_register_role'), 'parent')
+        self.assertEqual(run_one_cycle.call_count, 1)
         finalize.assert_called_once_with('wf-resume', success=False, reason='parent_pool_promote_failed')
 
     def test_run_workflow_once_resume_stops_on_failed_round(self):
@@ -471,6 +674,8 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         round_counter = {'value': 0}
 
         def _run_one_cycle(*args, **kwargs):
+            if kwargs.get('register_role') == 'parent':
+                return True, ''
             round_counter['value'] += 1
             service.last_processed_records = 1
             service.last_token_email = f"child{round_counter['value']}@example.com"
@@ -496,7 +701,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             service.last_processed_records = 1
             service._run_workflow_once('wf-resume', 'resume')
 
-        self.assertEqual(run_one_cycle.call_count, 3)
+        self.assertEqual(run_one_cycle.call_count, 4)
         self.assertEqual(invite_recent_children.call_count, 3)
         self.assertEqual(validate_recent_child_records.call_count, 2)
         self.assertEqual(promote_recent_child_records_to_pool.call_count, 2)

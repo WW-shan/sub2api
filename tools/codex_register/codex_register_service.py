@@ -1832,6 +1832,68 @@ def promote_parent_record_to_pool(parent_record: JSONDict) -> Tuple[bool, str]:
             pass
 
 
+def reauthenticate_parent_for_resume(parent_record: JSONDict, *, tokens_dir: Path) -> Tuple[bool, str, JSONDict]:
+    append_log("info", "parent_reauth_started:preferred_workspace_id=")
+
+    reauth_ok, reauth_reason = run_one_cycle(
+        tokens_dir,
+        write_to_accounts=False,
+        register_role="parent",
+        preferred_workspace_id="",
+    )
+    append_log(
+        "info",
+        f"parent_reauth_cycle_result:ok={reauth_ok}:reason={reauth_reason}",
+    )
+    if not reauth_ok:
+        return False, "parent_reauth_failed", {}
+
+    reauthed_parent_record = get_latest_parent_record()
+    append_log(
+        "info",
+        f"parent_reauth_record:{json.dumps(_safe_parent_record_summary(reauthed_parent_record), ensure_ascii=False)}",
+    )
+
+    pre_resume_account_id = str(parent_record.get("account_id") or "").strip()
+    reauthed_account_id = str(reauthed_parent_record.get("account_id") or "").strip()
+    if pre_resume_account_id and reauthed_account_id != pre_resume_account_id:
+        return False, "parent_reauth_account_mismatch", reauthed_parent_record
+
+    workspace_id_value = str(reauthed_parent_record.get("workspace_id") or "").strip()
+    if not workspace_id_value:
+        return False, "parent_reauth_workspace_missing", reauthed_parent_record
+
+    plan_type = str(reauthed_parent_record.get("plan_type") or "").strip().lower()
+    if plan_type not in VALID_PARENT_PLAN_TYPES:
+        return False, "parent_reauth_not_team", reauthed_parent_record
+
+    normalized_parent_record: JSONDict = dict(reauthed_parent_record)
+    normalized_parent_record["workspace_id"] = workspace_id_value
+    normalized_parent_record["plan_type"] = plan_type
+    normalized_parent_record["codex_register_role"] = "parent"
+
+    parent_access_token = str(
+        reauthed_parent_record.get("session_access_token") or reauthed_parent_record.get("access_token") or ""
+    ).strip()
+    if parent_access_token:
+        normalized_parent_record["session_access_token"] = parent_access_token
+        normalized_parent_record["access_token"] = parent_access_token
+
+    parent_refresh_token = str(reauthed_parent_record.get("refresh_token") or "").strip()
+    if parent_refresh_token:
+        normalized_parent_record["refresh_token"] = parent_refresh_token
+
+    parent_account_id = str(reauthed_parent_record.get("account_id") or "").strip()
+    if parent_account_id:
+        normalized_parent_record["account_id"] = parent_account_id
+
+    parent_org_id = str(reauthed_parent_record.get("organization_id") or "").strip()
+    if parent_org_id:
+        normalized_parent_record["organization_id"] = parent_org_id
+
+    return True, "", normalized_parent_record
+
+
 def verify_parent_business_context_after_resume(parent_record: JSONDict) -> Tuple[bool, str]:
     parent_workspace_id = str(parent_record.get("workspace_id") or "").strip()
     parent_account_id = str(parent_record.get("account_id") or "").strip()
@@ -2159,6 +2221,20 @@ def _run_workflow_once(workflow_token: str, mode: str) -> None:
     if gate_reason:
         _finalize_workflow_once(workflow_token, success=False, reason=gate_reason)
         return
+
+    # Keep this resume seam intentionally narrow for merge safety with parallel child-flow redesign work.
+    parent_reauthed, parent_reauth_reason, reauthed_parent_record = reauthenticate_parent_for_resume(
+        parent_record,
+        tokens_dir=tokens_dir,
+    )
+    append_log(
+        "info",
+        f"workflow_parent_reauth_result:workflow_id={workflow_token}:ok={parent_reauthed}:reason={parent_reauth_reason}",
+    )
+    if not parent_reauthed:
+        _finalize_workflow_once(workflow_token, success=False, reason=parent_reauth_reason)
+        return
+    parent_record = reauthed_parent_record
 
     append_log("info", f"workflow_parent_switch_verification_started:workflow_id={workflow_token}")
     parent_switched, parent_switch_reason = verify_parent_business_context_after_resume(parent_record)
