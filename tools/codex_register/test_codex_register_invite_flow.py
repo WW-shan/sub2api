@@ -98,6 +98,42 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         service.active_workflow_cancel_event.clear()
         service.tokens_dir_global = Path('/tmp')
 
+    def test_get_email_and_token_prefers_fixed_env(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_FIXED_EMAIL": "fixed@example.com",
+                "CODEX_FIXED_PASSWORD": "fixed-pass",
+                "CODEX_MAIL_DOMAIN": "ignored.example.com",
+            },
+            clear=True,
+        ):
+            email, dev_token, password = service.get_email_and_token()
+
+        self.assertEqual(email, "fixed@example.com")
+        self.assertEqual(dev_token, "worker")
+        self.assertEqual(password, "fixed-pass")
+
+    def test_get_email_and_token_uses_domain_when_fixed_missing(self):
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_MAIL_DOMAIN": "example.com", "CODEX_FIXED_PASSWORD": "fixed-pass"},
+            clear=True,
+        ):
+            email, dev_token, password = service.get_email_and_token()
+
+        self.assertTrue(email.endswith("@example.com"))
+        self.assertEqual(dev_token, "worker")
+        self.assertEqual(password, "fixed-pass")
+
+    def test_get_email_and_token_generates_password_when_fixed_missing(self):
+        with mock.patch.dict(os.environ, {"CODEX_MAIL_DOMAIN": "example.com"}, clear=True):
+            email, dev_token, password = service.get_email_and_token()
+
+        self.assertTrue(email.endswith("@example.com"))
+        self.assertEqual(dev_token, "worker")
+        self.assertTrue(password)
+
     def test_invite_recent_children_requires_parent_account_id(self):
         ok, reason = service.invite_recent_children(
             {"access_token": "tok", "workspace_id": "ws", "organization_id": "org", "plan_type": "business"},

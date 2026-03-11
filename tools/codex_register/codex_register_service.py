@@ -366,11 +366,16 @@ def _worker_headers(worker_token: str) -> Dict[str, Any]:
 
 def get_email_and_token(proxies: Any = None) -> tuple[str, str, str]:
     del proxies
+    fixed_email = get_env("CODEX_FIXED_EMAIL", "").strip()
+    fixed_password = get_env("CODEX_FIXED_PASSWORD", "").strip()
+    if fixed_email:
+        password = fixed_password or secrets.token_urlsafe(18)
+        return fixed_email, "worker", password
     try:
         domain = get_env("CODEX_MAIL_DOMAIN", required=True).strip().lower()
         local = f"oc{secrets.token_hex(5)}"
         email = f"{local}@{domain}"
-        password = secrets.token_urlsafe(18)
+        password = fixed_password or secrets.token_urlsafe(18)
         return email, "worker", password
     except Exception as exc:
         print(f"[Error] 生成自定义域名邮箱失败: {exc}")
