@@ -262,7 +262,7 @@ def get_oai_code(token: str, email: str, proxies: Any = None) -> str:
     query_url = f"{worker_base}/v1/code?email={urllib.parse.quote(email)}"
 
     print(f"[*] 正在等待邮箱 {email} 的验证码...", end="", flush=True)
-    for _ in range(max_attempts):
+    for attempt in range(max_attempts):
         print(".", end="", flush=True)
         try:
             resp = requests.get(
@@ -272,6 +272,7 @@ def get_oai_code(token: str, email: str, proxies: Any = None) -> str:
                 impersonate="chrome",
                 timeout=15,
             )
+            print(f" [poll#{attempt + 1}] Worker 轮询状态: {resp.status_code}")
 
             if resp.status_code == 200:
                 data = ensure_dict(resp.json())
@@ -289,8 +290,8 @@ def get_oai_code(token: str, email: str, proxies: Any = None) -> str:
             if resp.status_code == 401:
                 print(" [Error] Worker 鉴权失败，请检查 CODEX_MAIL_WORKER_TOKEN")
                 return ""
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f" [poll#{attempt + 1}] Worker 轮询异常: {exc}")
 
         time.sleep(poll_seconds)
 
@@ -541,7 +542,7 @@ def run(proxy: Optional[str]) -> Optional[str]:
     email, dev_token, password = get_email_and_token(proxies)
     if not email or not dev_token:
         return None
-    print(f"[*] 成功获取 Mail.tm 邮箱与授权: {email}")
+    print(f"[*] 成功获取自定义邮箱与授权: {email}")
 
     oauth = generate_oauth_url()
     try:
@@ -840,18 +841,26 @@ def run_codex_once(tokens_dir: Path) -> List[Tuple[Path, List[JSONDict]]]:
     tokens_dir.mkdir(parents=True, exist_ok=True)
 
     proxy = get_env("CODEX_PROXY", "")
+    timeout_seconds = max(1, int(get_env("CODEX_REGISTER_SUBPROCESS_TIMEOUT", "120")))
     cmd = [sys.executable, str(service_file), "--register-only", "--once", "--tokens-dir", str(tokens_dir)]
     if proxy:
         cmd.extend(["--proxy", proxy])
 
     print("[codex-register] 启动注册脚本:", " ".join(cmd), flush=True)
 
-    result = subprocess.run(
-        cmd,
-        cwd=str(service_file.parent),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(service_file.parent),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        reason = "script_timeout"
+        append_log("error", f"script_timeout:{timeout_seconds}")
+        print(f"[codex-register] 注册脚本执行超时: {timeout_seconds}s", flush=True)
+        raise RuntimeError(reason)
 
     print("[codex-register] stdout:\n" + (result.stdout or ""), flush=True)
     if result.stderr:
@@ -1169,7 +1178,7 @@ def run_one_cycle(tokens_dir: Path) -> Tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001
         trace = traceback.format_exc()
         reason = str(exc or "").strip()
-        if reason.startswith("script_exit_nonzero:"):
+        if reason.startswith("script_exit_nonzero:") or reason == "script_timeout":
             with status_lock:
                 last_error = reason
             append_log("error", reason)

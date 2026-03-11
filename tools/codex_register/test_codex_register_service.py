@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from urllib.parse import quote
 
 from tools.codex_register import codex_register_service as service
 
@@ -411,6 +412,43 @@ class CodexRegisterServiceTests(unittest.TestCase):
         self.assertEqual(reason, "script_exit_nonzero:1")
         self.assertEqual(service.last_error, "script_exit_nonzero:1")
 
+    def test_run_codex_once_timeout_raises_script_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp) / "tokens"
+
+            with mock.patch.dict(
+                "os.environ",
+                {"CODEX_PROXY": "", "CODEX_REGISTER_SUBPROCESS_TIMEOUT": "12"},
+                clear=False,
+            ), mock.patch.object(
+                service.subprocess,
+                "run",
+                side_effect=service.subprocess.TimeoutExpired(cmd=["python"], timeout=12),
+            ), mock.patch.object(service, "append_log") as append_log:
+                with self.assertRaisesRegex(RuntimeError, "script_timeout"):
+                    service.run_codex_once(tokens_dir)
+
+        append_log.assert_called_with("error", "script_timeout:12")
+
+    def test_run_one_cycle_surfaces_script_timeout_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp) / "tokens"
+            tokens_dir.mkdir(parents=True)
+
+            cur = mock.Mock()
+            conn = _FakeConn(cur)
+
+            with mock.patch.object(service, "create_db_connection", return_value=conn), mock.patch.object(
+                service,
+                "run_codex_once",
+                side_effect=RuntimeError("script_timeout"),
+            ):
+                ok, reason = service.run_one_cycle(tokens_dir)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "script_timeout")
+        self.assertEqual(service.last_error, "script_timeout")
+
     def test_run_one_cycle_archives_successful_file_and_leaves_failed_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             tokens_dir = Path(tmp) / "tokens"
@@ -800,6 +838,68 @@ class CodexRegisterServiceTests(unittest.TestCase):
 
         self.assertEqual(code, "")
         sleep_mock.assert_not_called()
+
+    def test_run_prints_custom_domain_mail_label(self):
+        fake_session = mock.Mock()
+        fake_session.get.side_effect = [
+            mock.Mock(text="loc=SG\n"),
+            mock.Mock(status_code=200),
+        ]
+        fake_session.cookies.get.return_value = "did-1"
+
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = fake_session
+        fake_requests.post.return_value = mock.Mock(status_code=503)
+
+        with mock.patch.object(service, "get_requests_module", return_value=fake_requests), mock.patch.object(
+            service, "get_email_and_token", return_value=("oc123@mail.example.com", "worker", "pw")
+        ), mock.patch("builtins.print") as print_mock:
+            result = service.run(None)
+
+        self.assertIsNone(result)
+        printed = "\n".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+        self.assertIn("成功获取自定义邮箱与授权: oc123@mail.example.com", printed)
+
+    def test_get_oai_code_logs_worker_poll_status_lines(self):
+        requests = mock.Mock()
+        requests.get.side_effect = [
+            mock.Mock(status_code=404, json=mock.Mock(return_value={"ok": False, "error": "code_not_ready"})),
+            mock.Mock(status_code=404, json=mock.Mock(return_value={"ok": False, "error": "code_not_ready"})),
+            mock.Mock(status_code=200, json=mock.Mock(return_value={"ok": True, "code": "654321"})),
+        ]
+
+        def fake_get_env(name, default=None, required=False):
+            mapping = {
+                "CODEX_MAIL_WORKER_BASE_URL": "https://worker.example.com",
+                "CODEX_MAIL_WORKER_TOKEN": "secret-token",
+                "CODEX_MAIL_POLL_SECONDS": "1",
+                "CODEX_MAIL_POLL_MAX_ATTEMPTS": "4",
+            }
+            value = mapping.get(name, default or "")
+            if required and not value:
+                raise RuntimeError(f"missing env:{name}")
+            return value
+
+        with mock.patch.object(service, "get_requests_module", return_value=requests), mock.patch.object(
+            service, "get_env", side_effect=fake_get_env
+        ), mock.patch.object(service.time, "sleep"), mock.patch("builtins.print") as print_mock:
+            code = service.get_oai_code("unused", "oc123@mail.example.com")
+
+        self.assertEqual(code, "654321")
+        lines = [" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list]
+        status_lines = [line for line in lines if "Worker 轮询状态" in line]
+        self.assertEqual(status_lines, [
+            " [poll#1] Worker 轮询状态: 404",
+            " [poll#2] Worker 轮询状态: 404",
+            " [poll#3] Worker 轮询状态: 200",
+        ])
+        requests.get.assert_any_call(
+            url=f"https://worker.example.com/v1/code?email={quote('oc123@mail.example.com')}",
+            headers={"Accept": "application/json", "Authorization": "Bearer secret-token"},
+            proxies=None,
+            impersonate="chrome",
+            timeout=15,
+        )
 
     def test_main_removes_infinite_worker_loop(self):
         args = SimpleNamespace(
