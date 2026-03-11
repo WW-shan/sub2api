@@ -519,7 +519,7 @@ class CodexRegisterServiceTests(unittest.TestCase):
         self.assertTrue(started)
         self.assertEqual(service.job_phase, service.PHASE_RUNNING_CREATE_PARENT)
 
-    def test_disable_sets_abandoned_and_prevents_progression(self):
+    def test_disable_resets_to_idle_and_allows_restart(self):
         service.job_phase = service.PHASE_RUNNING_CREATE_PARENT
         service.workflow_id = "wf-1"
         handler = _FakeHandler("/disable")
@@ -528,9 +528,12 @@ class CodexRegisterServiceTests(unittest.TestCase):
 
         body = handler.body_json()
         self.assertEqual(handler.status_code, 200)
-        self.assertEqual(body["job_phase"], service.PHASE_ABANDONED)
-        self.assertFalse(body["can_abandon"])
-        self.assertFalse(service.start_workflow_once(allow_resume=False))
+        self.assertEqual(body["job_phase"], service.PHASE_IDLE)
+        self.assertTrue(body["can_start"])
+        self.assertTrue(body["can_abandon"])
+
+        with mock.patch.object(service.threading, "Thread", _FakeThread):
+            self.assertTrue(service.start_workflow_once(allow_resume=False))
 
     def test_enable_and_run_once_are_start_once_triggers(self):
         enable_handler = _FakeHandler("/enable")

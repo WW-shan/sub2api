@@ -1554,8 +1554,8 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
         if self.path == "/disable":
             with status_lock:
                 enabled = False
-                _set_phase_locked(PHASE_ABANDONED)
-                waiting_reason = "disabled"
+                _set_phase_locked(PHASE_IDLE)
+                waiting_reason = ""
             body = json.dumps(get_status_payload()).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
