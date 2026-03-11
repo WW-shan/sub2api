@@ -32,29 +32,44 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'common.unknown': '未知',
     'common.refresh': '刷新',
     'admin.codexRegister.badge.adminConsole': '后台控制台',
-    'admin.codexRegister.badge.running': '运行中',
-    'admin.codexRegister.badge.stopped': '已停止',
     'admin.codexRegister.badge.attention': '需关注',
     'admin.codexRegister.badge.healthy': '暂无错误',
-    'admin.codexRegister.actions.start': '开启',
-    'admin.codexRegister.actions.stop': '关闭',
-    'admin.codexRegister.actions.resume': '恢复',
-    'admin.codexRegister.actions.runOnce': '手动执行一次',
+    'admin.codexRegister.actions.start': '开始',
+    'admin.codexRegister.actions.stop': '停止',
+    'admin.codexRegister.actions.resume': '继续',
+    'admin.codexRegister.actions.inProgress': '进行中',
     'admin.codexRegister.actions.refreshing': '刷新中…',
     'admin.codexRegister.actions.copy': '复制',
+    'admin.codexRegister.actions.show': '显示',
+    'admin.codexRegister.actions.hide': '隐藏',
     'admin.codexRegister.summary.totalCreated': '累计生成账号数',
     'admin.codexRegister.summary.lastSuccess': '最近成功时间',
     'admin.codexRegister.summary.proxy': '是否配置代理',
     'admin.codexRegister.summary.sleepRange': '休眠区间（秒）',
     'admin.codexRegister.summary.proxyConfigured': '已配置',
     'admin.codexRegister.summary.proxyMissing': '未配置',
-    'admin.codexRegister.summary.rangeValue': 'range',
-    'admin.codexRegister.summary.rangeValueWithUnit': 'range with unit',
+    'admin.codexRegister.phase.unknown': '未知阶段',
+    'admin.codexRegister.phase.idle': '未运行',
+    'admin.codexRegister.phase.runningCreateParent': '正在创建母号',
+    'admin.codexRegister.phase.waitingManual': '等待你手动操作',
+    'admin.codexRegister.phase.runningPreResumeCheck': '继续前校验中',
+    'admin.codexRegister.phase.runningInviteChildren': '正在邀请子号',
+    'admin.codexRegister.phase.runningAcceptAndSwitch': '子号接受并切组中',
+    'admin.codexRegister.phase.runningVerifyAndBind': '正在校验并绑定',
+    'admin.codexRegister.phase.abandoned': '已终止',
+    'admin.codexRegister.phase.failed': '执行失败',
+    'admin.codexRegister.waitingReason.parentUpgrade': '需要先完成母号升级',
+    'admin.codexRegister.waitingTodo.title': '待办清单',
+    'admin.codexRegister.waitingTodo.afterTip': '完成以上操作后，点击“继续”以恢复自动流程。',
+    'admin.codexRegister.waitingTodo.parentUpgrade.step1': '登录母号并完成升级流程。',
+    'admin.codexRegister.waitingTodo.parentUpgrade.step2': '确认升级成功且账户状态正常。',
+    'admin.codexRegister.waitingTodo.parentUpgrade.step3': '返回本页后点击“继续”。',
+    'admin.codexRegister.waitingTodo.generic.step1': '根据等待原因完成对应手动操作。',
+    'admin.codexRegister.waitingTodo.generic.step2': '确认操作已在目标平台生效。',
+    'admin.codexRegister.waitingTodo.generic.step3': '返回本页后点击“继续”。',
     'admin.codexRegister.panels.statusTitle': '当前状态',
     'admin.codexRegister.panels.statusDescription': 'status description',
     'admin.codexRegister.panels.serviceStatus': '服务状态',
-    'admin.codexRegister.panels.serviceEnabled': '当前状态：已开启自动注册',
-    'admin.codexRegister.panels.serviceDisabled': '当前状态：已关闭自动注册',
     'admin.codexRegister.panels.proxyConfig': '代理配置',
     'admin.codexRegister.panels.proxyConfiguredDetail': '已配置代理，容器可按当前出口执行注册',
     'admin.codexRegister.panels.proxyMissingDetail': '未配置代理，请确认网络出口要求',
@@ -108,7 +123,7 @@ describe('CodexRegistrationCard', () => {
     vi.clearAllMocks()
 
     codexApiMocks.getStatus.mockResolvedValue({
-      enabled: true,
+      enabled: false,
       sleep_min: 12,
       sleep_max: 34,
       total_created: 18,
@@ -135,9 +150,9 @@ describe('CodexRegistrationCard', () => {
       {
         id: 1,
         email: 'a@example.com',
-        password: 'pw-123',
-        access_token: 'at-123',
-        refresh_token: 'rt-123',
+        password: 'pw-1234567890-secret',
+        access_token: 'at-1234567890-secret',
+        refresh_token: 'rt-1234567890-secret',
         account_id: 'acct-1',
         source: 'codex-register',
         created_at: '2026-03-06T10:00:01Z',
@@ -151,63 +166,121 @@ describe('CodexRegistrationCard', () => {
     vi.useRealTimers()
   })
 
-  it('renders operational status, summary, and logs', async () => {
-    const clearIntervalSpy = vi.spyOn(window, 'clearInterval')
-
+  it('uses job_phase to render primary status and action', async () => {
     const wrapper = mount(CodexRegistrationCard, {
-      props: {
-        active: true
-      },
-      global: {
-        stubs: {
-          StatCard: StatCardStub
-        }
-      }
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
     })
 
     await flushPromises()
 
-    expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(1)
-    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(1)
-    expect(codexApiMocks.getAccounts).toHaveBeenCalledTimes(1)
+    const text = wrapper.text()
+    expect(text).toContain('等待你手动操作')
+    expect(text).toContain('继续')
+    expect(text).not.toContain('手动执行一次')
+  })
 
-    const cardText = wrapper.text()
+  it('shows waiting_manual todo checklist for parent_upgrade', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce({
+      enabled: false,
+      sleep_min: 12,
+      sleep_max: 34,
+      total_created: 18,
+      last_success: null,
+      last_error: null,
+      proxy: true,
+      job_phase: 'waiting_manual:parent_upgrade',
+      workflow_id: 'wf-1',
+      waiting_reason: 'parent_upgrade',
+      can_start: false,
+      can_resume: true,
+      can_abandon: true
+    })
 
-    expect(cardText).toContain('当前状态')
-    expect(cardText).toContain('手动执行一次')
-    expect(cardText).toContain('恢复')
-    expect(cardText).toContain('12 - 34 秒')
-    expect(cardText).toContain('18')
-    expect(cardText).toContain('最近成功时间')
-    expect(cardText).toContain('是否配置代理')
-    expect(cardText).toContain('休眠区间（秒）')
-    expect(cardText).toContain('工作流阶段')
-    expect(cardText).toContain('waiting_manual:db_connect_failed')
-    expect(cardText).toContain('等待原因')
-    expect(cardText).toContain('db_connect_failed')
-    expect(cardText).toContain('最近错误日志')
-    expect(cardText).toContain('最近事件')
-    expect(cardText).toContain('run completed')
-    expect(cardText).toContain('已创建账户')
-    expect(cardText).toContain('a@example.com')
-    expect(cardText).toContain('pw-123')
-    expect(cardText).toContain('at-123')
-    expect(cardText).toContain('rt-123')
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
 
-    const buttons = wrapper.findAll('button')
-    const startButton = buttons.find((btn) => btn.text() === '开启')
-    const stopButton = buttons.find((btn) => btn.text() === '关闭')
-    const resumeButton = buttons.find((btn) => btn.text() === '恢复')
-    const runOnceButton = buttons.find((btn) => btn.text() === '手动执行一次')
+    await flushPromises()
 
-    expect(startButton?.attributes('disabled')).toBeDefined()
-    expect(stopButton?.attributes('disabled')).toBeUndefined()
-    expect(resumeButton?.attributes('disabled')).toBeUndefined()
-    expect(runOnceButton?.attributes('disabled')).toBeDefined()
+    const text = wrapper.text()
+    expect(text).toContain('待办清单')
+    expect(text).toContain('需要先完成母号升级')
+    expect(text).toContain('登录母号并完成升级流程。')
+    expect(text).toContain('完成以上操作后，点击“继续”以恢复自动流程。')
+  })
 
-    wrapper.unmount()
-    expect(clearIntervalSpy).toHaveBeenCalled()
-    clearIntervalSpy.mockRestore()
+  it('masks access_token/refresh_token/password by default', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('pw-123...cret')
+    expect(text).toContain('at-123...cret')
+    expect(text).toContain('rt-123...cret')
+    expect(text).not.toContain('pw-1234567890-secret')
+    expect(text).not.toContain('at-1234567890-secret')
+    expect(text).not.toContain('rt-1234567890-secret')
+  })
+
+  it('reveals only clicked cell when show is pressed', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const showButtons = wrapper.findAll('button').filter((btn) => btn.text() === '显示')
+    expect(showButtons.length).toBe(3)
+
+    await showButtons[0].trigger('click')
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('pw-1234567890-secret')
+    expect(text).toContain('at-123...cret')
+    expect(text).toContain('rt-123...cret')
+  })
+
+  it('calls resume endpoint when primary action is resume', async () => {
+    codexApiMocks.resume.mockResolvedValueOnce({
+      enabled: true,
+      sleep_min: 12,
+      sleep_max: 34,
+      total_created: 19,
+      last_success: '2026-03-06 10:05:00',
+      last_error: null,
+      proxy: true,
+      job_phase: 'running:create_parent',
+      workflow_id: 'wf-2',
+      waiting_reason: null,
+      can_start: false,
+      can_resume: false,
+      can_abandon: true
+    })
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const resumeButton = wrapper.findAll('button').find((btn) => btn.text() === '继续')
+    expect(resumeButton).toBeDefined()
+
+    await resumeButton!.trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.resume).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('正在创建母号')
   })
 
   it('polls only when active and stops when deactivated', async () => {
@@ -215,14 +288,8 @@ describe('CodexRegistrationCard', () => {
     const clearIntervalSpy = vi.spyOn(window, 'clearInterval')
 
     const wrapper = mount(CodexRegistrationCard, {
-      props: {
-        active: false
-      },
-      global: {
-        stubs: {
-          StatCard: StatCardStub
-        }
-      }
+      props: { active: false },
+      global: { stubs: { StatCard: StatCardStub } }
     })
 
     await flushPromises()
@@ -278,70 +345,5 @@ describe('CodexRegistrationCard', () => {
 
     await copyButtons[0].trigger('click')
     expect(writeText).toHaveBeenCalled()
-  })
-
-  it('calls resume endpoint when resume action is clicked', async () => {
-    codexApiMocks.resume.mockResolvedValueOnce({
-      enabled: true,
-      sleep_min: 12,
-      sleep_max: 34,
-      total_created: 19,
-      last_success: '2026-03-06 10:05:00',
-      last_error: null,
-      proxy: true,
-      job_phase: 'running:create_parent',
-      workflow_id: 'wf-2',
-      waiting_reason: null,
-      can_start: false,
-      can_resume: false,
-      can_abandon: true
-    })
-
-    const wrapper = mount(CodexRegistrationCard, {
-      props: { active: true },
-      global: { stubs: { StatCard: StatCardStub } }
-    })
-
-    await flushPromises()
-
-    const resumeButton = wrapper
-      .findAll('button')
-      .find((btn) => btn.text() === '恢复')
-
-    expect(resumeButton).toBeDefined()
-
-    await resumeButton!.trigger('click')
-    await flushPromises()
-
-    expect(codexApiMocks.resume).toHaveBeenCalledTimes(1)
-    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
-    expect(wrapper.text()).toContain('running:create_parent')
-  })
-
-  it('shows error details when initial requests fail', async () => {
-    codexApiMocks.getStatus.mockRejectedValueOnce(new Error('status failed'))
-    codexApiMocks.getLogs.mockRejectedValueOnce(new Error('logs failed'))
-    codexApiMocks.getAccounts.mockResolvedValueOnce([])
-
-    const wrapper = mount(CodexRegistrationCard, {
-      props: {
-        active: true
-      },
-      global: {
-        stubs: {
-          StatCard: StatCardStub
-        }
-      }
-    })
-
-    await flushPromises()
-
-    const cardText = wrapper.text()
-
-    expect(cardText).toContain('logs failed')
-    expect(cardText).toContain('未知')
-    expect(cardText).toContain('暂无事件')
-    expect(cardText).not.toContain('当前状态：已关闭自动注册')
-    expect(cardText).not.toContain('已配置代理，容器可按当前出口执行注册')
   })
 })

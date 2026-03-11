@@ -12,9 +12,7 @@
             <span
               :class="[
                 'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium',
-                status?.enabled
-                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-900/20 dark:text-emerald-300'
-                  : 'border-gray-200 bg-gray-100 text-gray-600 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300'
+                statusBadgeToneClass
               ]"
             >
               {{ statusBadgeLabel }}
@@ -48,10 +46,10 @@
           <button
             type="button"
             class="btn btn-primary btn-sm"
-            :disabled="loading || !canStart"
-            @click="toggleEnabled(true)"
+            :disabled="loading || primaryAction === 'inProgress'"
+            @click="triggerPrimaryAction"
           >
-            {{ t('admin.codexRegister.actions.start') }}
+            {{ primaryActionLabel }}
           </button>
           <button
             type="button"
@@ -60,22 +58,6 @@
             @click="toggleEnabled(false)"
           >
             {{ t('admin.codexRegister.actions.stop') }}
-          </button>
-          <button
-            type="button"
-            class="btn btn-secondary btn-sm"
-            :disabled="loading || !canResume"
-            @click="resumeWorkflow"
-          >
-            {{ t('admin.codexRegister.actions.resume') }}
-          </button>
-          <button
-            type="button"
-            class="btn btn-secondary btn-sm"
-            :disabled="loading || !canStart"
-            @click="runOnce"
-          >
-            {{ t('admin.codexRegister.actions.runOnce') }}
           </button>
         </div>
       </div>
@@ -90,6 +72,24 @@
       <p v-if="error" class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-300">
         {{ error }}
       </p>
+
+      <section
+        v-if="isWaitingManual"
+        class="rounded-2xl border border-amber-200 bg-amber-50/70 p-5 dark:border-amber-900/60 dark:bg-amber-900/10"
+      >
+        <h3 class="text-sm font-semibold text-amber-800 dark:text-amber-300">
+          {{ t('admin.codexRegister.waitingTodo.title') }}
+        </h3>
+        <p class="mt-2 text-sm text-amber-700 dark:text-amber-200">
+          {{ waitingTodoReason }}
+        </p>
+        <ol class="mt-3 list-decimal space-y-1 pl-5 text-sm text-amber-800 dark:text-amber-100">
+          <li v-for="(step, index) in waitingTodoSteps" :key="`waiting-step-${index}`">{{ step }}</li>
+        </ol>
+        <p class="mt-3 text-sm font-medium text-amber-800 dark:text-amber-200">
+          {{ t('admin.codexRegister.waitingTodo.afterTip') }}
+        </p>
+      </section>
 
       <div class="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
         <section class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20">
@@ -263,21 +263,30 @@
               <tbody class="divide-y divide-gray-100 dark:divide-dark-800">
                 <tr v-for="account in accounts" :key="account.id">
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">{{ account.email }}</td>
-                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200 break-all">
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     <div class="flex items-center gap-2">
-                      <span>{{ account.password }}</span>
+                      <span class="max-w-[220px] truncate whitespace-nowrap" :title="secretDisplayValue(account, 'password')">{{ secretDisplayValue(account, 'password') }}</span>
+                      <button type="button" class="btn btn-secondary btn-xs" @click="toggleSecret(account.id, 'password')">
+                        {{ isSecretRevealed(account.id, 'password') ? t('admin.codexRegister.actions.hide') : t('admin.codexRegister.actions.show') }}
+                      </button>
                       <button type="button" class="btn btn-secondary btn-xs" @click="copyText(account.password)">{{ t('admin.codexRegister.actions.copy') }}</button>
                     </div>
                   </td>
-                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200 break-all">
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     <div class="flex items-center gap-2">
-                      <span>{{ account.access_token }}</span>
+                      <span class="max-w-[220px] truncate whitespace-nowrap" :title="secretDisplayValue(account, 'access_token')">{{ secretDisplayValue(account, 'access_token') }}</span>
+                      <button type="button" class="btn btn-secondary btn-xs" @click="toggleSecret(account.id, 'access_token')">
+                        {{ isSecretRevealed(account.id, 'access_token') ? t('admin.codexRegister.actions.hide') : t('admin.codexRegister.actions.show') }}
+                      </button>
                       <button type="button" class="btn btn-secondary btn-xs" @click="copyText(account.access_token)">{{ t('admin.codexRegister.actions.copy') }}</button>
                     </div>
                   </td>
-                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200 break-all">
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     <div class="flex items-center gap-2">
-                      <span>{{ account.refresh_token }}</span>
+                      <span class="max-w-[220px] truncate whitespace-nowrap" :title="secretDisplayValue(account, 'refresh_token')">{{ secretDisplayValue(account, 'refresh_token') }}</span>
+                      <button type="button" class="btn btn-secondary btn-xs" @click="toggleSecret(account.id, 'refresh_token')">
+                        {{ isSecretRevealed(account.id, 'refresh_token') ? t('admin.codexRegister.actions.hide') : t('admin.codexRegister.actions.show') }}
+                      </button>
                       <button type="button" class="btn btn-secondary btn-xs" @click="copyText(account.refresh_token)">{{ t('admin.codexRegister.actions.copy') }}</button>
                     </div>
                   </td>
@@ -318,21 +327,81 @@ const refreshing = ref(false)
 let timer: number | undefined
 const POLL_INTERVAL = 10000
 
-const statusBadgeLabel = computed(() => {
-  if (status.value) {
-    return status.value.enabled ? t('admin.codexRegister.badge.running') : t('admin.codexRegister.badge.stopped')
+type PhaseTone = 'neutral' | 'running' | 'waiting' | 'failed'
+type PrimaryAction = 'start' | 'resume' | 'inProgress'
+type SecretField = 'password' | 'access_token' | 'refresh_token'
+
+function phaseInfo(phase?: string | null): { label: string, tone: PhaseTone } {
+  if (!phase) {
+    return { label: t('admin.codexRegister.phase.unknown'), tone: 'neutral' }
   }
 
-  return error.value ? t('common.unknown') : t('common.loading')
-})
-
-const serviceStatusLabel = computed(() => {
-  if (status.value) {
-    return status.value.enabled ? t('admin.codexRegister.panels.serviceEnabled') : t('admin.codexRegister.panels.serviceDisabled')
+  if (phase === 'idle' || phase === 'completed') {
+    return { label: t('admin.codexRegister.phase.idle'), tone: 'neutral' }
+  }
+  if (phase === 'running:create_parent') {
+    return { label: t('admin.codexRegister.phase.runningCreateParent'), tone: 'running' }
+  }
+  if (phase.startsWith('waiting_manual:')) {
+    return { label: t('admin.codexRegister.phase.waitingManual'), tone: 'waiting' }
+  }
+  if (phase === 'running:pre_resume_check') {
+    return { label: t('admin.codexRegister.phase.runningPreResumeCheck'), tone: 'running' }
+  }
+  if (phase === 'running:invite_children') {
+    return { label: t('admin.codexRegister.phase.runningInviteChildren'), tone: 'running' }
+  }
+  if (phase === 'running:accept_and_switch') {
+    return { label: t('admin.codexRegister.phase.runningAcceptAndSwitch'), tone: 'running' }
+  }
+  if (phase === 'running:verify_and_bind') {
+    return { label: t('admin.codexRegister.phase.runningVerifyAndBind'), tone: 'running' }
+  }
+  if (phase === 'abandoned') {
+    return { label: t('admin.codexRegister.phase.abandoned'), tone: 'neutral' }
+  }
+  if (phase === 'failed') {
+    return { label: t('admin.codexRegister.phase.failed'), tone: 'failed' }
   }
 
-  return error.value ? t('common.unknown') : t('common.loading')
+  return { label: phase, tone: 'neutral' }
+}
+
+function waitingReasonText(reason?: string | null): string {
+  if (!reason) {
+    return t('admin.codexRegister.panels.waitingReasonEmpty')
+  }
+  if (reason === 'parent_upgrade') {
+    return t('admin.codexRegister.waitingReason.parentUpgrade')
+  }
+  return reason
+}
+
+const phaseState = computed(() => {
+  if (!status.value) {
+    return {
+      label: error.value ? t('common.unknown') : t('common.loading'),
+      tone: 'neutral' as PhaseTone
+    }
+  }
+  return phaseInfo(status.value.job_phase)
 })
+
+const statusBadgeToneClass = computed(() => {
+  if (phaseState.value.tone === 'running') {
+    return 'border-primary-200 bg-primary-50 text-primary-700 dark:border-primary-900/60 dark:bg-primary-900/20 dark:text-primary-300'
+  }
+  if (phaseState.value.tone === 'waiting') {
+    return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-900/20 dark:text-amber-300'
+  }
+  if (phaseState.value.tone === 'failed') {
+    return 'border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-300'
+  }
+  return 'border-gray-200 bg-gray-100 text-gray-600 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-300'
+})
+
+const statusBadgeLabel = computed(() => phaseState.value.label)
+const serviceStatusLabel = computed(() => phaseState.value.label)
 
 const proxySummaryLabel = computed(() => {
   if (status.value) {
@@ -379,7 +448,7 @@ const codexPhaseLabel = computed(() => {
     return error.value ? t('common.unknown') : t('common.loading')
   }
 
-  return status.value.job_phase || t('common.unknown')
+  return phaseInfo(status.value.job_phase).label
 })
 
 const waitingReasonLabel = computed(() => {
@@ -387,12 +456,68 @@ const waitingReasonLabel = computed(() => {
     return error.value ? t('common.unknown') : t('common.loading')
   }
 
-  return status.value.waiting_reason || t('admin.codexRegister.panels.waitingReasonEmpty')
+  return waitingReasonText(status.value.waiting_reason)
+})
+
+const isWaitingManual = computed(() => Boolean(status.value?.job_phase?.startsWith('waiting_manual:')))
+const waitingTodoReason = computed(() => waitingReasonText(status.value?.waiting_reason))
+const waitingTodoSteps = computed(() => {
+  if (status.value?.waiting_reason === 'parent_upgrade') {
+    return [
+      t('admin.codexRegister.waitingTodo.parentUpgrade.step1'),
+      t('admin.codexRegister.waitingTodo.parentUpgrade.step2'),
+      t('admin.codexRegister.waitingTodo.parentUpgrade.step3')
+    ]
+  }
+
+  return [
+    t('admin.codexRegister.waitingTodo.generic.step1'),
+    t('admin.codexRegister.waitingTodo.generic.step2'),
+    t('admin.codexRegister.waitingTodo.generic.step3')
+  ]
 })
 
 const canStart = computed(() => Boolean(status.value?.can_start))
 const canResume = computed(() => Boolean(status.value?.can_resume))
 const canAbandon = computed(() => Boolean(status.value?.can_abandon))
+
+const primaryAction = computed<PrimaryAction>(() => {
+  if (canStart.value) return 'start'
+  if (canResume.value) return 'resume'
+  return 'inProgress'
+})
+
+const primaryActionLabel = computed(() => {
+  if (primaryAction.value === 'start') return t('admin.codexRegister.actions.start')
+  if (primaryAction.value === 'resume') return t('admin.codexRegister.actions.resume')
+  return t('admin.codexRegister.actions.inProgress')
+})
+
+const revealedSecrets = ref<Record<string, boolean>>({})
+
+function secretKey(accountId: number, field: SecretField): string {
+  return `${accountId}:${field}`
+}
+
+function isSecretRevealed(accountId: number, field: SecretField): boolean {
+  return Boolean(revealedSecrets.value[secretKey(accountId, field)])
+}
+
+function toggleSecret(accountId: number, field: SecretField) {
+  const key = secretKey(accountId, field)
+  revealedSecrets.value[key] = !revealedSecrets.value[key]
+}
+
+function maskSecret(value: string): string {
+  if (!value) return '-'
+  if (value.length <= 10) return '******'
+  return `${value.slice(0, 6)}...${value.slice(-4)}`
+}
+
+function secretDisplayValue(account: CodexRegisterAccount, field: SecretField): string {
+  const value = account[field] || ''
+  return isSecretRevealed(account.id, field) ? value : maskSecret(value)
+}
 
 const errorStateLabel = computed(() => {
   if (!status.value) {
@@ -513,19 +638,14 @@ async function resumeWorkflow() {
   await fetchLogs()
 }
 
-async function runOnce() {
-  if (loading.value) return
-  loading.value = true
-  try {
-    const data = await adminAPI.codex.runOnce()
-    status.value = data
-    error.value = null
-  } catch (errorValue) {
-    error.value = getErrorMessage(errorValue)
-  } finally {
-    loading.value = false
+async function triggerPrimaryAction() {
+  if (primaryAction.value === 'start') {
+    await toggleEnabled(true)
+    return
   }
-  await fetchLogs()
+  if (primaryAction.value === 'resume') {
+    await resumeWorkflow()
+  }
 }
 
 function startPolling() {
@@ -576,8 +696,16 @@ defineExpose({
   sleepRangeSummaryLabel,
   sleepRangeDetailLabel,
   errorStateLabel,
+  primaryAction,
+  primaryActionLabel,
+  triggerPrimaryAction,
   toggleEnabled,
   resumeWorkflow,
-  runOnce
+  isWaitingManual,
+  waitingTodoSteps,
+  maskSecret,
+  secretDisplayValue,
+  toggleSecret,
+  isSecretRevealed
 })
 </script>

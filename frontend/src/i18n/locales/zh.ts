@@ -997,18 +997,18 @@ export default {
       heroDescription: '管理 Codex 自动注册服务的运行状态、执行节奏和最近事件，让这套能力和后台其他运维页面保持同一视觉与信息层级。',
       badge: {
         adminConsole: '后台控制台',
-        running: '运行中',
-        stopped: '已停止',
         attention: '需关注',
         healthy: '暂无错误'
       },
       actions: {
-        start: '开启',
-        stop: '关闭',
-        resume: '恢复',
-        runOnce: '手动执行一次',
+        start: '开始',
+        stop: '停止',
+        resume: '继续',
+        inProgress: '进行中',
         refreshing: '刷新中…',
-        copy: '复制'
+        copy: '复制',
+        show: '显示',
+        hide: '隐藏'
       },
       summary: {
         totalCreated: '累计生成账号数',
@@ -1021,13 +1021,40 @@ export default {
         rangeValue: '{min} - {max}',
         rangeValueWithUnit: '{min} - {max} 秒'
       },
+      phase: {
+        unknown: '未知阶段',
+        idle: '未运行',
+        runningCreateParent: '正在创建母号',
+        waitingManual: '等待你手动操作',
+        runningPreResumeCheck: '继续前校验中',
+        runningInviteChildren: '正在邀请子号',
+        runningAcceptAndSwitch: '子号接受并切组中',
+        runningVerifyAndBind: '正在校验并绑定',
+        abandoned: '已终止',
+        failed: '执行失败'
+      },
+      waitingReason: {
+        parentUpgrade: '需要先完成母号升级'
+      },
+      waitingTodo: {
+        title: '待办清单',
+        afterTip: '完成以上操作后，点击“继续”以恢复自动流程。',
+        parentUpgrade: {
+          step1: '登录母号并完成升级流程。',
+          step2: '确认升级成功且账户状态正常。',
+          step3: '返回本页后点击“继续”。'
+        },
+        generic: {
+          step1: '根据等待原因完成对应手动操作。',
+          step2: '确认操作已在目标平台生效。',
+          step3: '返回本页后点击“继续”。'
+        }
+      },
       panels: {
         statusTitle: '当前状态',
-        statusDescription: '统一查看当前开关状态、代理配置和最近一次失败信息。',
+        statusDescription: '统一查看当前流程阶段、代理配置和最近一次失败信息。',
         polling: '自动轮询：{seconds} 秒',
         serviceStatus: '服务状态',
-        serviceEnabled: '当前状态：已开启自动注册',
-        serviceDisabled: '当前状态：已关闭自动注册',
         proxyConfig: '代理配置',
         proxyConfiguredDetail: '已配置代理，容器可按当前出口执行注册',
         proxyMissingDetail: '未配置代理，请确认网络出口要求',

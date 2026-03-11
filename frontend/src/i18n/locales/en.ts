@@ -975,8 +975,6 @@ export default {
       heroDescription: 'Manage Codex auto-registration runtime, execution cadence, and recent events with the same visual hierarchy used across the rest of the admin console.',
       badge: {
         adminConsole: 'Admin Console',
-        running: 'Running',
-        stopped: 'Stopped',
         attention: 'Needs Attention',
         healthy: 'No Errors'
       },
@@ -984,9 +982,11 @@ export default {
         start: 'Start',
         stop: 'Stop',
         resume: 'Resume',
-        runOnce: 'Run Once',
+        inProgress: 'In Progress',
         refreshing: 'Refreshing…',
-        copy: 'Copy'
+        copy: 'Copy',
+        show: 'Show',
+        hide: 'Hide'
       },
       summary: {
         totalCreated: 'Total Accounts Created',
@@ -999,13 +999,40 @@ export default {
         rangeValue: '{min} - {max}',
         rangeValueWithUnit: '{min} - {max} seconds'
       },
+      phase: {
+        unknown: 'Unknown phase',
+        idle: 'Not running',
+        runningCreateParent: 'Creating parent account',
+        waitingManual: 'Waiting for your manual action',
+        runningPreResumeCheck: 'Running pre-resume checks',
+        runningInviteChildren: 'Inviting child accounts',
+        runningAcceptAndSwitch: 'Accepting and switching group',
+        runningVerifyAndBind: 'Verifying and binding',
+        abandoned: 'Abandoned',
+        failed: 'Failed'
+      },
+      waitingReason: {
+        parentUpgrade: 'Parent account upgrade is required first'
+      },
+      waitingTodo: {
+        title: 'Todo checklist',
+        afterTip: 'After completing the steps above, click "Resume" to continue the workflow.',
+        parentUpgrade: {
+          step1: 'Sign in to the parent account and complete the upgrade.',
+          step2: 'Confirm the upgrade succeeds and account status is normal.',
+          step3: 'Return to this page and click "Resume".'
+        },
+        generic: {
+          step1: 'Complete the required manual action for the waiting reason.',
+          step2: 'Confirm the action has taken effect on the target platform.',
+          step3: 'Return to this page and click "Resume".'
+        }
+      },
       panels: {
         statusTitle: 'Current Status',
-        statusDescription: 'Review the current switch state, proxy setup, and the latest failure signal in one place.',
+        statusDescription: 'Review current workflow phase, proxy setup, and the latest failure signal in one place.',
         polling: 'Auto refresh: {seconds} seconds',
         serviceStatus: 'Service Status',
-        serviceEnabled: 'Current status: auto-registration is enabled',
-        serviceDisabled: 'Current status: auto-registration is disabled',
         proxyConfig: 'Proxy Configuration',
         proxyConfiguredDetail: 'Proxy is configured and the container can register through the current egress path.',
         proxyMissingDetail: 'No proxy is configured. Confirm whether the container requires a dedicated network exit.',
