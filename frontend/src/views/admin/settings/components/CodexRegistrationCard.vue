@@ -37,7 +37,7 @@
         <div class="flex flex-wrap items-center gap-2 xl:justify-end">
           <button
             type="button"
-            class="btn btn-secondary btn-sm"
+            class="btn btn-secondary"
             :disabled="refreshing || loading"
             @click="refreshAll"
           >
@@ -45,7 +45,7 @@
           </button>
           <button
             type="button"
-            class="btn btn-primary btn-sm"
+            class="btn btn-primary"
             :disabled="loading || primaryAction === 'inProgress'"
             @click="triggerPrimaryAction"
           >
@@ -53,7 +53,7 @@
           </button>
           <button
             type="button"
-            class="btn btn-secondary btn-sm"
+            class="btn btn-secondary"
             :disabled="loading || !canAbandon"
             @click="toggleEnabled(false)"
           >
@@ -266,28 +266,28 @@
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     <div class="flex items-center gap-2">
                       <span class="max-w-[220px] truncate whitespace-nowrap" :title="secretDisplayValue(account, 'password')">{{ secretDisplayValue(account, 'password') }}</span>
-                      <button type="button" class="btn btn-secondary btn-xs" @click="toggleSecret(account.id, 'password')">
+                      <button type="button" class="btn btn-secondary btn-sm" @click="toggleSecret(account.id, 'password')">
                         {{ isSecretRevealed(account.id, 'password') ? t('admin.codexRegister.actions.hide') : t('admin.codexRegister.actions.show') }}
                       </button>
-                      <button type="button" class="btn btn-secondary btn-xs" @click="copyText(account.password)">{{ t('admin.codexRegister.actions.copy') }}</button>
+                      <button type="button" class="btn btn-secondary btn-sm" @click="copyText(account.password)">{{ t('admin.codexRegister.actions.copy') }}</button>
                     </div>
                   </td>
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     <div class="flex items-center gap-2">
                       <span class="max-w-[220px] truncate whitespace-nowrap" :title="secretDisplayValue(account, 'access_token')">{{ secretDisplayValue(account, 'access_token') }}</span>
-                      <button type="button" class="btn btn-secondary btn-xs" @click="toggleSecret(account.id, 'access_token')">
+                      <button type="button" class="btn btn-secondary btn-sm" @click="toggleSecret(account.id, 'access_token')">
                         {{ isSecretRevealed(account.id, 'access_token') ? t('admin.codexRegister.actions.hide') : t('admin.codexRegister.actions.show') }}
                       </button>
-                      <button type="button" class="btn btn-secondary btn-xs" @click="copyText(account.access_token)">{{ t('admin.codexRegister.actions.copy') }}</button>
+                      <button type="button" class="btn btn-secondary btn-sm" @click="copyText(account.access_token)">{{ t('admin.codexRegister.actions.copy') }}</button>
                     </div>
                   </td>
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     <div class="flex items-center gap-2">
                       <span class="max-w-[220px] truncate whitespace-nowrap" :title="secretDisplayValue(account, 'refresh_token')">{{ secretDisplayValue(account, 'refresh_token') }}</span>
-                      <button type="button" class="btn btn-secondary btn-xs" @click="toggleSecret(account.id, 'refresh_token')">
+                      <button type="button" class="btn btn-secondary btn-sm" @click="toggleSecret(account.id, 'refresh_token')">
                         {{ isSecretRevealed(account.id, 'refresh_token') ? t('admin.codexRegister.actions.hide') : t('admin.codexRegister.actions.show') }}
                       </button>
-                      <button type="button" class="btn btn-secondary btn-xs" @click="copyText(account.refresh_token)">{{ t('admin.codexRegister.actions.copy') }}</button>
+                      <button type="button" class="btn btn-secondary btn-sm" @click="copyText(account.refresh_token)">{{ t('admin.codexRegister.actions.copy') }}</button>
                     </div>
                   </td>
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">{{ account.account_id || '-' }}</td>
