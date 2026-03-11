@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import tempfile
@@ -233,6 +234,141 @@ class CodexRegisterServiceTests(unittest.TestCase):
             service.normalize_extra_for_compare(before),
             service.normalize_extra_for_compare(after),
         )
+
+    def test_select_parent_workspace_prefers_business_plan(self):
+        workspaces = [
+            {"id": "ws-personal", "plan_type": "personal"},
+            {"id": "ws-business", "plan_type": "business"},
+        ]
+
+        selected = service.select_parent_workspace(workspaces, "")
+
+        self.assertEqual(selected.get("id"), "ws-business")
+
+    def test_select_parent_workspace_respects_preferred_id(self):
+        workspaces = [
+            {"id": "ws-personal", "plan_type": "personal"},
+            {"id": "ws-business", "plan_type": "business"},
+        ]
+
+        selected = service.select_parent_workspace(workspaces, "ws-personal")
+
+        self.assertEqual(selected.get("id"), "ws-personal")
+
+    def test_build_credentials_keeps_parent_org_metadata(self):
+        credentials = service.build_credentials(
+            {},
+            {
+                "organization_id": "org-business-1",
+                "plan_type": "business",
+            },
+        )
+
+        self.assertEqual(credentials.get("organization_id"), "org-business-1")
+        self.assertEqual(credentials.get("codex_parent_organization_id"), "org-business-1")
+        self.assertEqual(credentials.get("plan_type"), "business")
+        self.assertEqual(credentials.get("codex_parent_plan_type"), "business")
+
+    def test_build_extra_keeps_parent_org_metadata(self):
+        extra = service.build_extra(
+            {},
+            {
+                "organization_id": "org-business-1",
+                "plan_type": "business",
+            },
+        )
+
+        self.assertEqual(extra.get("organization_id"), "org-business-1")
+        self.assertEqual(extra.get("codex_parent_organization_id"), "org-business-1")
+        self.assertEqual(extra.get("plan_type"), "business")
+        self.assertEqual(extra.get("codex_parent_plan_type"), "business")
+
+    def test_submit_callback_url_does_not_include_password_field(self):
+        token_resp = {
+            "id_token": "header.payload.signature",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+            "expires_in": 3600,
+        }
+
+        with mock.patch.object(service, "_parse_callback_url", return_value={
+            "code": "code-1",
+            "state": "state-1",
+            "error": "",
+            "error_description": "",
+        }), mock.patch.object(service, "_post_form", return_value=token_resp), mock.patch.object(
+            service, "_jwt_claims_no_verify", return_value={
+                "email": "a@example.com",
+                "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"},
+            }
+        ):
+            payload = json.loads(
+                service.submit_callback_url(
+                    callback_url="https://example.com/callback?code=code-1&state=state-1",
+                    expected_state="state-1",
+                    code_verifier="verifier-1",
+                )
+            )
+
+        self.assertNotIn("password", payload)
+
+    def test_run_does_not_attach_password_to_token_payload(self):
+        session = mock.Mock()
+        auth_payload = base64.urlsafe_b64encode(json.dumps({
+            "workspaces": [
+                {"id": "ws-business", "plan_type": "business", "organization_id": "org-business-1"}
+            ]
+        }).encode("utf-8")).decode("ascii").rstrip("=")
+        auth_cookie = f"{auth_payload}.payload.signature"
+        session.cookies.get.side_effect = ["did-1", auth_cookie]
+        session.get.side_effect = [
+            mock.Mock(text="loc=US\n"),
+            mock.Mock(status_code=200),
+            mock.Mock(status_code=302, headers={"Location": "https://example.com/callback?code=abc&state=st"}),
+        ]
+        session.post.side_effect = [
+            mock.Mock(status_code=200, json=mock.Mock(return_value={"token": "sen-token"})),
+            mock.Mock(status_code=200),
+            mock.Mock(status_code=200),
+            mock.Mock(status_code=200),
+            mock.Mock(status_code=200, json=mock.Mock(return_value={"continue_url": "https://example.com/continue"})),
+        ]
+
+        requests = mock.Mock()
+        requests.Session.return_value = session
+        requests.post.return_value = mock.Mock(status_code=200, json=mock.Mock(return_value={"token": "sen-token"}))
+
+        callback_payload = {
+            "id_token": "id-1",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+            "account_id": "acct-1",
+            "email": "a@example.com",
+            "type": "codex",
+            "expired": "2099-01-01T00:00:00Z",
+        }
+
+        def fake_get_env(name, default=None, required=False):
+            mapping = {
+                "CODEX_MAIL_DOMAIN": "mail.example.com",
+                "CODEX_PARENT_WORKSPACE_ID": "",
+            }
+            value = mapping.get(name, default or "")
+            if required and not value:
+                raise RuntimeError(f"missing env:{name}")
+            return value
+
+        with mock.patch.object(service, "get_requests_module", return_value=requests), mock.patch.object(
+            service, "get_env", side_effect=fake_get_env
+        ), mock.patch.object(service, "get_email_and_token", return_value=("u@mail.example.com", "worker", "pw-secret")), mock.patch.object(
+            service, "get_oai_code", return_value="123456"
+        ), mock.patch.object(service, "generate_oauth_url", return_value=service.OAuthStart("https://auth.example/start", "st", "verifier", service.DEFAULT_REDIRECT_URI)), mock.patch.object(
+            service, "submit_callback_url", return_value=json.dumps(callback_payload)
+        ), mock.patch.object(service, "fetch_session_access_token", return_value="session-at"):
+            token_json = service.run(None)
+
+        payload = json.loads(token_json)
+        self.assertNotIn("password", payload)
 
     def test_archive_processed_file_moves_json_out_of_active_directory(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -256,7 +256,6 @@
               <thead class="bg-gray-50 dark:bg-dark-800/60">
                 <tr>
                   <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.email') }}</th>
-                  <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.password') }}</th>
                   <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.accessToken') }}</th>
                   <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.refreshToken') }}</th>
                   <th class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300">{{ t('admin.codexRegister.accounts.columns.accountId') }}</th>
@@ -266,15 +265,6 @@
               <tbody class="divide-y divide-gray-100 dark:divide-dark-800">
                 <tr v-for="account in accounts" :key="account.id">
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">{{ account.email }}</td>
-                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
-                    <div class="flex items-center gap-2">
-                      <span class="max-w-[220px] truncate whitespace-nowrap" :title="secretDisplayValue(account, 'password')">{{ secretDisplayValue(account, 'password') }}</span>
-                      <button type="button" class="btn btn-secondary btn-sm" @click="toggleSecret(account.id, 'password')">
-                        {{ isSecretRevealed(account.id, 'password') ? t('admin.codexRegister.actions.hide') : t('admin.codexRegister.actions.show') }}
-                      </button>
-                      <button type="button" class="btn btn-secondary btn-sm" @click="copyText(account.password)">{{ t('admin.codexRegister.actions.copy') }}</button>
-                    </div>
-                  </td>
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     <div class="flex items-center gap-2">
                       <span class="max-w-[220px] truncate whitespace-nowrap" :title="secretDisplayValue(account, 'access_token')">{{ secretDisplayValue(account, 'access_token') }}</span>
@@ -332,7 +322,7 @@ const POLL_INTERVAL = 10000
 
 type PhaseTone = 'neutral' | 'running' | 'waiting' | 'failed'
 type PrimaryAction = 'start' | 'resume' | 'inProgress'
-type SecretField = 'password' | 'access_token' | 'refresh_token'
+type SecretField = 'access_token' | 'refresh_token'
 
 function phaseInfo(phase?: string | null): { label: string, tone: PhaseTone } {
   if (!phase) {

@@ -88,7 +88,6 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.accounts.description': '仅展示 codex-register 自动创建记录',
     'admin.codexRegister.accounts.empty': '暂无账号记录',
     'admin.codexRegister.accounts.columns.email': '邮箱',
-    'admin.codexRegister.accounts.columns.password': '密码',
     'admin.codexRegister.accounts.columns.accessToken': 'Access Token',
     'admin.codexRegister.accounts.columns.refreshToken': 'Refresh Token',
     'admin.codexRegister.accounts.columns.accountId': 'Account ID',
@@ -150,7 +149,6 @@ describe('CodexRegistrationCard', () => {
       {
         id: 1,
         email: 'a@example.com',
-        password: 'pw-1234567890-secret',
         access_token: 'at-1234567890-secret',
         refresh_token: 'rt-1234567890-secret',
         account_id: 'acct-1',
@@ -244,7 +242,7 @@ describe('CodexRegistrationCard', () => {
     expect(text).toContain('完成以上操作后，点击“继续”以恢复自动流程。')
   })
 
-  it('masks access_token/refresh_token/password by default', async () => {
+  it('masks access_token/refresh_token by default', async () => {
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
       global: { stubs: { StatCard: StatCardStub } }
@@ -253,15 +251,13 @@ describe('CodexRegistrationCard', () => {
     await flushPromises()
 
     const text = wrapper.text()
-    expect(text).toContain('pw-123...cret')
     expect(text).toContain('at-123...cret')
     expect(text).toContain('rt-123...cret')
-    expect(text).not.toContain('pw-1234567890-secret')
     expect(text).not.toContain('at-1234567890-secret')
     expect(text).not.toContain('rt-1234567890-secret')
   })
 
-  it('reveals only clicked cell when show is pressed', async () => {
+  it('reveals only clicked token cell when show is pressed', async () => {
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
       global: { stubs: { StatCard: StatCardStub } }
@@ -270,14 +266,13 @@ describe('CodexRegistrationCard', () => {
     await flushPromises()
 
     const showButtons = wrapper.findAll('button').filter((btn) => btn.text() === '显示')
-    expect(showButtons.length).toBe(3)
+    expect(showButtons.length).toBe(2)
 
     await showButtons[0].trigger('click')
     await flushPromises()
 
     const text = wrapper.text()
-    expect(text).toContain('pw-1234567890-secret')
-    expect(text).toContain('at-123...cret')
+    expect(text).toContain('at-1234567890-secret')
     expect(text).toContain('rt-123...cret')
   })
 

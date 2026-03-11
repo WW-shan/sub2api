@@ -223,6 +223,51 @@ def get_env(name: str, default=None, required: bool = False) -> str:
     return value or ""
 
 
+def workspace_plan_type(workspace: JSONDict) -> str:
+    candidates = [
+        workspace.get("plan_type"),
+        workspace.get("planType"),
+        workspace.get("workspace_plan_type"),
+        workspace.get("subscription_plan"),
+        workspace.get("plan"),
+    ]
+    for item in candidates:
+        value = str(item or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
+def workspace_organization_id(workspace: JSONDict) -> str:
+    candidates = [
+        workspace.get("organization_id"),
+        workspace.get("organizationId"),
+        workspace.get("org_id"),
+        workspace.get("id"),
+    ]
+    for item in candidates:
+        value = str(item or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def select_parent_workspace(workspaces: List[JSONDict], preferred_workspace_id: str) -> JSONDict:
+    preferred_id = str(preferred_workspace_id or "").strip()
+    if preferred_id:
+        for workspace in workspaces:
+            workspace_id = str((workspace or {}).get("id") or "").strip()
+            if workspace_id == preferred_id:
+                return workspace
+
+    for workspace in workspaces:
+        plan_type = workspace_plan_type(workspace)
+        if plan_type in VALID_PARENT_PLAN_TYPES:
+            return workspace
+
+    return workspaces[0] if workspaces else {}
+
+
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -636,7 +681,9 @@ def run(proxy: Optional[str]) -> Optional[str]:
         if not workspaces:
             print("[Error] 授权 Cookie 里没有 workspace 信息")
             return None
-        workspace_id = str((workspaces[0] or {}).get("id") or "").strip()
+        preferred_workspace_id = get_env("CODEX_PARENT_WORKSPACE_ID", "").strip()
+        selected_workspace = select_parent_workspace(workspaces, preferred_workspace_id)
+        workspace_id = str((selected_workspace or {}).get("id") or "").strip()
         if not workspace_id:
             print("[Error] 无法解析 workspace_id")
             return None
@@ -679,7 +726,14 @@ def run(proxy: Optional[str]) -> Optional[str]:
                 )
                 try:
                     token_payload = ensure_dict(token_json)
-                    token_payload["password"] = password
+                    selected_plan_type = workspace_plan_type(selected_workspace)
+                    selected_organization_id = workspace_organization_id(selected_workspace)
+                    if selected_plan_type:
+                        token_payload["plan_type"] = selected_plan_type
+                        token_payload["codex_parent_plan_type"] = selected_plan_type
+                    if selected_organization_id:
+                        token_payload["organization_id"] = selected_organization_id
+                        token_payload["codex_parent_organization_id"] = selected_organization_id
                     session_access_token = fetch_session_access_token(session)
                     if session_access_token:
                         token_payload["session_access_token"] = session_access_token
@@ -766,7 +820,7 @@ def list_codex_register_accounts() -> List[JSONDict]:
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT id, email, password, refresh_token, access_token, account_id, source, created_at, updated_at "
+            "SELECT id, email, refresh_token, access_token, account_id, source, created_at, updated_at "
             "FROM codex_register_accounts WHERE source = 'codex-register' ORDER BY created_at DESC"
         )
         rows = cur.fetchall()
@@ -776,13 +830,12 @@ def list_codex_register_accounts() -> List[JSONDict]:
                 {
                     "id": row[0],
                     "email": row[1],
-                    "password": row[2],
-                    "refresh_token": row[3],
-                    "access_token": row[4],
-                    "account_id": row[5],
-                    "source": row[6],
-                    "created_at": row[7].isoformat() + "Z" if row[7] is not None else None,
-                    "updated_at": row[8].isoformat() + "Z" if row[8] is not None else None,
+                    "refresh_token": row[2],
+                    "access_token": row[3],
+                    "account_id": row[4],
+                    "source": row[5],
+                    "created_at": row[6].isoformat() + "Z" if row[6] is not None else None,
+                    "updated_at": row[7].isoformat() + "Z" if row[7] is not None else None,
                 }
             )
         return records
@@ -963,6 +1016,16 @@ def build_credentials(existing: JSONDict, token_info: JSONDict) -> JSONDict:
         credentials["chatgpt_account_id"] = token_info.get("account_id")
     if token_info.get("expired") is not None:
         credentials["expires_at"] = token_info.get("expired")
+
+    plan_type = str(token_info.get("plan_type") or token_info.get("codex_parent_plan_type") or "").strip().lower()
+    organization_id = str(token_info.get("organization_id") or token_info.get("codex_parent_organization_id") or "").strip()
+    if plan_type:
+        credentials["plan_type"] = plan_type
+        credentials["codex_parent_plan_type"] = plan_type
+    if organization_id:
+        credentials["organization_id"] = organization_id
+        credentials["codex_parent_organization_id"] = organization_id
+
     credentials["source"] = "codex-auto-register"
     credentials["model_mapping"] = build_model_mapping()
     if token_info.get("auth_file"):
@@ -974,6 +1037,16 @@ def build_extra(existing: JSONDict, token_info: JSONDict) -> JSONDict:
     extra = dict(existing)
     extra["codex_auto_register"] = True
     extra["codex_auto_register_model_mapping"] = build_model_mapping()
+
+    plan_type = str(token_info.get("plan_type") or token_info.get("codex_parent_plan_type") or "").strip().lower()
+    organization_id = str(token_info.get("organization_id") or token_info.get("codex_parent_organization_id") or "").strip()
+    if plan_type:
+        extra["plan_type"] = plan_type
+        extra["codex_parent_plan_type"] = plan_type
+    if organization_id:
+        extra["organization_id"] = organization_id
+        extra["codex_parent_organization_id"] = organization_id
+
     if token_info.get("auth_file"):
         extra["codex_auth_file"] = token_info.get("auth_file")
     return extra

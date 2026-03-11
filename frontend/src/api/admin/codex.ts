@@ -25,7 +25,6 @@ export interface CodexLogEntry {
 export interface CodexRegisterAccount {
   id: number
   email: string
-  password: string
   refresh_token: string
   access_token: string
   account_id: string | null
