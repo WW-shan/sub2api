@@ -1298,6 +1298,25 @@ def _build_workflow_id() -> str:
     return f"wf-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
 
 
+def register_child_once(
+    tokens_dir: Path,
+    *,
+    email: str,
+    password: str,
+    preferred_workspace_id: str,
+) -> Tuple[bool, JSONDict]:
+    batches = run_codex_once(
+        tokens_dir,
+        preferred_workspace_id=preferred_workspace_id,
+        fixed_email=email,
+        fixed_password=password,
+    )
+    if not batches:
+        return False, {}
+    _source_file, token_infos = batches[0]
+    return True, ensure_dict(token_infos[0] if token_infos else {})
+
+
 def run_one_cycle(
     tokens_dir: Path,
     *,
