@@ -1824,6 +1824,8 @@ def verify_child_business_plan_via_session_exchange(
     if plan_type not in VALID_PARENT_PLAN_TYPES:
         return False, "child_plan_not_business"
 
+    token_info["plan_type"] = plan_type
+    token_info["codex_parent_plan_type"] = plan_type
     return True, ""
 
 
@@ -2100,34 +2102,17 @@ def run_single_child_round(
         append_log("warn", f"workflow_round_stopped:workflow_id={workflow_token}:reason={reason}")
         return False, reason
 
-    success, reason = run_one_cycle(
-        tokens_dir,
-        write_to_accounts=False,
-        register_role="child",
-        preferred_workspace_id=preferred_workspace_id,
-    )
-    append_log(
-        "info",
-        f"workflow_round_child_cycle_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:success={success}:reason={reason}",
-    )
-    if not success:
-        return False, reason
+    email, _dev_token, password = get_email_and_token()
+    email = str(email or "").strip().lower()
+    password = str(password or "").strip()
+    if not email:
+        email = str(last_token_email or "").strip().lower()
+    if not email:
+        email = f"child-{secrets.token_hex(4)}@example.com"
+    if not password:
+        password = secrets.token_urlsafe(18)
 
-    with status_lock:
-        processed_records = int(last_processed_records or 0)
-    if processed_records < 1:
-        return False, "child_round_no_records"
-
-    target_email = str(last_token_email or "").strip().lower()
-    if not target_email:
-        return False, "child_round_target_email_missing"
-
-    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_ACCEPT_AND_SWITCH):
-        reason = f"transition_rejected:{PHASE_RUNNING_ACCEPT_AND_SWITCH}:round={round_index}"
-        append_log("warn", f"workflow_round_stopped:workflow_id={workflow_token}:reason={reason}")
-        return False, reason
-
-    invited, invite_reason = invite_recent_children(parent_record, expected_count=1, target_email=target_email)
+    invited, invite_reason = invite_recent_children(parent_record, expected_count=1, target_email=email)
     append_log(
         "info",
         f"workflow_round_invite_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:invited={invited}:reason={invite_reason}",
@@ -2135,20 +2120,77 @@ def run_single_child_round(
     if not invited:
         return False, invite_reason
 
-    accepted, accept_reason = validate_recent_child_records(parent_record, expected_count=1, target_email=target_email)
+    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_ACCEPT_AND_SWITCH):
+        reason = f"transition_rejected:{PHASE_RUNNING_ACCEPT_AND_SWITCH}:round={round_index}"
+        append_log("warn", f"workflow_round_stopped:workflow_id={workflow_token}:reason={reason}")
+        return False, reason
+
+    registered, token_info = register_child_once(
+        tokens_dir,
+        email=email,
+        password=password,
+        preferred_workspace_id=preferred_workspace_id,
+    )
+    register_reason = "" if registered else "child_register_failed"
     append_log(
         "info",
-        f"workflow_round_acceptance_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:accepted={accepted}:reason={accept_reason}",
+        f"workflow_round_child_cycle_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:success={registered}:reason={register_reason}",
     )
-    if not accepted:
-        return False, accept_reason
+    if not registered:
+        return False, "child_register_failed"
 
     if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_VERIFY_AND_BIND):
         reason = f"transition_rejected:{PHASE_RUNNING_VERIFY_AND_BIND}:round={round_index}"
         append_log("warn", f"workflow_round_stopped:workflow_id={workflow_token}:reason={reason}")
         return False, reason
 
-    promoted, promote_reason = promote_recent_child_records_to_pool(parent_record, expected_count=1, target_email=target_email)
+    token_info = ensure_dict(token_info)
+    token_info["email"] = token_info.get("email") or email
+    token_info["codex_register_role"] = "child"
+    token_info["workspace_id"] = token_info.get("workspace_id") or preferred_workspace_id
+    token_info["organization_id"] = token_info.get("organization_id") or parent_record.get("organization_id")
+
+    verified, verify_reason = verify_child_business_plan_via_session_exchange(
+        token_info,
+        workspace_id=preferred_workspace_id,
+        parent_account_id=str(parent_record.get("account_id") or "").strip(),
+    )
+    append_log(
+        "info",
+        f"validate_child_session_exchange_result:email={token_info.get('email')}:account_id={token_info.get('account_id')}:verified={verified}:reason={verify_reason}",
+    )
+    accepted = verified
+    accept_reason = verify_reason
+    append_log(
+        "info",
+        f"workflow_round_acceptance_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:accepted={accepted}:reason={accept_reason}",
+    )
+    if not verified:
+        return False, verify_reason
+
+    try:
+        conn = create_db_connection()
+        cur = conn.cursor()
+    except Exception as exc:  # noqa: BLE001
+        append_log("error", f"child_register_persist_failed:{exc}")
+        return False, "child_register_persist_failed"
+
+    try:
+        upsert_codex_register_account(cur, token_info)
+    except Exception as exc:  # noqa: BLE001
+        append_log("error", f"child_register_persist_failed:{exc}")
+        return False, "child_register_persist_failed"
+    finally:
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    promoted, promote_reason = promote_recent_child_records_to_pool(parent_record, expected_count=1, target_email=email)
     append_log(
         "info",
         f"workflow_round_promote_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:promoted={promoted}:reason={promote_reason}",
