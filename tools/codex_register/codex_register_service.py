@@ -54,6 +54,7 @@ active_workflow_thread = None
 active_workflow_cancel_event = threading.Event()
 status_lock = threading.Lock()
 JSONDict = Dict[str, Any]
+_child_round_state: Dict[str, JSONDict] = {}
 STATUS_LOG_TAIL_LIMIT = 50
 LOGS_ENDPOINT_DEFAULT_LIMIT = 200
 LOGS_ENDPOINT_MAX_LIMIT = 1000
@@ -357,11 +358,35 @@ DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
 DEFAULT_SCOPE = "openid email profile offline_access"
 
 
-def _worker_headers(worker_token: str) -> Dict[str, Any]:
-    return {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {worker_token}",
+def _get_child_round_state(workflow_token: str, round_index: int) -> JSONDict:
+    return _child_round_state.get(f"{workflow_token}:{round_index}", {})
+
+
+def _set_child_round_state(workflow_token: str, round_index: int, payload: JSONDict) -> None:
+    _child_round_state[f"{workflow_token}:{round_index}"] = dict(payload)
+
+
+def _get_or_create_child_identity(workflow_token: str, round_index: int) -> JSONDict:
+    state = ensure_dict(_get_child_round_state(workflow_token, round_index))
+    if state.get("email") and state.get("password"):
+        return state
+
+    email, _dev_token, password = get_email_and_token()
+    email = str(email or "").strip().lower()
+    password = str(password or "").strip()
+    if not email:
+        email = str(last_token_email or "").strip().lower()
+    if not email:
+        email = f"child-{secrets.token_hex(4)}@example.com"
+    if not password:
+        password = secrets.token_urlsafe(18)
+
+    identity = {
+        "email": email,
+        "password": password,
     }
+    _set_child_round_state(workflow_token, round_index, identity)
+    return identity
 
 
 def get_email_and_token(proxies: Any = None) -> tuple[str, str, str]:
@@ -2101,15 +2126,9 @@ def run_single_child_round(
         append_log("warn", f"workflow_round_stopped:workflow_id={workflow_token}:reason={reason}")
         return False, reason
 
-    email, _dev_token, password = get_email_and_token()
-    email = str(email or "").strip().lower()
-    password = str(password or "").strip()
-    if not email:
-        email = str(last_token_email or "").strip().lower()
-    if not email:
-        email = f"child-{secrets.token_hex(4)}@example.com"
-    if not password:
-        password = secrets.token_urlsafe(18)
+    identity = _get_or_create_child_identity(workflow_token, round_index)
+    email = str(identity.get("email") or "").strip().lower()
+    password = str(identity.get("password") or "").strip()
 
     invited, invite_reason = invite_recent_children(parent_record, expected_count=1, target_email=email)
     append_log(

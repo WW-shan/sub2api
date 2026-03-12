@@ -533,6 +533,16 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(reason, "child_plan_not_business")
         upsert.assert_not_called()
 
+    def test_child_round_reuses_identity_on_retry(self):
+        state = {"email": "child@example.com", "password": "pw", "invite_ok": True}
+        with mock.patch.object(service, "_get_child_round_state", return_value=state), mock.patch.object(
+            service, "_set_child_round_state"
+        ) as set_state:
+            identity = service._get_or_create_child_identity("wf-test", 1)
+
+        self.assertEqual(identity["email"], "child@example.com")
+        set_state.assert_not_called()
+
     def test_run_workflow_once_resume_blocks_when_parent_switch_verification_fails(self):
         service.workflow_id = 'wf-resume'
         service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
