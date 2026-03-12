@@ -504,6 +504,35 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(reason, "invite_failed")
         register_child.assert_not_called()
 
+    def test_run_single_child_round_skips_persist_when_verify_fails(self):
+        service.workflow_id = "wf-test"
+        service.active_workflow_cancel_event.clear()
+        parent = {
+            "account_id": "parent-1",
+            "access_token": "parent-token",
+            "workspace_id": "ws-1",
+            "organization_id": "org-1",
+            "plan_type": "business",
+        }
+        token_info = {
+            "email": "child@example.com",
+            "account_id": "child-1",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+        }
+        with mock.patch.object(service, "invite_recent_children", return_value=(True, "")), mock.patch.object(
+            service, "register_child_once", return_value=(True, token_info)
+        ), mock.patch.object(service, "verify_child_business_plan_via_session_exchange", return_value=(False, "child_plan_not_business")), mock.patch.object(
+            service, "upsert_codex_register_account"
+        ) as upsert, mock.patch.object(service, "_transition_workflow_phase", return_value=True):
+            ok, reason = service.run_single_child_round(
+                "wf-test", parent, tokens_dir=Path("/tmp"), round_index=1, total_rounds=1
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "child_plan_not_business")
+        upsert.assert_not_called()
+
     def test_run_workflow_once_resume_blocks_when_parent_switch_verification_fails(self):
         service.workflow_id = 'wf-resume'
         service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
