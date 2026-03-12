@@ -1824,8 +1824,6 @@ def verify_child_business_plan_via_session_exchange(
     if plan_type not in VALID_PARENT_PLAN_TYPES:
         return False, "child_plan_not_business"
 
-    token_info["plan_type"] = plan_type
-    token_info["codex_parent_plan_type"] = plan_type
     return True, ""
 
 

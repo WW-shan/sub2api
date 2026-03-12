@@ -409,6 +409,80 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         )
         self.assertEqual(reason_missing_token, 'parent_access_token_missing')
 
+    def test_run_workflow_once_resume_invokes_real_invite_step(self):
+        service.workflow_id = 'wf-resume'
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+
+        parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token',
+            'workspace_id': 'ws-1',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+        }
+
+        round_counter = {'value': 0}
+
+        def _get_email_and_token(*_args, **_kwargs):
+            round_counter['value'] += 1
+            return f"child{round_counter['value']}@example.com", "worker", "pw"
+
+        def _register_child_once(_tokens_dir, *, email, password, preferred_workspace_id):
+            return (
+                True,
+                {
+                    'email': email,
+                    'account_id': f"child-{round_counter['value']}",
+                    'access_token': 'child-access-token',
+                    'refresh_token': 'child-refresh-token',
+                    'workspace_id': preferred_workspace_id,
+                    'organization_id': parent_record['organization_id'],
+                },
+            )
+
+        with mock.patch.object(service, 'get_latest_parent_record', return_value=parent_record), mock.patch.object(
+            service, 'evaluate_resume_gate', return_value=''
+        ), mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(True, '')
+        ) as verify_parent_switch, mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(True, '')
+        ) as promote_parent, mock.patch.object(
+            service, 'get_email_and_token', side_effect=_get_email_and_token
+        ), mock.patch.object(
+            service, 'register_child_once', side_effect=_register_child_once
+        ) as register_child_once, mock.patch.object(
+            service, 'verify_child_business_plan_via_session_exchange', return_value=(True, '')
+        ), mock.patch.object(
+            service, 'create_db_connection', return_value=_FakeConn([])
+        ), mock.patch.object(
+            service, 'invite_recent_children', return_value=(True, '')
+        ) as invite_recent_children, mock.patch.object(
+            service, 'promote_recent_child_records_to_pool', return_value=(True, '')
+        ) as promote_recent_child_records_to_pool, mock.patch.object(
+            service, '_finalize_workflow_once'
+        ) as finalize:
+            service._run_workflow_once('wf-resume', 'resume')
+
+        verify_parent_switch.assert_called_once_with(parent_record)
+        promote_parent.assert_called_once_with(parent_record)
+        self.assertEqual(register_child_once.call_count, 5)
+        self.assertEqual(invite_recent_children.call_count, 5)
+        self.assertEqual(promote_recent_child_records_to_pool.call_count, 5)
+
+        invite_targets = [call.kwargs.get('target_email') for call in invite_recent_children.call_args_list]
+        expected_targets = [
+            'child1@example.com',
+            'child2@example.com',
+            'child3@example.com',
+            'child4@example.com',
+            'child5@example.com',
+        ]
+        self.assertEqual(invite_targets, expected_targets)
+
+        finalize.assert_called_once_with('wf-resume', success=True, reason='')
+
     def test_run_single_child_round_stops_when_invite_fails(self):
         service.workflow_id = "wf-test"
         service.active_workflow_cancel_event.clear()
