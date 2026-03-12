@@ -54,6 +54,7 @@ active_workflow_thread = None
 active_workflow_cancel_event = threading.Event()
 status_lock = threading.Lock()
 JSONDict = Dict[str, Any]
+_child_round_state: Dict[str, JSONDict] = {}
 STATUS_LOG_TAIL_LIMIT = 50
 LOGS_ENDPOINT_DEFAULT_LIMIT = 200
 LOGS_ENDPOINT_MAX_LIMIT = 1000
@@ -357,6 +358,47 @@ DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
 DEFAULT_SCOPE = "openid email profile offline_access"
 
 
+def _get_child_round_state(workflow_token: str, round_index: int) -> JSONDict:
+    return _child_round_state.get(f"{workflow_token}:{round_index}", {})
+
+
+def _set_child_round_state(workflow_token: str, round_index: int, payload: JSONDict) -> None:
+    _child_round_state[f"{workflow_token}:{round_index}"] = dict(payload)
+
+
+def _clear_child_round_state(workflow_token: Optional[str] = None) -> None:
+    if not workflow_token:
+        _child_round_state.clear()
+        return
+    prefix = f"{workflow_token}:"
+    for key in list(_child_round_state.keys()):
+        if key.startswith(prefix):
+            del _child_round_state[key]
+
+
+def _get_or_create_child_identity(workflow_token: str, round_index: int) -> JSONDict:
+    state = ensure_dict(_get_child_round_state(workflow_token, round_index))
+    if state.get("email") and state.get("password"):
+        return state
+
+    email, _dev_token, password = get_email_and_token()
+    email = str(email or "").strip().lower()
+    password = str(password or "").strip()
+    if not email:
+        email = str(last_token_email or "").strip().lower()
+    if not email:
+        email = f"child-{secrets.token_hex(4)}@example.com"
+    if not password:
+        password = secrets.token_urlsafe(18)
+
+    identity = {
+        "email": email,
+        "password": password,
+    }
+    _set_child_round_state(workflow_token, round_index, identity)
+    return identity
+
+
 def _worker_headers(worker_token: str) -> Dict[str, Any]:
     return {
         "Accept": "application/json",
@@ -366,11 +408,16 @@ def _worker_headers(worker_token: str) -> Dict[str, Any]:
 
 def get_email_and_token(proxies: Any = None) -> tuple[str, str, str]:
     del proxies
+    fixed_email = get_env("CODEX_FIXED_EMAIL", "").strip()
+    fixed_password = get_env("CODEX_FIXED_PASSWORD", "").strip()
+    if fixed_email:
+        password = fixed_password or secrets.token_urlsafe(18)
+        return fixed_email, "worker", password
     try:
         domain = get_env("CODEX_MAIL_DOMAIN", required=True).strip().lower()
         local = f"oc{secrets.token_hex(5)}"
         email = f"{local}@{domain}"
-        password = secrets.token_urlsafe(18)
+        password = fixed_password or secrets.token_urlsafe(18)
         return email, "worker", password
     except Exception as exc:
         print(f"[Error] 生成自定义域名邮箱失败: {exc}")
@@ -976,7 +1023,13 @@ def compute_group_binding_changes(current_group_ids: Set[int], next_group_ids: S
     return next_group_ids - current_group_ids, current_group_ids - next_group_ids
 
 
-def run_codex_once(tokens_dir: Path, *, preferred_workspace_id: str = "") -> List[Tuple[Path, List[JSONDict]]]:
+def run_codex_once(
+    tokens_dir: Path,
+    *,
+    preferred_workspace_id: str = "",
+    fixed_email: str = "",
+    fixed_password: str = "",
+) -> List[Tuple[Path, List[JSONDict]]]:
     service_file = Path(__file__).resolve()
     tokens_dir.mkdir(parents=True, exist_ok=True)
 
@@ -990,6 +1043,13 @@ def run_codex_once(tokens_dir: Path, *, preferred_workspace_id: str = "") -> Lis
     workspace_override = str(preferred_workspace_id or "").strip()
     if workspace_override:
         env["CODEX_PARENT_WORKSPACE_ID"] = workspace_override
+
+    fixed_email_value = str(fixed_email or "").strip()
+    if fixed_email_value:
+        env["CODEX_FIXED_EMAIL"] = fixed_email_value
+    fixed_password_value = str(fixed_password or "").strip()
+    if fixed_password_value:
+        env["CODEX_FIXED_PASSWORD"] = fixed_password_value
 
     print("[codex-register] 启动注册脚本:", " ".join(cmd), flush=True)
 
@@ -1494,6 +1554,7 @@ def _begin_workflow_locked(*, allow_resume: bool) -> Optional[threading.Thread]:
         next_phase = PHASE_RUNNING_CREATE_PARENT
 
     workflow_id = _build_workflow_id()
+    _clear_child_round_state(workflow_id)
     _set_phase_locked(next_phase)
     waiting_reason = ""
     last_resume_gate_reason = ""
@@ -1538,6 +1599,8 @@ def _finalize_workflow_once(workflow_token: str, *, success: bool, reason: str =
         if workflow_id != workflow_token:
             _refresh_workflow_thread_locked()
             return
+
+        _clear_child_round_state(workflow_token)
 
         if job_phase == PHASE_ABANDONED:
             enabled = False
@@ -1609,23 +1672,16 @@ def invite_recent_children(
         f"invite_recent_children_started:expected_count={expected_count}:workspace_id={workspace_id_value}:organization_id={organization_id}:plan_type={plan_type}",
     )
 
-    conn = create_db_connection()
-    cur = conn.cursor()
+    normalized_target_email = str(target_email or "").strip().lower()
+    conn = None
+    cur = None
     invited = 0
     try:
-        normalized_target_email = str(target_email or "").strip().lower()
         if normalized_target_email:
-            cur.execute(
-                "SELECT DISTINCT email FROM codex_register_accounts "
-                "WHERE source = 'codex-register' AND codex_register_role = 'child' "
-                "AND workspace_id = %s AND organization_id = %s AND plan_type = %s "
-                "AND LOWER(email) = %s "
-                "AND COALESCE(email, '') <> '' "
-                "AND created_at >= NOW() - INTERVAL '30 minutes' "
-                "ORDER BY created_at DESC LIMIT 1",
-                (workspace_id_value, organization_id, plan_type, normalized_target_email),
-            )
+            rows = [(normalized_target_email,)]
         else:
+            conn = create_db_connection()
+            cur = conn.cursor()
             cur.execute(
                 "SELECT DISTINCT email FROM codex_register_accounts "
                 "WHERE source = 'codex-register' AND codex_register_role = 'child' "
@@ -1635,7 +1691,7 @@ def invite_recent_children(
                 "ORDER BY created_at DESC LIMIT %s",
                 (workspace_id_value, organization_id, plan_type, max(1, int(expected_count or 1))),
             )
-        rows = cur.fetchall() or []
+            rows = cur.fetchall() or []
         append_log("info", f"invite_recent_children_targets:{len(rows)}")
         if not rows:
             return False, "child_invite_targets_missing"
@@ -1643,10 +1699,7 @@ def invite_recent_children(
         base_url = str(get_env("CODEX_CHATGPT_BASE_URL", "https://chatgpt.com") or "https://chatgpt.com").rstrip("/")
         invite_url = f"{base_url}/backend-api/accounts/{parent_account_id}/invites"
 
-        for row in rows:
-            child_email = str((row or [""])[0] or "").strip()
-            if not child_email:
-                continue
+        def _invite_once(child_email: str) -> bool:
             payload = json.dumps({"email": child_email}).encode("utf-8")
             req = urllib.request.Request(
                 invite_url,
@@ -1663,14 +1716,30 @@ def invite_recent_children(
                 with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
                     status = int(getattr(resp, "status", 0) or 0)
                 append_log("info", f"invite_child:{child_email}:{status}")
-                if status in {200, 201, 202, 204, 409}:
-                    invited += 1
+                return status in {200, 201, 202, 204, 409}
             except urllib.error.HTTPError as exc:
                 append_log("warn", f"invite_child_http_error:{child_email}:{exc.code}")
                 if int(getattr(exc, "code", 0) or 0) == 409:
-                    invited += 1
+                    try:
+                        body = exc.read().decode("utf-8", "replace")
+                    except Exception:  # noqa: BLE001
+                        body = ""
+                    if "already" in body.lower():
+                        return True
+                return False
             except Exception as exc:  # noqa: BLE001
                 append_log("warn", f"invite_child_request_failed:{child_email}:{exc}")
+                return False
+
+        for row in rows:
+            child_email = str((row or [""])[0] or "").strip()
+            if not child_email:
+                continue
+            ok = _invite_once(child_email)
+            if not ok:
+                ok = _invite_once(child_email)
+            if ok:
+                invited += 1
 
         append_log("info", f"invite_recent_children_completed:invited={invited}:expected={max(1, int(expected_count or 1))}")
         if invited < max(1, int(expected_count or 1)):
@@ -1680,14 +1749,16 @@ def invite_recent_children(
         append_log("error", f"invite_recent_children_failed:{exc}")
         return False, "child_invite_failed"
     finally:
-        try:
-            cur.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def verify_child_business_plan_via_session_exchange(
@@ -1798,6 +1869,7 @@ def verify_child_business_plan_via_session_exchange(
     if plan_type not in VALID_PARENT_PLAN_TYPES:
         return False, "child_plan_not_business"
 
+    token_info["plan_type"] = plan_type
     return True, ""
 
 
@@ -2136,34 +2208,11 @@ def run_single_child_round(
         append_log("warn", f"workflow_round_stopped:workflow_id={workflow_token}:reason={reason}")
         return False, reason
 
-    success, reason = run_one_cycle(
-        tokens_dir,
-        write_to_accounts=False,
-        register_role="child",
-        preferred_workspace_id=preferred_workspace_id,
-    )
-    append_log(
-        "info",
-        f"workflow_round_child_cycle_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:success={success}:reason={reason}",
-    )
-    if not success:
-        return False, reason
+    identity = _get_or_create_child_identity(workflow_token, round_index)
+    email = str(identity.get("email") or "").strip().lower()
+    password = str(identity.get("password") or "").strip()
 
-    with status_lock:
-        processed_records = int(last_processed_records or 0)
-    if processed_records < 1:
-        return False, "child_round_no_records"
-
-    target_email = str(last_token_email or "").strip().lower()
-    if not target_email:
-        return False, "child_round_target_email_missing"
-
-    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_ACCEPT_AND_SWITCH):
-        reason = f"transition_rejected:{PHASE_RUNNING_ACCEPT_AND_SWITCH}:round={round_index}"
-        append_log("warn", f"workflow_round_stopped:workflow_id={workflow_token}:reason={reason}")
-        return False, reason
-
-    invited, invite_reason = invite_recent_children(parent_record, expected_count=1, target_email=target_email)
+    invited, invite_reason = invite_recent_children(parent_record, expected_count=1, target_email=email)
     append_log(
         "info",
         f"workflow_round_invite_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:invited={invited}:reason={invite_reason}",
@@ -2171,20 +2220,80 @@ def run_single_child_round(
     if not invited:
         return False, invite_reason
 
-    accepted, accept_reason = validate_recent_child_records(parent_record, expected_count=1, target_email=target_email)
+    if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_ACCEPT_AND_SWITCH):
+        reason = f"transition_rejected:{PHASE_RUNNING_ACCEPT_AND_SWITCH}:round={round_index}"
+        append_log("warn", f"workflow_round_stopped:workflow_id={workflow_token}:reason={reason}")
+        return False, reason
+
+    registered, token_info = register_child_once(
+        tokens_dir,
+        email=email,
+        password=password,
+        preferred_workspace_id=preferred_workspace_id,
+    )
+    register_reason = "" if registered else "child_register_failed"
     append_log(
         "info",
-        f"workflow_round_acceptance_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:accepted={accepted}:reason={accept_reason}",
+        f"workflow_round_child_cycle_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:success={registered}:reason={register_reason}",
     )
-    if not accepted:
-        return False, accept_reason
+    if not registered:
+        return False, "child_register_failed"
 
     if not _transition_workflow_phase(workflow_token, PHASE_RUNNING_VERIFY_AND_BIND):
         reason = f"transition_rejected:{PHASE_RUNNING_VERIFY_AND_BIND}:round={round_index}"
         append_log("warn", f"workflow_round_stopped:workflow_id={workflow_token}:reason={reason}")
         return False, reason
 
-    promoted, promote_reason = promote_recent_child_records_to_pool(parent_record, expected_count=1, target_email=target_email)
+    token_info = ensure_dict(token_info)
+    token_info["email"] = token_info.get("email") or email
+    token_info["codex_register_role"] = "child"
+    token_info["workspace_id"] = token_info.get("workspace_id") or preferred_workspace_id
+    token_info["organization_id"] = token_info.get("organization_id") or parent_record.get("organization_id")
+
+    verified, verify_reason = verify_child_business_plan_via_session_exchange(
+        token_info,
+        workspace_id=preferred_workspace_id,
+        parent_account_id=str(parent_record.get("account_id") or "").strip(),
+    )
+    append_log(
+        "info",
+        f"validate_child_session_exchange_result:email={token_info.get('email')}:account_id={token_info.get('account_id')}:verified={verified}:reason={verify_reason}",
+    )
+    accepted = verified
+    accept_reason = verify_reason
+    append_log(
+        "info",
+        f"workflow_round_acceptance_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:accepted={accepted}:reason={accept_reason}",
+    )
+    if not verified:
+        return False, verify_reason
+
+    if not token_info.get("plan_type"):
+        token_info["plan_type"] = str(parent_record.get("plan_type") or "").strip().lower() or None
+
+    try:
+        conn = create_db_connection()
+        cur = conn.cursor()
+    except Exception as exc:  # noqa: BLE001
+        append_log("error", f"child_register_persist_failed:{exc}")
+        return False, "child_register_persist_failed"
+
+    try:
+        upsert_codex_register_account(cur, token_info)
+    except Exception as exc:  # noqa: BLE001
+        append_log("error", f"child_register_persist_failed:{exc}")
+        return False, "child_register_persist_failed"
+    finally:
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    promoted, promote_reason = promote_recent_child_records_to_pool(parent_record, expected_count=1, target_email=email)
     append_log(
         "info",
         f"workflow_round_promote_result:workflow_id={workflow_token}:round={round_index}/{total_rounds}:promoted={promoted}:reason={promote_reason}",
