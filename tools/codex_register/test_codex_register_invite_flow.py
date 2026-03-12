@@ -97,6 +97,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         service.active_workflow_thread = None
         service.active_workflow_cancel_event.clear()
         service.tokens_dir_global = Path('/tmp')
+        service._child_round_state.clear()
 
     def test_get_email_and_token_prefers_fixed_env(self):
         with mock.patch.dict(
@@ -542,6 +543,21 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
 
         self.assertEqual(identity["email"], "child@example.com")
         set_state.assert_not_called()
+
+    def test_finalize_workflow_clears_child_round_state_for_token(self):
+        service.workflow_id = "wf-clear"
+        service.job_phase = service.PHASE_RUNNING_CREATE_PARENT
+        service._child_round_state.update(
+            {
+                "wf-clear:1": {"email": "child@example.com"},
+                "wf-other:2": {"email": "other@example.com"},
+            }
+        )
+
+        service._finalize_workflow_once("wf-clear", success=True, reason="")
+
+        self.assertNotIn("wf-clear:1", service._child_round_state)
+        self.assertIn("wf-other:2", service._child_round_state)
 
     def test_run_workflow_once_resume_blocks_when_parent_switch_verification_fails(self):
         service.workflow_id = 'wf-resume'

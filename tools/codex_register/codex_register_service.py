@@ -366,6 +366,14 @@ def _set_child_round_state(workflow_token: str, round_index: int, payload: JSOND
     _child_round_state[f"{workflow_token}:{round_index}"] = dict(payload)
 
 
+def _clear_child_round_state(workflow_token: Optional[str] = None) -> None:
+    if not workflow_token:
+        _child_round_state.clear()
+        return
+    prefix = f"{workflow_token}:"
+    for key in list(_child_round_state.keys()):
+        if key.startswith(prefix):
+            del _child_round_state[key]
 def _get_or_create_child_identity(workflow_token: str, round_index: int) -> JSONDict:
     state = ensure_dict(_get_child_round_state(workflow_token, round_index))
     if state.get("email") and state.get("password"):
@@ -1544,8 +1552,8 @@ def _begin_workflow_locked(*, allow_resume: bool) -> Optional[threading.Thread]:
         next_phase = PHASE_RUNNING_CREATE_PARENT
 
     workflow_id = _build_workflow_id()
+    _clear_child_round_state(workflow_id)
     _set_phase_locked(next_phase)
-    waiting_reason = ""
     last_resume_gate_reason = ""
     active_workflow_cancel_event.clear()
     enabled = True
@@ -1588,6 +1596,8 @@ def _finalize_workflow_once(workflow_token: str, *, success: bool, reason: str =
         if workflow_id != workflow_token:
             _refresh_workflow_thread_locked()
             return
+
+        _clear_child_round_state(workflow_token)
 
         if job_phase == PHASE_ABANDONED:
             enabled = False
