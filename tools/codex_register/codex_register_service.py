@@ -1554,6 +1554,7 @@ def _begin_workflow_locked(*, allow_resume: bool) -> Optional[threading.Thread]:
     workflow_id = _build_workflow_id()
     _clear_child_round_state(workflow_id)
     _set_phase_locked(next_phase)
+    waiting_reason = ""
     last_resume_gate_reason = ""
     active_workflow_cancel_event.clear()
     enabled = True
