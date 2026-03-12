@@ -374,6 +374,8 @@ def _clear_child_round_state(workflow_token: Optional[str] = None) -> None:
     for key in list(_child_round_state.keys()):
         if key.startswith(prefix):
             del _child_round_state[key]
+
+
 def _get_or_create_child_identity(workflow_token: str, round_index: int) -> JSONDict:
     state = ensure_dict(_get_child_round_state(workflow_token, round_index))
     if state.get("email") and state.get("password"):
