@@ -590,44 +590,25 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             'refresh_token': 'parent-refresh-token',
         }
 
-        invite_results = [(True, ''), (True, ''), (False, 'child_invite_incomplete')]
-
-        round_counter = {'value': 0}
-
-        def _run_one_cycle(*args, **kwargs):
-            round_counter['value'] += 1
-            service.last_processed_records = 1
-            service.last_token_email = f"child{round_counter['value']}@example.com"
-            return True, ''
-
         with mock.patch.object(service, 'get_latest_parent_record', return_value=parent_record), mock.patch.object(
             service, 'evaluate_resume_gate', return_value=''
         ), mock.patch.object(
             service, 'verify_parent_business_context_after_resume', return_value=(True, '')
         ), mock.patch.object(
             service, 'promote_parent_record_to_pool', return_value=(True, '')
-        ), mock.patch.object(
-            service, 'run_one_cycle', side_effect=_run_one_cycle
-        ) as run_one_cycle, mock.patch.object(
-            service, 'invite_recent_children', side_effect=invite_results
-        ) as invite_recent_children, mock.patch.object(
-            service, 'validate_recent_child_records', return_value=(True, '')
-        ) as validate_recent_child_records, mock.patch.object(
-            service, 'promote_recent_child_records_to_pool', return_value=(True, '')
-        ) as promote_recent_child_records_to_pool, mock.patch.object(
+        ) as promote_parent, mock.patch.object(
+            service, 'run_single_child_round', side_effect=[(True, ''), (True, ''), (False, 'child_register_failed')]
+        ) as run_single_child_round, mock.patch.object(
             service, '_finalize_workflow_once'
         ) as finalize:
-            service.last_processed_records = 1
             service._run_workflow_once('wf-resume', 'resume')
 
-        self.assertEqual(run_one_cycle.call_count, 3)
-        self.assertEqual(invite_recent_children.call_count, 3)
-        self.assertEqual(validate_recent_child_records.call_count, 2)
-        self.assertEqual(promote_recent_child_records_to_pool.call_count, 2)
+        promote_parent.assert_called_once_with(parent_record)
+        self.assertEqual(run_single_child_round.call_count, 3)
         finalize.assert_called_once_with(
             'wf-resume',
             success=False,
-            reason='child_round_failed:round=3:child_invite_incomplete',
+            reason='child_round_failed:round=3:child_register_failed',
         )
 
     def test_do_post_resume_logs_not_waiting_state(self):

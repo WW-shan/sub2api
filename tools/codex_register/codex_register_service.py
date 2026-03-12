@@ -1824,6 +1824,7 @@ def verify_child_business_plan_via_session_exchange(
     if plan_type not in VALID_PARENT_PLAN_TYPES:
         return False, "child_plan_not_business"
 
+    token_info["plan_type"] = plan_type
     return True, ""
 
 
@@ -2165,6 +2166,9 @@ def run_single_child_round(
     )
     if not verified:
         return False, verify_reason
+
+    if not token_info.get("plan_type"):
+        token_info["plan_type"] = str(parent_record.get("plan_type") or "").strip().lower() or None
 
     try:
         conn = create_db_connection()
