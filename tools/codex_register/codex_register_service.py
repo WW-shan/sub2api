@@ -389,6 +389,13 @@ def _get_or_create_child_identity(workflow_token: str, round_index: int) -> JSON
     return identity
 
 
+def _worker_headers(worker_token: str) -> Dict[str, Any]:
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {worker_token}",
+    }
+
+
 def get_email_and_token(proxies: Any = None) -> tuple[str, str, str]:
     del proxies
     fixed_email = get_env("CODEX_FIXED_EMAIL", "").strip()
