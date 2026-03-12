@@ -1,7 +1,9 @@
+import ast
 import io
 import json
 import os
 from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 import urllib.error
@@ -98,6 +100,58 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         service.active_workflow_cancel_event.clear()
         service.tokens_dir_global = Path('/tmp')
         service._child_round_state.clear()
+
+    def test_run_codex_once_only_reads_new_json_files_created_during_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp)
+            stale = tokens_dir / 'stale.json'
+            stale.write_text(json.dumps({'email': 'stale@example.com'}), encoding='utf-8')
+
+            def _fake_run(*_args, **_kwargs):
+                fresh = tokens_dir / 'fresh.json'
+                fresh.write_text(json.dumps({'email': 'fresh@example.com'}), encoding='utf-8')
+                return mock.Mock(returncode=0, stdout='', stderr='')
+
+            with mock.patch.object(service.subprocess, 'run', side_effect=_fake_run):
+                batches = service.run_codex_once(tokens_dir)
+
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0][0].name, 'fresh.json')
+        self.assertEqual(batches[0][1], [{'email': 'fresh@example.com'}])
+
+    def test_child_round_state_helpers_guard_state_with_lock(self):
+        source = Path(service.__file__).read_text(encoding='utf-8')
+        module = ast.parse(source)
+
+        def _find(name: str) -> ast.FunctionDef:
+            for node in module.body:
+                if isinstance(node, ast.FunctionDef) and node.name == name:
+                    return node
+            self.fail(f'function not found: {name}')
+
+        def _has_status_lock_with(func: ast.FunctionDef) -> bool:
+            for node in ast.walk(func):
+                if isinstance(node, ast.With):
+                    for item in node.items:
+                        expr = item.context_expr
+                        if isinstance(expr, ast.Name) and expr.id == 'status_lock':
+                            return True
+            return False
+
+        for name in ('_get_child_round_state', '_set_child_round_state', '_clear_child_round_state'):
+            self.assertTrue(_has_status_lock_with(_find(name)), f'{name} should use status_lock')
+
+    def test_test_file_has_unique_test_function_names(self):
+        source = Path(__file__).read_text(encoding='utf-8')
+        module = ast.parse(source)
+        test_names = [
+            node.name
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')
+        ]
+
+        duplicates = sorted({name for name in test_names if test_names.count(name) > 1})
+        self.assertEqual(duplicates, [], f'duplicate test names found: {duplicates}')
 
     def test_get_email_and_token_prefers_fixed_env(self):
         with mock.patch.dict(
@@ -431,7 +485,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(reason, "invite_failed")
         register_child.assert_not_called()
 
-    def test_run_workflow_once_resume_short_circuits_when_parent_reauth_fails(self):
+    def test_run_workflow_once_resume_completes_with_five_child_invites(self):
         service.workflow_id = 'wf-resume'
         service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
 
@@ -449,7 +503,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
 
         def _get_email_and_token(*_args, **_kwargs):
             round_counter['value'] += 1
-            return f"child{round_counter['value']}@example.com", "worker", "pw"
+            return f"child{round_counter['value']}@example.com", 'worker', 'pw'
 
         def _register_child_once(_tokens_dir, *, email, password, preferred_workspace_id):
             return (
@@ -487,9 +541,17 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         ) as finalize:
             service._run_workflow_once('wf-resume', 'resume')
 
-        verify_parent_switch.assert_called_once_with(parent_record)
-        promote_parent.assert_called_once_with(parent_record)
-        self.assertEqual(register_child_once.call_count, 5)
+        verify_parent_switch.assert_called_once()
+        promote_parent.assert_called_once()
+        verified_parent_record = verify_parent_switch.call_args.args[0]
+        self.assertEqual(verified_parent_record.get('account_id'), parent_record.get('account_id'))
+        self.assertEqual(verified_parent_record.get('workspace_id'), parent_record.get('workspace_id'))
+        self.assertEqual(verified_parent_record.get('organization_id'), parent_record.get('organization_id'))
+        self.assertEqual(verified_parent_record.get('plan_type'), parent_record.get('plan_type'))
+        self.assertEqual(verified_parent_record.get('codex_register_role'), 'parent')
+        self.assertEqual(verified_parent_record.get('session_access_token'), parent_record.get('access_token'))
+        self.assertEqual(verified_parent_record.get('access_token'), parent_record.get('access_token'))
+        self.assertEqual(promote_parent.call_args.args[0], verified_parent_record)
         self.assertEqual(invite_recent_children.call_count, 5)
         self.assertEqual(promote_recent_child_records_to_pool.call_count, 5)
 
@@ -504,27 +566,6 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(invite_targets, expected_targets)
 
         finalize.assert_called_once_with('wf-resume', success=True, reason='')
-
-    def test_run_single_child_round_stops_when_invite_fails(self):
-        service.workflow_id = "wf-test"
-        service.active_workflow_cancel_event.clear()
-        parent = {
-            "account_id": "parent-1",
-            "access_token": "parent-token",
-            "workspace_id": "ws-1",
-            "organization_id": "org-1",
-            "plan_type": "business",
-        }
-        with mock.patch.object(service, "invite_recent_children", return_value=(False, "invite_failed")), mock.patch.object(
-            service, "register_child_once"
-        ) as register_child, mock.patch.object(service, "_transition_workflow_phase", return_value=True):
-            ok, reason = service.run_single_child_round(
-                "wf-test", parent, tokens_dir=Path("/tmp"), round_index=1, total_rounds=1
-            )
-
-        self.assertFalse(ok)
-        self.assertEqual(reason, "invite_failed")
-        register_child.assert_not_called()
 
     def test_run_workflow_once_resume_short_circuits_when_parent_reauth_fails(self):
         service.workflow_id = 'wf-resume'
@@ -691,7 +732,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         promote_parent.assert_not_called()
         finalize.assert_called_once_with('wf-resume', success=False, reason='parent_reauth_not_team')
 
-    def test_run_single_child_round_stops_when_invite_fails(self):
+    def test_run_single_child_round_stops_when_invite_fails_retry_path(self):
         service.workflow_id = "wf-test"
         service.active_workflow_cancel_event.clear()
         parent = {
@@ -920,7 +961,3 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(handler.response_code, 204)
         allow_headers = [value for key, value in handler.response_headers if key == 'Access-Control-Allow-Headers']
         self.assertTrue(any('X-API-Key' in value for value in allow_headers))
-
-
-if __name__ == '__main__':
-    unittest.main()

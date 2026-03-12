@@ -52,7 +52,7 @@ last_transition: Dict[str, Any] = {}
 last_resume_gate_reason = ""
 active_workflow_thread = None
 active_workflow_cancel_event = threading.Event()
-status_lock = threading.Lock()
+status_lock = threading.RLock()
 JSONDict = Dict[str, Any]
 _child_round_state: Dict[str, JSONDict] = {}
 STATUS_LOG_TAIL_LIMIT = 50
@@ -359,21 +359,24 @@ DEFAULT_SCOPE = "openid email profile offline_access"
 
 
 def _get_child_round_state(workflow_token: str, round_index: int) -> JSONDict:
-    return _child_round_state.get(f"{workflow_token}:{round_index}", {})
+    with status_lock:
+        return _child_round_state.get(f"{workflow_token}:{round_index}", {})
 
 
 def _set_child_round_state(workflow_token: str, round_index: int, payload: JSONDict) -> None:
-    _child_round_state[f"{workflow_token}:{round_index}"] = dict(payload)
+    with status_lock:
+        _child_round_state[f"{workflow_token}:{round_index}"] = dict(payload)
 
 
 def _clear_child_round_state(workflow_token: Optional[str] = None) -> None:
-    if not workflow_token:
-        _child_round_state.clear()
-        return
-    prefix = f"{workflow_token}:"
-    for key in list(_child_round_state.keys()):
-        if key.startswith(prefix):
-            del _child_round_state[key]
+    with status_lock:
+        if not workflow_token:
+            _child_round_state.clear()
+            return
+        prefix = f"{workflow_token}:"
+        for key in list(_child_round_state.keys()):
+            if key.startswith(prefix):
+                del _child_round_state[key]
 
 
 def _get_or_create_child_identity(workflow_token: str, round_index: int) -> JSONDict:
@@ -1032,6 +1035,7 @@ def run_codex_once(
 ) -> List[Tuple[Path, List[JSONDict]]]:
     service_file = Path(__file__).resolve()
     tokens_dir.mkdir(parents=True, exist_ok=True)
+    existing_json_names = {path.name for path in tokens_dir.glob("*.json")}
 
     proxy = get_env("CODEX_PROXY", "")
     timeout_seconds = max(1, int(get_env("CODEX_REGISTER_SUBPROCESS_TIMEOUT", "120")))
@@ -1078,7 +1082,11 @@ def run_codex_once(
         append_log("error", reason)
         raise RuntimeError(reason)
 
-    json_files = sorted(tokens_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    json_files = sorted(
+        [path for path in tokens_dir.glob("*.json") if path.name not in existing_json_names],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not json_files:
         print("[codex-register] 未找到新的 token JSON 文件", flush=True)
         append_log("warn", "no_token_json_found")
