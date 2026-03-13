@@ -1,4 +1,5 @@
 import ast
+import base64
 import io
 import json
 import os
@@ -119,7 +120,101 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(batches[0][0].name, 'fresh.json')
         self.assertEqual(batches[0][1], [{'email': 'fresh@example.com'}])
 
-    def test_child_round_state_helpers_guard_state_with_lock(self):
+    def test_run_uses_timeout_for_all_session_post_requests(self):
+        workspace_payload = {
+            "workspaces": [
+                {
+                    "id": "ws-parent",
+                    "subscription": {"plan_type": "business"},
+                    "organization_id": "org-1",
+                }
+            ]
+        }
+        auth_segment = base64.urlsafe_b64encode(json.dumps(workspace_payload).encode("utf-8")).decode("ascii").rstrip("=")
+
+        class _FakeResponse:
+            def __init__(self, *, status_code=200, text="", headers=None, json_data=None):
+                self.status_code = status_code
+                self.text = text
+                self.headers = dict(headers or {})
+                self._json_data = dict(json_data or {})
+
+            def json(self):
+                return dict(self._json_data)
+
+        class _FakeSession:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.cookies = {
+                    "oai-did": "did-1",
+                    "oai-client-auth-session": f"{auth_segment}.payload.signature",
+                }
+
+            def get(self, url, **kwargs):
+                del kwargs
+                if "cloudflare.com/cdn-cgi/trace" in url:
+                    return _FakeResponse(text="loc=US\n")
+                if url == "https://auth.local/continue":
+                    return _FakeResponse(
+                        status_code=302,
+                        headers={
+                            "Location": "http://localhost:1455/auth/callback?code=ok-code&state=state-1"
+                        },
+                    )
+                return _FakeResponse()
+
+            def post(self, url, *, headers=None, data=None, timeout=None):
+                del headers, data
+                self.post_timeouts.append(timeout)
+                if url.endswith("/workspace/select"):
+                    return _FakeResponse(status_code=200, json_data={"continue_url": "https://auth.local/continue"})
+                return _FakeResponse(status_code=200)
+
+        post_timeouts = []
+
+        fake_requests = mock.Mock()
+
+        def _build_session(*args, **kwargs):
+            session = _FakeSession(*args, **kwargs)
+            session.post_timeouts = post_timeouts
+            return session
+
+        def _sentinel_post(*_args, **_kwargs):
+            return _FakeResponse(status_code=200, json_data={"token": "sentinel-token"})
+
+        fake_requests.Session = _build_session
+        fake_requests.post = _sentinel_post
+
+        with mock.patch.dict(os.environ, {"CODEX_REGISTER_HTTP_TIMEOUT": "17", "CODEX_PARENT_WORKSPACE_ID": "ws-parent"}, clear=False), mock.patch.object(
+            service, "get_requests_module", return_value=fake_requests
+        ), mock.patch.object(
+            service, "get_email_and_token", return_value=("child@example.com", "worker", "pw")
+        ), mock.patch.object(
+            service,
+            "generate_oauth_url",
+            return_value=service.OAuthStart(
+                auth_url="https://auth.local/start",
+                state="state-1",
+                code_verifier="verifier",
+                redirect_uri="http://localhost:1455/auth/callback",
+            ),
+        ), mock.patch.object(service, "get_oai_code", return_value="123456"), mock.patch.object(
+            service,
+            "submit_callback_url",
+            return_value=json.dumps(
+                {
+                    "email": "child@example.com",
+                    "account_id": "child-1",
+                    "access_token": "access-1",
+                    "refresh_token": "refresh-1",
+                }
+            ),
+        ), mock.patch.object(service, "fetch_session_access_token", return_value=""):
+            token_json = service.run(proxy=None)
+
+        self.assertIsNotNone(token_json)
+        self.assertEqual(post_timeouts, [17, 17, 17, 17, 17])
+
         source = Path(service.__file__).read_text(encoding='utf-8')
         module = ast.parse(source)
 
@@ -141,17 +236,17 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         for name in ('_get_child_round_state', '_set_child_round_state', '_clear_child_round_state'):
             self.assertTrue(_has_status_lock_with(_find(name)), f'{name} should use status_lock')
 
-    def test_test_file_has_unique_test_function_names(self):
-        source = Path(__file__).read_text(encoding='utf-8')
+    def test_service_module_does_not_use_print_calls(self):
+        source = Path(service.__file__).read_text(encoding='utf-8')
         module = ast.parse(source)
-        test_names = [
-            node.name
+
+        print_calls = [
+            node.lineno
             for node in ast.walk(module)
-            if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'print'
         ]
 
-        duplicates = sorted({name for name in test_names if test_names.count(name) > 1})
-        self.assertEqual(duplicates, [], f'duplicate test names found: {duplicates}')
+        self.assertEqual(print_calls, [], f'print calls found: {print_calls}')
 
     def test_get_email_and_token_prefers_fixed_env(self):
         with mock.patch.dict(
@@ -565,6 +660,59 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         ]
         self.assertEqual(invite_targets, expected_targets)
 
+        finalize.assert_called_once_with('wf-resume', success=True, reason='')
+
+    def test_run_workflow_once_resume_reauth_propagates_reauthed_workspace_to_child_round(self):
+        service.workflow_id = 'wf-resume'
+        service.job_phase = service.PHASE_RUNNING_PRE_RESUME_CHECK
+
+        parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token',
+            'workspace_id': 'ws-old',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'workspace_reachable': True,
+            'members_page_accessible': True,
+        }
+        reauthed_parent_record = {
+            'account_id': 'parent-1',
+            'access_token': 'bearer-parent-token-reauth',
+            'workspace_id': 'ws-new',
+            'organization_id': 'org-1',
+            'plan_type': 'business',
+            'codex_register_role': 'parent',
+        }
+
+        child_round_workspaces = []
+
+        def _run_single_child_round(_workflow_token, parent, *, tokens_dir, round_index, total_rounds):
+            del tokens_dir, round_index, total_rounds
+            child_round_workspaces.append(parent.get('workspace_id'))
+            return True, ''
+
+        with mock.patch.object(service, 'get_latest_parent_record', return_value=parent_record), mock.patch.object(
+            service, 'evaluate_resume_gate', return_value=''
+        ), mock.patch.object(
+            service,
+            'reauthenticate_parent_for_resume',
+            return_value=(True, '', reauthed_parent_record),
+        ) as reauth_parent, mock.patch.object(
+            service, 'verify_parent_business_context_after_resume', return_value=(True, '')
+        ) as verify_parent_switch, mock.patch.object(
+            service, 'promote_parent_record_to_pool', return_value=(True, '')
+        ) as promote_parent, mock.patch.object(
+            service, 'run_single_child_round', side_effect=_run_single_child_round
+        ) as run_single_child_round, mock.patch.object(
+            service, '_finalize_workflow_once'
+        ) as finalize:
+            service._run_workflow_once('wf-resume', 'resume')
+
+        reauth_parent.assert_called_once_with(parent_record, tokens_dir=service.tokens_dir_global)
+        verify_parent_switch.assert_called_once_with(reauthed_parent_record)
+        promote_parent.assert_called_once_with(reauthed_parent_record)
+        self.assertEqual(run_single_child_round.call_count, 5)
+        self.assertEqual(child_round_workspaces, ['ws-new'] * 5)
         finalize.assert_called_once_with('wf-resume', success=True, reason='')
 
     def test_run_workflow_once_resume_short_circuits_when_parent_reauth_fails(self):

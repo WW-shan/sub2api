@@ -3,6 +3,7 @@ import base64
 import hashlib
 import importlib
 import json
+import logging
 import os
 import random
 import re
@@ -54,6 +55,15 @@ active_workflow_thread = None
 active_workflow_cancel_event = threading.Event()
 status_lock = threading.RLock()
 JSONDict = Dict[str, Any]
+
+logger = logging.getLogger("codex-register")
+if not logger.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(_handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
 _child_round_state: Dict[str, JSONDict] = {}
 STATUS_LOG_TAIL_LIMIT = 50
 LOGS_ENDPOINT_DEFAULT_LIMIT = 200
@@ -177,6 +187,15 @@ def _append_log_locked(level: str, message: str) -> None:
 def append_log(level: str, message: str) -> None:
     with status_lock:
         _append_log_locked(level, message)
+
+
+def info_log(*args: Any, **kwargs: Any) -> None:
+    sep = str(kwargs.get("sep", " "))
+    end = str(kwargs.get("end", ""))
+    message = sep.join(str(arg) for arg in args)
+    if end:
+        message = f"{message}{end}"
+    logger.info(message)
 
 
 def _safe_parent_record_summary(parent_record: JSONDict) -> JSONDict:
@@ -423,7 +442,7 @@ def get_email_and_token(proxies: Any = None) -> tuple[str, str, str]:
         password = fixed_password or secrets.token_urlsafe(18)
         return email, "worker", password
     except Exception as exc:
-        print(f"[Error] 生成自定义域名邮箱失败: {exc}")
+        info_log(f"[Error] 生成自定义域名邮箱失败: {exc}")
         return "", "", ""
 
 
@@ -438,9 +457,9 @@ def get_oai_code(token: str, email: str, proxies: Any = None) -> str:
 
     query_url = f"{worker_base}/v1/code?email={urllib.parse.quote(email)}"
 
-    print(f"[*] 正在等待邮箱 {email} 的验证码...", end="", flush=True)
+    info_log(f"[*] 正在等待邮箱 {email} 的验证码...", end="", flush=True)
     for attempt in range(max_attempts):
-        print(".", end="", flush=True)
+        info_log(".", end="", flush=True)
         try:
             resp = requests.get(
                 url=query_url,
@@ -449,13 +468,13 @@ def get_oai_code(token: str, email: str, proxies: Any = None) -> str:
                 impersonate="chrome",
                 timeout=15,
             )
-            print(f" [poll#{attempt + 1}] Worker 轮询状态: {resp.status_code}")
+            info_log(f" [poll#{attempt + 1}] Worker 轮询状态: {resp.status_code}")
 
             if resp.status_code == 200:
                 data = ensure_dict(resp.json())
                 code = str(data.get("code") or "").strip()
                 if code:
-                    print(" 抓到啦! 验证码:", code)
+                    info_log(" 抓到啦! 验证码:", code)
                     return code
                 time.sleep(poll_seconds)
                 continue
@@ -465,14 +484,14 @@ def get_oai_code(token: str, email: str, proxies: Any = None) -> str:
                 continue
 
             if resp.status_code == 401:
-                print(" [Error] Worker 鉴权失败，请检查 CODEX_MAIL_WORKER_TOKEN")
+                info_log(" [Error] Worker 鉴权失败，请检查 CODEX_MAIL_WORKER_TOKEN")
                 return ""
         except Exception as exc:
-            print(f" [poll#{attempt + 1}] Worker 轮询异常: {exc}")
+            info_log(f" [poll#{attempt + 1}] Worker 轮询异常: {exc}")
 
         time.sleep(poll_seconds)
 
-    print(" 超时，未收到验证码")
+    info_log(" 超时，未收到验证码")
     return ""
 
 
@@ -705,27 +724,28 @@ def run(proxy: Optional[str]) -> Optional[str]:
         proxies = {"http": proxy, "https": proxy}
 
     session = requests.Session(proxies=proxies, impersonate="chrome")
+    register_http_timeout = max(1, _to_int(get_env("CODEX_REGISTER_HTTP_TIMEOUT", "15")))
     try:
         trace = session.get("https://cloudflare.com/cdn-cgi/trace", timeout=10).text
         loc_match = re.search(r"^loc=(.+)$", trace, re.MULTILINE)
         loc = loc_match.group(1) if loc_match else None
-        print(f"[*] 当前 IP 所在地: {loc}")
+        info_log(f"[*] 当前 IP 所在地: {loc}")
         if loc == "CN":
             raise RuntimeError("检查代理哦w - 所在地不支持")
     except Exception as exc:
-        print(f"[Error] 网络连接检查失败: {exc}")
+        info_log(f"[Error] 网络连接检查失败: {exc}")
         return None
 
     email, dev_token, password = get_email_and_token(proxies)
     if not email or not dev_token:
         return None
-    print(f"[*] 成功获取自定义邮箱与授权: {email}")
+    info_log(f"[*] 成功获取自定义邮箱与授权: {email}")
 
     oauth = generate_oauth_url()
     try:
         session.get(oauth.auth_url, timeout=15)
         did = session.cookies.get("oai-did")
-        print(f"[*] Device ID: {did}")
+        info_log(f"[*] Device ID: {did}")
 
         signup_body = f'{{"username":{{"value":"{email}","kind":"email"}},"screen_hint":"signup"}}'
         sen_req_body = f'{{"p":"","id":"{did}","flow":"authorize_continue"}}'
@@ -743,7 +763,7 @@ def run(proxy: Optional[str]) -> Optional[str]:
             timeout=15,
         )
         if sen_resp.status_code != 200:
-            print(f"[Error] Sentinel 异常拦截，状态码: {sen_resp.status_code}")
+            info_log(f"[Error] Sentinel 异常拦截，状态码: {sen_resp.status_code}")
             return None
 
         sen_token = sen_resp.json()["token"]
@@ -758,8 +778,9 @@ def run(proxy: Optional[str]) -> Optional[str]:
                 "openai-sentinel-token": sentinel,
             },
             data=signup_body,
+            timeout=register_http_timeout,
         )
-        print(f"[*] 提交注册表单状态: {signup_resp.status_code}")
+        info_log(f"[*] 提交注册表单状态: {signup_resp.status_code}")
 
         otp_resp = session.post(
             "https://auth.openai.com/api/accounts/passwordless/send-otp",
@@ -768,8 +789,9 @@ def run(proxy: Optional[str]) -> Optional[str]:
                 "accept": "application/json",
                 "content-type": "application/json",
             },
+            timeout=register_http_timeout,
         )
-        print(f"[*] 验证码发送状态: {otp_resp.status_code}")
+        info_log(f"[*] 验证码发送状态: {otp_resp.status_code}")
 
         code = get_oai_code(dev_token, email, proxies)
         if not code:
@@ -784,8 +806,9 @@ def run(proxy: Optional[str]) -> Optional[str]:
                 "content-type": "application/json",
             },
             data=code_body,
+            timeout=register_http_timeout,
         )
-        print(f"[*] 验证码校验状态: {code_resp.status_code}")
+        info_log(f"[*] 验证码校验状态: {code_resp.status_code}")
 
         create_account_body = '{"name":"Neo","birthdate":"2000-02-20"}'
         create_account_resp = session.post(
@@ -796,28 +819,29 @@ def run(proxy: Optional[str]) -> Optional[str]:
                 "content-type": "application/json",
             },
             data=create_account_body,
+            timeout=register_http_timeout,
         )
         create_account_status = create_account_resp.status_code
-        print(f"[*] 账户创建状态: {create_account_status}")
+        info_log(f"[*] 账户创建状态: {create_account_status}")
         if create_account_status != 200:
-            print(create_account_resp.text)
+            info_log(create_account_resp.text)
             return None
 
         auth_cookie = session.cookies.get("oai-client-auth-session")
         if not auth_cookie:
-            print("[Error] 未能获取到授权 Cookie")
+            info_log("[Error] 未能获取到授权 Cookie")
             return None
 
         auth_json = _decode_jwt_segment(auth_cookie.split(".")[0])
         workspaces = auth_json.get("workspaces") or []
         if not workspaces:
-            print("[Error] 授权 Cookie 里没有 workspace 信息")
+            info_log("[Error] 授权 Cookie 里没有 workspace 信息")
             return None
         preferred_workspace_id = get_env("CODEX_PARENT_WORKSPACE_ID", "").strip()
         selected_workspace = select_parent_workspace(workspaces, preferred_workspace_id)
         selected_workspace_id = workspace_identifier(selected_workspace)
         if not selected_workspace_id:
-            print("[Error] 无法解析 workspace_id")
+            info_log("[Error] 无法解析 workspace_id")
             return None
 
         select_body = f'{{"workspace_id":"{selected_workspace_id}"}}'
@@ -828,15 +852,16 @@ def run(proxy: Optional[str]) -> Optional[str]:
                 "content-type": "application/json",
             },
             data=select_body,
+            timeout=register_http_timeout,
         )
         if select_resp.status_code != 200:
-            print(f"[Error] 选择 workspace 失败，状态码: {select_resp.status_code}")
-            print(select_resp.text)
+            info_log(f"[Error] 选择 workspace 失败，状态码: {select_resp.status_code}")
+            info_log(select_resp.text)
             return None
 
         continue_url = str((select_resp.json() or {}).get("continue_url") or "").strip()
         if not continue_url:
-            print("[Error] workspace/select 响应里缺少 continue_url")
+            info_log("[Error] workspace/select 响应里缺少 continue_url")
             return None
 
         current_url = continue_url
@@ -881,10 +906,10 @@ def run(proxy: Optional[str]) -> Optional[str]:
                     return token_json
             current_url = next_url
 
-        print("[Error] 未能在重定向链中捕获到最终 Callback URL")
+        info_log("[Error] 未能在重定向链中捕获到最终 Callback URL")
         return None
     except Exception as exc:
-        print(f"[Error] 运行时发生错误: {exc}")
+        info_log(f"[Error] 运行时发生错误: {exc}")
         return None
 
 
@@ -892,10 +917,10 @@ def run_auto_register_cli(*, proxy: Optional[str], once: bool, sleep_min: int, s
     sleep_min = max(1, sleep_min)
     sleep_max = max(sleep_min, sleep_max)
     count = 0
-    print("[Info] Seamless OpenAI Auto-Registrar Started")
+    info_log("[Info] Seamless OpenAI Auto-Registrar Started")
     while True:
         count += 1
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] >>> 开始第 {count} 次注册流程 <<<")
+        info_log(f"\n[{datetime.now().strftime('%H:%M:%S')}] >>> 开始第 {count} 次注册流程 <<<")
         try:
             token_json = run(proxy)
             if token_json:
@@ -911,22 +936,22 @@ def run_auto_register_cli(*, proxy: Optional[str], once: bool, sleep_min: int, s
                 file_name = tokens_dir / f"token_{filename_email}_{int(time.time())}.json"
                 with file_name.open("w", encoding="utf-8") as file_obj:
                     file_obj.write(token_json)
-                print(f"[*] 成功! Token 已保存至: {file_name}")
+                info_log(f"[*] 成功! Token 已保存至: {file_name}")
 
                 if refresh_token:
                     rt_file = tokens_dir / "RT.txt"
                     with rt_file.open("a", encoding="utf-8") as file_obj:
                         file_obj.write(refresh_token + "\n")
-                    print(f"[*] Refresh Token 已追加至：{rt_file}")
+                    info_log(f"[*] Refresh Token 已追加至：{rt_file}")
             else:
-                print("[-] 本次注册失败。")
+                info_log("[-] 本次注册失败。")
         except Exception as exc:
-            print(f"[Error] 发生未捕获异常: {exc}")
+            info_log(f"[Error] 发生未捕获异常: {exc}")
 
         if once:
             break
         wait_time = random.randint(sleep_min, sleep_max)
-        print(f"[*] 休息 {wait_time} 秒...")
+        info_log(f"[*] 休息 {wait_time} 秒...")
         time.sleep(wait_time)
 
 
@@ -1055,7 +1080,7 @@ def run_codex_once(
     if fixed_password_value:
         env["CODEX_FIXED_PASSWORD"] = fixed_password_value
 
-    print("[codex-register] 启动注册脚本:", " ".join(cmd), flush=True)
+    info_log("[codex-register] 启动注册脚本:", " ".join(cmd), flush=True)
 
     try:
         result = subprocess.run(
@@ -1069,16 +1094,16 @@ def run_codex_once(
     except subprocess.TimeoutExpired:
         reason = "script_timeout"
         append_log("error", f"script_timeout:{timeout_seconds}")
-        print(f"[codex-register] 注册脚本执行超时: {timeout_seconds}s", flush=True)
+        info_log(f"[codex-register] 注册脚本执行超时: {timeout_seconds}s", flush=True)
         raise RuntimeError(reason)
 
-    print("[codex-register] stdout:\n" + (result.stdout or ""), flush=True)
+    info_log("[codex-register] stdout:\n" + (result.stdout or ""), flush=True)
     if result.stderr:
-        print("[codex-register] stderr:\n" + result.stderr, flush=True)
+        info_log("[codex-register] stderr:\n" + result.stderr, flush=True)
 
     if result.returncode != 0:
         reason = f"script_exit_nonzero:{result.returncode}"
-        print(f"[codex-register] 注册脚本退出码非 0: {result.returncode}", flush=True)
+        info_log(f"[codex-register] 注册脚本退出码非 0: {result.returncode}", flush=True)
         append_log("error", reason)
         raise RuntimeError(reason)
 
@@ -1088,7 +1113,7 @@ def run_codex_once(
         reverse=True,
     )
     if not json_files:
-        print("[codex-register] 未找到新的 token JSON 文件", flush=True)
+        info_log("[codex-register] 未找到新的 token JSON 文件", flush=True)
         append_log("warn", "no_token_json_found")
         return []
 
@@ -1097,7 +1122,7 @@ def run_codex_once(
         try:
             data = json.loads(json_file.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
-            print(f"[codex-register] 解析 token JSON 失败: {exc}", flush=True)
+            info_log(f"[codex-register] 解析 token JSON 失败: {exc}", flush=True)
             append_log("error", f"token_json_parse_failed:{json_file.name}")
             continue
 
@@ -1106,7 +1131,7 @@ def run_codex_once(
             token_infos.extend(item for item in data if isinstance(item, dict))
         elif isinstance(data, dict):
             token_infos.append(data)
-        print(f"[codex-register] 读取 token 文件: {json_file}", flush=True)
+        info_log(f"[codex-register] 读取 token 文件: {json_file}", flush=True)
         batches.append((json_file, token_infos))
 
     return batches
@@ -1263,7 +1288,7 @@ def upsert_account(cur, token_info: JSONDict, *, account_role: str = "child") ->
     email = token_info.get("email") or ""
     account_id = token_info.get("account_id") or ""
     if not email and not account_id:
-        print("[codex-register] token 中缺少 email/account_id，跳过", flush=True)
+        info_log("[codex-register] token 中缺少 email/account_id，跳过", flush=True)
         append_log("warn", "skip_missing_email_and_account_id")
         return "skipped"
 
@@ -1281,7 +1306,7 @@ def upsert_account(cur, token_info: JSONDict, *, account_role: str = "child") ->
         current_extra = ensure_dict(existing_extra)
         if not should_update_account(current_credentials, credentials, current_extra, extra):
             bind_groups(cur, existing_id, group_ids)
-            print(f"[codex-register] 账号无需更新，跳过: {email or account_id}", flush=True)
+            info_log(f"[codex-register] 账号无需更新，跳过: {email or account_id}", flush=True)
             append_log("info", f"skip_unchanged:{email or account_id}")
             return "skipped"
 
@@ -1291,7 +1316,7 @@ def upsert_account(cur, token_info: JSONDict, *, account_role: str = "child") ->
             (notes, pg_json(credentials), pg_json(extra), existing_id),
         )
         bind_groups(cur, existing_id, group_ids)
-        print(f"[codex-register] 已更新账号: {email or account_id}", flush=True)
+        info_log(f"[codex-register] 已更新账号: {email or account_id}", flush=True)
         append_log("info", f"updated:{email or account_id}")
         return "updated"
 
@@ -1309,7 +1334,7 @@ def upsert_account(cur, token_info: JSONDict, *, account_role: str = "child") ->
     )
     created_id = cur.fetchone()[0]
     bind_groups(cur, created_id, group_ids)
-    print(f"[codex-register] 已插入新账号: {identifier}", flush=True)
+    info_log(f"[codex-register] 已插入新账号: {identifier}", flush=True)
     append_log("info", f"created:{identifier}")
     return "created"
 
@@ -1406,13 +1431,13 @@ def run_one_cycle(
     try:
         conn = create_db_connection()
         cur = conn.cursor()
-        print("[codex-register] 数据库连接成功", flush=True)
+        info_log("[codex-register] 数据库连接成功", flush=True)
     except Exception as exc:  # noqa: BLE001
         trace = traceback.format_exc()
         with status_lock:
             last_error = trace
         append_log("error", f"db_connect_failed:{exc}")
-        print(f"[codex-register] 数据库连接失败: {trace}", flush=True)
+        info_log(f"[codex-register] 数据库连接失败: {trace}", flush=True)
         return False, "db_connect_failed"
 
     stage_failed = False
@@ -1475,7 +1500,7 @@ def run_one_cycle(
                             stage_reason = f"token_process_failed:{source_file.name}"
                         stage_failed = True
                         append_log("error", f"token_process_failed:{source_file.name}:{exc}")
-                        print(f"[codex-register] 处理 token 失败（保留重试）: {source_file} {exc}", flush=True)
+                        info_log(f"[codex-register] 处理 token 失败（保留重试）: {source_file} {exc}", flush=True)
                         break
 
                 if file_success:
@@ -1487,7 +1512,7 @@ def run_one_cycle(
                             stage_reason = f"archive_failed:{source_file.name}"
                         stage_failed = True
                         append_log("error", f"archive_failed:{source_file.name}:{exc}")
-                        print(f"[codex-register] 归档 token 文件失败（保留重试）: {source_file} {exc}", flush=True)
+                        info_log(f"[codex-register] 归档 token 文件失败（保留重试）: {source_file} {exc}", flush=True)
 
             if stage_failed:
                 append_log("warn", f"cycle_waiting_manual:{stage_reason}")
@@ -1513,12 +1538,12 @@ def run_one_cycle(
             with status_lock:
                 last_error = reason
             append_log("error", reason)
-            print(f"[codex-register] 处理流程异常: {reason}", flush=True)
+            info_log(f"[codex-register] 处理流程异常: {reason}", flush=True)
             return False, reason
         with status_lock:
             last_error = trace
         append_log("error", "process_error")
-        print(f"[codex-register] 处理流程异常: {trace}", flush=True)
+        info_log(f"[codex-register] 处理流程异常: {trace}", flush=True)
         return False, "process_error"
     finally:
         try:
@@ -2850,7 +2875,7 @@ def main() -> None:
 
     port = int(get_env("CODEX_HTTP_PORT", "5000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), CodexRequestHandler)
-    print(f"[codex-register] HTTP 服务启动于 0.0.0.0:{port}", flush=True)
+    info_log(f"[codex-register] HTTP 服务启动于 0.0.0.0:{port}", flush=True)
     server.serve_forever()
 
 
