@@ -185,8 +185,20 @@ def _append_log_locked(level: str, message: str) -> None:
 
 
 def append_log(level: str, message: str) -> None:
+    normalized_level = str(level or "").strip().lower()
+    if normalized_level not in VALID_LOG_LEVELS:
+        normalized_level = "info"
+
+    text = str(message)
     with status_lock:
-        _append_log_locked(level, message)
+        _append_log_locked(normalized_level, text)
+
+    if normalized_level == "error":
+        logger.error(text)
+    elif normalized_level == "warn":
+        logger.warning(text)
+    else:
+        logger.info(text)
 
 
 def info_log(*args: Any, **kwargs: Any) -> None:
@@ -781,6 +793,10 @@ def run(proxy: Optional[str]) -> Optional[str]:
             timeout=register_http_timeout,
         )
         info_log(f"[*] 提交注册表单状态: {signup_resp.status_code}")
+        if signup_resp.status_code != 200:
+            info_log(f"[Error] 提交注册表单失败，状态码: {signup_resp.status_code}")
+            info_log(signup_resp.text)
+            return None
 
         otp_resp = session.post(
             "https://auth.openai.com/api/accounts/passwordless/send-otp",
@@ -792,6 +808,10 @@ def run(proxy: Optional[str]) -> Optional[str]:
             timeout=register_http_timeout,
         )
         info_log(f"[*] 验证码发送状态: {otp_resp.status_code}")
+        if otp_resp.status_code != 200:
+            info_log(f"[Error] 验证码发送失败，状态码: {otp_resp.status_code}")
+            info_log(otp_resp.text)
+            return None
 
         code = get_oai_code(dev_token, email, proxies)
         if not code:
@@ -809,6 +829,10 @@ def run(proxy: Optional[str]) -> Optional[str]:
             timeout=register_http_timeout,
         )
         info_log(f"[*] 验证码校验状态: {code_resp.status_code}")
+        if code_resp.status_code != 200:
+            info_log(f"[Error] 验证码校验失败，状态码: {code_resp.status_code}")
+            info_log(code_resp.text)
+            return None
 
         create_account_body = '{"name":"Neo","birthdate":"2000-02-20"}'
         create_account_resp = session.post(
@@ -1063,7 +1087,11 @@ def run_codex_once(
     existing_json_names = {path.name for path in tokens_dir.glob("*.json")}
 
     proxy = get_env("CODEX_PROXY", "")
-    timeout_seconds = max(1, int(get_env("CODEX_REGISTER_SUBPROCESS_TIMEOUT", "120")))
+    configured_subprocess_timeout = _to_int(get_env("CODEX_REGISTER_SUBPROCESS_TIMEOUT", "0"))
+    mail_poll_seconds = max(1, _to_int(get_env("CODEX_MAIL_POLL_SECONDS", "3")))
+    mail_poll_attempts = max(1, _to_int(get_env("CODEX_MAIL_POLL_MAX_ATTEMPTS", "40")))
+    mail_poll_budget = (mail_poll_seconds * mail_poll_attempts) + 30
+    timeout_seconds = max(1, configured_subprocess_timeout or max(120, mail_poll_budget))
     cmd = [sys.executable, str(service_file), "--register-only", "--once", "--tokens-dir", str(tokens_dir)]
     if proxy:
         cmd.extend(["--proxy", proxy])
@@ -1091,8 +1119,14 @@ def run_codex_once(
             timeout=timeout_seconds,
             env=env,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         reason = "script_timeout"
+        timeout_stdout = str(getattr(exc, "stdout", "") or "")
+        timeout_stderr = str(getattr(exc, "stderr", "") or "")
+        if timeout_stdout:
+            info_log("[codex-register] subprocess timeout stdout:\n" + timeout_stdout, flush=True)
+        if timeout_stderr:
+            info_log("[codex-register] subprocess timeout stderr:\n" + timeout_stderr, flush=True)
         append_log("error", f"script_timeout:{timeout_seconds}")
         info_log(f"[codex-register] 注册脚本执行超时: {timeout_seconds}s", flush=True)
         raise RuntimeError(reason)

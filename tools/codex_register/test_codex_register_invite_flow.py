@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -138,6 +139,54 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(batches[0][0].name, 'fresh.json')
         self.assertEqual(batches[0][1], [{'email': 'fresh@example.com'}])
 
+    def test_run_codex_once_timeout_uses_mail_poll_budget_when_timeout_not_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp)
+            captured = {}
+
+            def _fake_run(*_args, **kwargs):
+                captured["timeout"] = kwargs.get("timeout")
+                raise subprocess.TimeoutExpired(cmd=["python", "script.py"], timeout=kwargs.get("timeout"), output="", stderr="")
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_MAIL_POLL_SECONDS": "5",
+                    "CODEX_MAIL_POLL_MAX_ATTEMPTS": "50",
+                    "CODEX_REGISTER_SUBPROCESS_TIMEOUT": "",
+                },
+                clear=False,
+            ), mock.patch.object(service.subprocess, "run", side_effect=_fake_run):
+                with self.assertRaisesRegex(RuntimeError, "script_timeout"):
+                    service.run_codex_once(tokens_dir)
+
+        self.assertEqual(captured.get("timeout"), 280)
+
+    def test_run_codex_once_timeout_logs_subprocess_stdout_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp)
+            info_messages = []
+
+            timeout_exc = subprocess.TimeoutExpired(
+                cmd=["python", "script.py"],
+                timeout=120,
+                output="mid-stdout",
+                stderr="mid-stderr",
+            )
+
+            with mock.patch.object(service.subprocess, "run", side_effect=timeout_exc), mock.patch.object(
+                service, "info_log", side_effect=lambda *args, **kwargs: info_messages.append(" ".join(str(arg) for arg in args))
+            ):
+                with self.assertRaisesRegex(RuntimeError, "script_timeout"):
+                    service.run_codex_once(tokens_dir)
+
+        merged = "\n".join(info_messages)
+        self.assertIn("subprocess timeout stdout", merged)
+        self.assertIn("mid-stdout", merged)
+        self.assertIn("subprocess timeout stderr", merged)
+        self.assertIn("mid-stderr", merged)
+
+
     def test_run_uses_timeout_for_all_session_post_requests(self):
         workspace_payload = {
             "workspaces": [
@@ -265,6 +314,70 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         ]
 
         self.assertEqual(print_calls, [], f'print calls found: {print_calls}')
+
+    def test_run_returns_none_without_polling_code_when_send_otp_fails(self):
+        class _FakeResponse:
+            def __init__(self, *, status_code=200, text="", headers=None, json_data=None):
+                self.status_code = status_code
+                self.text = text
+                self.headers = dict(headers or {})
+                self._json_data = dict(json_data or {})
+
+            def json(self):
+                return dict(self._json_data)
+
+        class _FakeSession:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.cookies = {
+                    "oai-did": "did-1",
+                    "oai-client-auth-session": "header.payload.signature",
+                }
+
+            def get(self, url, **kwargs):
+                del kwargs
+                if "cloudflare.com/cdn-cgi/trace" in url:
+                    return _FakeResponse(text="loc=US\n")
+                return _FakeResponse()
+
+            def post(self, url, *, headers=None, data=None, timeout=None):
+                del headers, data, timeout
+                if url.endswith("/authorize/continue"):
+                    return _FakeResponse(status_code=200)
+                if url.endswith("/passwordless/send-otp"):
+                    return _FakeResponse(status_code=429, text='{"error":"rate_limited"}')
+                return _FakeResponse(status_code=200)
+
+        fake_requests = mock.Mock()
+        fake_requests.Session = _FakeSession
+        fake_requests.post = lambda *_args, **_kwargs: _FakeResponse(status_code=200, json_data={"token": "sentinel-token"})
+
+        with mock.patch.object(service, "get_requests_module", return_value=fake_requests), mock.patch.object(
+            service, "get_email_and_token", return_value=("child@example.com", "worker", "pw")
+        ), mock.patch.object(
+            service,
+            "generate_oauth_url",
+            return_value=service.OAuthStart(
+                auth_url="https://auth.local/start",
+                state="state-1",
+                code_verifier="verifier",
+                redirect_uri="http://localhost:1455/auth/callback",
+            ),
+        ), mock.patch.object(service, "get_oai_code") as get_oai_code_mock:
+            token_json = service.run(proxy=None)
+
+        self.assertIsNone(token_json)
+        get_oai_code_mock.assert_not_called()
+
+    def test_append_log_emits_to_python_logger_by_level(self):
+        with mock.patch.object(service, "logger") as fake_logger:
+            service.append_log("info", "info-message")
+            service.append_log("warn", "warn-message")
+            service.append_log("error", "error-message")
+
+        fake_logger.info.assert_called_once_with("info-message")
+        fake_logger.warning.assert_called_once_with("warn-message")
+        fake_logger.error.assert_called_once_with("error-message")
 
     def test_get_email_and_token_prefers_fixed_env(self):
         with mock.patch.dict(
