@@ -41,12 +41,30 @@ class _FakeConn:
 
 
 class _FakeHTTPResponse:
-    def __init__(self, status, body: bytes = b"{}"):
+    def __init__(self, status, body: bytes = b"{}", text: str = "", json_data=None):
         self.status = status
+        self.status_code = status
         self._body = body
+        self.text = text
+        self._json_data = json_data
 
     def read(self):
         return self._body
+
+    def json(self):
+        if self._json_data is not None:
+            return dict(self._json_data)
+        if self._body:
+            try:
+                return json.loads(self._body.decode("utf-8"))
+            except Exception:
+                return {}
+        if self.text:
+            try:
+                return json.loads(self.text)
+            except Exception:
+                return {}
+        return {}
 
     def __enter__(self):
         return self
@@ -302,15 +320,14 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
 
     def test_invite_recent_children_invites_with_parent_headers(self):
         conn = _FakeConn([[('child1@example.com',), ('child2@example.com',)]])
+        session = mock.Mock()
+        session.post.side_effect = [_FakeHTTPResponse(200), _FakeHTTPResponse(200)]
 
-        captured_requests = []
-
-        def _urlopen(req, timeout=0):
-            captured_requests.append((req, timeout))
-            return _FakeHTTPResponse(200)
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
         with mock.patch.object(service, 'create_db_connection', return_value=conn), mock.patch.object(
-            service.urllib.request, 'urlopen', side_effect=_urlopen
+            service, 'get_requests_module', return_value=fake_requests
         ):
             ok, reason = service.invite_recent_children(
                 {
@@ -325,12 +342,13 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(reason, '')
-        self.assertEqual(len(captured_requests), 2)
-        first_req = captured_requests[0][0]
-        self.assertIn('/backend-api/accounts/parent-1/invites', first_req.full_url)
-        self.assertEqual(first_req.get_header('Authorization'), 'Bearer bearer-parent-token')
-        normalized_headers = {k.lower(): v for k, v in first_req.header_items()}
-        self.assertEqual(normalized_headers.get('chatgpt-account-id'), 'parent-1')
+        self.assertEqual(session.post.call_count, 2)
+        first_call = session.post.call_args_list[0]
+        self.assertIn('/backend-api/accounts/parent-1/invites', first_call.args[0])
+        self.assertEqual(first_call.kwargs.get('headers', {}).get('Authorization'), 'Bearer bearer-parent-token')
+        self.assertEqual(first_call.kwargs.get('headers', {}).get('chatgpt-account-id'), 'parent-1')
+        self.assertEqual(first_call.kwargs.get('json', {}).get('email'), 'child1@example.com')
+        self.assertEqual(first_call.kwargs.get('timeout'), 20)
 
     def test_invite_recent_children_uses_target_email_without_db(self):
         parent = {
@@ -340,36 +358,32 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             "organization_id": "org-1",
             "plan_type": "business",
         }
-        captured = []
-
-        def _urlopen(req, timeout=0):
-            captured.append(req)
-            return _FakeHTTPResponse(200)
+        session = mock.Mock()
+        session.post.return_value = _FakeHTTPResponse(200)
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
         with mock.patch.object(service, "create_db_connection") as create_db, mock.patch.object(
-            service.urllib.request, "urlopen", side_effect=_urlopen
+            service, "get_requests_module", return_value=fake_requests
         ):
             ok, reason = service.invite_recent_children(parent, expected_count=1, target_email="child@example.com")
 
         self.assertTrue(ok)
         self.assertEqual(reason, "")
         create_db.assert_not_called()
-        self.assertEqual(len(captured), 1)
-        self.assertIn("/backend-api/accounts/parent-1/invites", captured[0].full_url)
+        self.assertEqual(session.post.call_count, 1)
+        self.assertIn("/backend-api/accounts/parent-1/invites", session.post.call_args.args[0])
+        self.assertEqual(session.post.call_args.kwargs.get('json', {}).get('email'), 'child@example.com')
 
     def test_invite_recent_children_treats_409_as_invited(self):
         conn = _FakeConn([[('child1@example.com',)]])
-
-        http_409 = urllib.error.HTTPError(
-            url='https://chatgpt.com/backend-api/accounts/parent-1/invites',
-            code=409,
-            msg='Conflict',
-            hdrs=None,
-            fp=io.BytesIO(b'{"error":"already invited"}'),
-        )
+        session = mock.Mock()
+        session.post.return_value = _FakeHTTPResponse(409, text='{"error":"already invited"}')
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
         with mock.patch.object(service, 'create_db_connection', return_value=conn), mock.patch.object(
-            service.urllib.request, 'urlopen', side_effect=http_409
+            service, 'get_requests_module', return_value=fake_requests
         ):
             ok, reason = service.invite_recent_children(
                 {
@@ -393,35 +407,29 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             "organization_id": "org-1",
             "plan_type": "business",
         }
-        http_409 = urllib.error.HTTPError(
-            url="https://chatgpt.com/backend-api/accounts/parent-1/invites",
-            code=409,
-            msg="Conflict",
-            hdrs=None,
-            fp=io.BytesIO(b"{\"error\":\"conflict\"}"),
-        )
-        calls = []
-
-        def _urlopen(req, timeout=0):
-            calls.append(req)
-            if len(calls) == 1:
-                raise http_409
-            return _FakeHTTPResponse(200)
+        session = mock.Mock()
+        session.post.side_effect = [_FakeHTTPResponse(409, text='{"error":"conflict"}'), _FakeHTTPResponse(200)]
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
         with mock.patch.object(service, "create_db_connection") as create_db, mock.patch.object(
-            service.urllib.request, "urlopen", side_effect=_urlopen
+            service, "get_requests_module", return_value=fake_requests
         ):
             ok, reason = service.invite_recent_children(parent, expected_count=1, target_email="child@example.com")
 
         self.assertTrue(ok)
         self.assertEqual(reason, "")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(session.post.call_count, 2)
         create_db.assert_not_called()
 
     def test_verify_child_business_plan_via_session_exchange_returns_true_for_matching_workspace_plan(self):
-        status_json = b'{"user":{"account":{"current_account":{"id":"parent-1","workspace":{"id":"ws-1","subscription":{"plan_type":"business"}}}}}}'
+        status_payload = {"user": {"account": {"current_account": {"id": "parent-1", "workspace": {"id": "ws-1", "subscription": {"plan_type": "business"}}}}}}
+        session = mock.Mock()
+        session.get.return_value = _FakeHTTPResponse(200, json_data=status_payload)
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
-        with mock.patch.object(service.urllib.request, 'urlopen', return_value=_FakeHTTPResponse(200, body=status_json)):
+        with mock.patch.object(service, 'get_requests_module', return_value=fake_requests):
             ok, reason = service.verify_child_business_plan_via_session_exchange(
                 {
                     'account_id': 'parent-1',
@@ -432,11 +440,16 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(reason, '')
+        self.assertEqual(session.get.call_count, 1)
 
     def test_verify_child_business_plan_via_session_exchange_detects_non_business_plan(self):
-        status_json = b'{"user":{"account":{"current_account":{"id":"parent-1","workspace":{"id":"ws-1","subscription":{"plan_type":"free"}}}}}}'
+        status_payload = {"user": {"account": {"current_account": {"id": "parent-1", "workspace": {"id": "ws-1", "subscription": {"plan_type": "free"}}}}}}
+        session = mock.Mock()
+        session.get.return_value = _FakeHTTPResponse(200, json_data=status_payload)
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
-        with mock.patch.object(service.urllib.request, 'urlopen', return_value=_FakeHTTPResponse(200, body=status_json)):
+        with mock.patch.object(service, 'get_requests_module', return_value=fake_requests):
             ok, reason = service.verify_child_business_plan_via_session_exchange(
                 {
                     'account_id': 'parent-1',
@@ -449,9 +462,13 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(reason, 'child_plan_not_business')
 
     def test_verify_child_business_plan_via_session_exchange_detects_workspace_mismatch(self):
-        status_json = b'{"user":{"account":{"current_account":{"id":"parent-1","workspace":{"id":"ws-other","subscription":{"plan_type":"business"}}}}}}'
+        status_payload = {"user": {"account": {"current_account": {"id": "parent-1", "workspace": {"id": "ws-other", "subscription": {"plan_type": "business"}}}}}}
+        session = mock.Mock()
+        session.get.return_value = _FakeHTTPResponse(200, json_data=status_payload)
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
-        with mock.patch.object(service.urllib.request, 'urlopen', return_value=_FakeHTTPResponse(200, body=status_json)):
+        with mock.patch.object(service, 'get_requests_module', return_value=fake_requests):
             ok, reason = service.verify_child_business_plan_via_session_exchange(
                 {
                     'account_id': 'parent-1',
@@ -464,9 +481,20 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(reason, 'child_workspace_mismatch')
 
     def test_verify_child_business_plan_via_session_exchange_parses_accounts_map_payload(self):
-        status_json = b'{"accounts":{"7def":{"account":{"account_id":"7def","organization_id":"org-1","plan_type":"team"}},"3e48":{"account":{"account_id":"3e48","organization_id":null,"plan_type":"free"}},"default":{"account":{"account_id":"3e48","organization_id":null,"plan_type":"free"}}},"account_ordering":["7def","3e48"]}'
+        status_payload = {
+            "accounts": {
+                "7def": {"account": {"account_id": "7def", "organization_id": "org-1", "plan_type": "team"}},
+                "3e48": {"account": {"account_id": "3e48", "organization_id": None, "plan_type": "free"}},
+                "default": {"account": {"account_id": "3e48", "organization_id": None, "plan_type": "free"}},
+            },
+            "account_ordering": ["7def", "3e48"],
+        }
+        session = mock.Mock()
+        session.get.return_value = _FakeHTTPResponse(200, json_data=status_payload)
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
-        with mock.patch.object(service.urllib.request, 'urlopen', return_value=_FakeHTTPResponse(200, body=status_json)):
+        with mock.patch.object(service, 'get_requests_module', return_value=fake_requests):
             ok, reason = service.verify_child_business_plan_via_session_exchange(
                 {
                     'account_id': 'child-1',
@@ -479,9 +507,13 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(reason, '')
 
     def test_verify_child_business_plan_via_session_exchange_reads_root_account_plan_type(self):
-        status_json = b'{"account":{"id":"ws-1","planType":"team","organizationId":"org-1","structure":"workspace"}}'
+        status_payload = {"account": {"id": "ws-1", "planType": "team", "organizationId": "org-1", "structure": "workspace"}}
+        session = mock.Mock()
+        session.get.return_value = _FakeHTTPResponse(200, json_data=status_payload)
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
-        with mock.patch.object(service.urllib.request, 'urlopen', return_value=_FakeHTTPResponse(200, body=status_json)):
+        with mock.patch.object(service, 'get_requests_module', return_value=fake_requests):
             ok, reason = service.verify_child_business_plan_via_session_exchange(
                 {
                     'account_id': 'child-1',
@@ -494,27 +526,29 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(reason, '')
 
     def test_verify_child_business_plan_via_session_exchange_falls_back_to_parent_account_id_workspace(self):
-        first_error = urllib.error.HTTPError(
-            url='https://chatgpt.com/api/auth/session',
-            code=400,
-            msg='Bad Request',
-            hdrs=None,
-            fp=io.BytesIO(b'{}'),
-        )
-        second_ok = _FakeHTTPResponse(
-            200,
-            body=b'{"user":{"account":{"current_account":{"id":"parent-1","workspace":{"id":"parent-1","subscription":{"plan_type":"team"}}}}}}',
-        )
+        second_ok_payload = {
+            "user": {
+                "account": {
+                    "current_account": {
+                        "id": "parent-1",
+                        "workspace": {
+                            "id": "parent-1",
+                            "subscription": {"plan_type": "team"},
+                        },
+                    }
+                }
+            }
+        }
 
-        captured_urls = []
+        session = mock.Mock()
+        session.get.side_effect = [
+            _FakeHTTPResponse(400, text='{}'),
+            _FakeHTTPResponse(200, json_data=second_ok_payload),
+        ]
+        fake_requests = mock.Mock()
+        fake_requests.Session.return_value = session
 
-        def _urlopen(req, timeout=0):
-            captured_urls.append(req.full_url)
-            if len(captured_urls) == 1:
-                raise first_error
-            return second_ok
-
-        with mock.patch.object(service.urllib.request, 'urlopen', side_effect=_urlopen):
+        with mock.patch.object(service, 'get_requests_module', return_value=fake_requests):
             ok, reason = service.verify_child_business_plan_via_session_exchange(
                 {
                     'account_id': 'child-1',
@@ -526,8 +560,8 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(reason, '')
-        self.assertIn('workspace_id=ws-1', captured_urls[0])
-        self.assertIn('workspace_id=parent-1', captured_urls[1])
+        self.assertIn('workspace_id=ws-1', session.get.call_args_list[0].args[0])
+        self.assertIn('workspace_id=parent-1', session.get.call_args_list[1].args[0])
 
     def test_evaluate_resume_gate_requires_parent_account_and_access_token(self):
         service.tokens_dir_global = Path('/tmp')

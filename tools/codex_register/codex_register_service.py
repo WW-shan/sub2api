@@ -1680,6 +1680,45 @@ def _mark_parent_upgrade_waiting(workflow_token: str) -> None:
         active_workflow_thread = None
 
 
+def _session_request(
+    session: Any,
+    method: str,
+    url: str,
+    *,
+    headers: Optional[Dict[str, Any]] = None,
+    json_data: Optional[Dict[str, Any]] = None,
+    timeout: int = 20,
+) -> Dict[str, Any]:
+    try:
+        method_upper = str(method or "").strip().upper()
+        if method_upper == "GET":
+            response = session.get(url, headers=headers or {}, timeout=timeout)
+        elif method_upper == "POST":
+            response = session.post(url, headers=headers or {}, json=json_data or {}, timeout=timeout)
+        elif method_upper == "DELETE":
+            response = session.delete(url, headers=headers or {}, json=json_data or {}, timeout=timeout)
+        else:
+            return {"ok": False, "status": 0, "text": "", "json": {}, "error": f"unsupported_method:{method_upper}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "status": 0, "text": "", "json": {}, "error": str(exc)}
+
+    status = int(getattr(response, "status_code", getattr(response, "status", 0)) or 0)
+    text = str(getattr(response, "text", "") or "")
+    payload: JSONDict = {}
+    try:
+        payload = ensure_dict(response.json())
+    except Exception:  # noqa: BLE001
+        payload = {}
+
+    return {
+        "ok": 200 <= status < 300,
+        "status": status,
+        "text": text,
+        "json": payload,
+        "error": "",
+    }
+
+
 def invite_recent_children(
     parent_record: JSONDict,
     *,
@@ -1731,38 +1770,40 @@ def invite_recent_children(
 
         base_url = str(get_env("CODEX_CHATGPT_BASE_URL", "https://chatgpt.com") or "https://chatgpt.com").rstrip("/")
         invite_url = f"{base_url}/backend-api/accounts/{parent_account_id}/invites"
+        requests = get_requests_module()
+        session = requests.Session(impersonate="chrome")
 
         def _invite_once(child_email: str) -> bool:
-            payload = json.dumps({"email": child_email}).encode("utf-8")
-            req = urllib.request.Request(
+            result = _session_request(
+                session,
+                "POST",
                 invite_url,
-                data=payload,
-                method="POST",
                 headers={
                     "Authorization": f"Bearer {parent_access_token}",
                     "chatgpt-account-id": parent_account_id,
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                 },
+                json_data={"email": child_email},
+                timeout=20,
             )
-            try:
-                with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
-                    status = int(getattr(resp, "status", 0) or 0)
-                append_log("info", f"invite_child:{child_email}:{status}")
-                return status in {200, 201, 202, 204, 409}
-            except urllib.error.HTTPError as exc:
-                append_log("warn", f"invite_child_http_error:{child_email}:{exc.code}")
-                if int(getattr(exc, "code", 0) or 0) == 409:
-                    try:
-                        body = exc.read().decode("utf-8", "replace")
-                    except Exception:  # noqa: BLE001
-                        body = ""
-                    if "already" in body.lower():
-                        return True
-                return False
-            except Exception as exc:  # noqa: BLE001
-                append_log("warn", f"invite_child_request_failed:{child_email}:{exc}")
-                return False
+            status = int(result.get("status") or 0)
+            append_log("info", f"invite_child:{child_email}:{status}")
+            if status in {200, 201, 202, 204}:
+                return True
+            if status == 409:
+                body_text = str(result.get("text") or "")
+                body_json = ensure_dict(result.get("json"))
+                detail = str(body_json.get("detail") or body_json.get("error") or "")
+                if "already" in body_text.lower() or "already" in detail.lower():
+                    return True
+            if result.get("error"):
+                append_log("warn", f"invite_child_request_failed:{child_email}:{result.get('error')}")
+            elif status:
+                append_log("warn", f"invite_child_http_error:{child_email}:{status}")
+            else:
+                append_log("warn", f"invite_child_request_failed:{child_email}:unknown")
+            return False
 
         for row in rows:
             child_email = str((row or [""])[0] or "").strip()
@@ -1814,8 +1855,10 @@ def verify_child_business_plan_via_session_exchange(
     if fallback_workspace_id and fallback_workspace_id not in workspace_candidates:
         workspace_candidates.append(fallback_workspace_id)
 
-    raw = ""
-    last_error: Exception | None = None
+    requests = get_requests_module()
+    session = requests.Session(impersonate="chrome")
+    payload: JSONDict = {}
+    last_error_message = ""
     for candidate_workspace_id in workspace_candidates:
         query = urllib.parse.urlencode(
             {
@@ -1825,32 +1868,31 @@ def verify_child_business_plan_via_session_exchange(
             }
         )
         url = f"{base_url}/api/auth/session?{query}"
-        req = urllib.request.Request(
+        result = _session_request(
+            session,
+            "GET",
             url,
-            method="GET",
             headers={
                 "Authorization": f"Bearer {child_access_token}",
                 "Accept": "application/json",
             },
+            timeout=20,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
-                raw = resp.read().decode("utf-8")
+        if result.get("ok"):
+            payload = ensure_dict(result.get("json"))
+            if not payload:
+                raw_text = str(result.get("text") or "")
+                payload = ensure_dict(raw_text)
             break
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            append_log("warn", f"child_session_exchange_failed:{candidate_workspace_id}:{exc}")
-            continue
 
-    if not raw:
-        if last_error is not None:
-            append_log("warn", f"child_session_exchange_failed_final:{last_error}")
+        err = str(result.get("error") or f"status={result.get('status')}")
+        last_error_message = err
+        append_log("warn", f"child_session_exchange_failed:{candidate_workspace_id}:{err}")
+
+    if not payload:
+        if last_error_message:
+            append_log("warn", f"child_session_exchange_failed_final:{last_error_message}")
         return False, "child_session_exchange_failed"
-
-    try:
-        payload = ensure_dict(raw)
-    except Exception:  # noqa: BLE001
-        payload = {}
 
     user = ensure_dict(payload.get("user"))
     account = ensure_dict(user.get("account"))
@@ -1904,6 +1946,7 @@ def verify_child_business_plan_via_session_exchange(
 
     token_info["plan_type"] = plan_type
     return True, ""
+
 
 
 def promote_parent_record_to_pool(parent_record: JSONDict) -> Tuple[bool, str]:
