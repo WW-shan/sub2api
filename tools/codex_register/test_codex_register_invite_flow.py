@@ -139,6 +139,23 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(batches[0][0].name, 'fresh.json')
         self.assertEqual(batches[0][1], [{'email': 'fresh@example.com'}])
 
+
+    def test_run_codex_once_streams_subprocess_output_for_docker_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tokens_dir = Path(tmp)
+            captured_kwargs = {}
+
+            def _fake_run(*_args, **kwargs):
+                captured_kwargs.update(kwargs)
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(service.subprocess, "run", side_effect=_fake_run):
+                service.run_codex_once(tokens_dir)
+
+        self.assertNotIn("capture_output", captured_kwargs)
+        self.assertNotIn("stdout", captured_kwargs)
+        self.assertNotIn("stderr", captured_kwargs)
+
     def test_run_codex_once_timeout_uses_mail_poll_budget_when_timeout_not_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             tokens_dir = Path(tmp)

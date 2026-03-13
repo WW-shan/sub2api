@@ -1114,8 +1114,6 @@ def run_codex_once(
         result = subprocess.run(
             cmd,
             cwd=str(service_file.parent),
-            capture_output=True,
-            text=True,
             timeout=timeout_seconds,
             env=env,
         )
