@@ -204,6 +204,98 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertIn("mid-stderr", merged)
 
 
+    def test_run_falls_back_to_password_when_passwordless_disabled(self):
+        workspace_payload = {
+            "workspaces": [
+                {
+                    "id": "ws-parent",
+                    "subscription": {"plan_type": "business"},
+                    "organization_id": "org-1",
+                }
+            ]
+        }
+        auth_segment = base64.urlsafe_b64encode(json.dumps(workspace_payload).encode("utf-8")).decode("ascii").rstrip("=")
+
+        class _FakeResponse:
+            def __init__(self, *, status_code=200, text="", headers=None, json_data=None):
+                self.status_code = status_code
+                self.text = text
+                self.headers = dict(headers or {})
+                self._json_data = dict(json_data or {})
+
+            def json(self):
+                return dict(self._json_data)
+
+        post_calls = []
+
+        class _FakeSession:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.cookies = {
+                    "oai-did": "did-1",
+                    "oai-client-auth-session": f"{auth_segment}.payload.signature",
+                }
+
+            def get(self, url, **kwargs):
+                del kwargs
+                if "cloudflare.com/cdn-cgi/trace" in url:
+                    return _FakeResponse(text="loc=US\n")
+                if url == "https://auth.local/continue":
+                    return _FakeResponse(
+                        status_code=302,
+                        headers={
+                            "Location": "http://localhost:1455/auth/callback?code=ok-code&state=state-1"
+                        },
+                    )
+                return _FakeResponse()
+
+            def post(self, url, *, headers=None, data=None, timeout=None):
+                post_calls.append((url, data, timeout))
+                del headers
+                if url.endswith("/passwordless/send-otp"):
+                    return _FakeResponse(
+                        status_code=401,
+                        text='{"error":{"message":"Passwordless signup is unavailable.","code":"passwordless_signup_disabled"}}',
+                        json_data={
+                            "error": {
+                                "message": "Passwordless signup is unavailable.",
+                                "code": "passwordless_signup_disabled",
+                            }
+                        },
+                    )
+                if url.endswith("/workspace/select"):
+                    return _FakeResponse(status_code=200, json_data={"continue_url": "https://auth.local/continue"})
+                return _FakeResponse(status_code=200)
+
+        fake_requests = mock.Mock()
+        fake_requests.Session = _FakeSession
+        fake_requests.post = lambda *_args, **_kwargs: _FakeResponse(status_code=200, json_data={"token": "sentinel-token"})
+
+        with mock.patch.dict(os.environ, {"CODEX_REGISTER_HTTP_TIMEOUT": "17", "CODEX_PARENT_WORKSPACE_ID": "ws-parent"}, clear=False), mock.patch.object(
+            service, "get_requests_module", return_value=fake_requests
+        ), mock.patch.object(
+            service, "get_email_and_token", return_value=("child@example.com", "worker", "pw-123")
+        ), mock.patch.object(
+            service,
+            "generate_oauth_url",
+            return_value=service.OAuthStart(
+                auth_url="https://auth.local/start",
+                state="state-1",
+                code_verifier="verifier",
+                redirect_uri="http://localhost:1455/auth/callback",
+            ),
+        ), mock.patch.object(service, "submit_callback_url", return_value=json.dumps({"email": "child@example.com", "account_id": "child-1"})), mock.patch.object(
+            service, "fetch_session_access_token", return_value=""
+        ), mock.patch.object(service, "get_oai_code") as get_oai_code_mock:
+            token_json = service.run(proxy=None)
+
+        self.assertIsNotNone(token_json)
+        get_oai_code_mock.assert_not_called()
+        self.assertTrue(any(url.endswith("/api/accounts/password") for url, _data, _timeout in post_calls))
+        password_posts = [item for item in post_calls if item[0].endswith("/api/accounts/password")]
+        self.assertEqual(len(password_posts), 1)
+        self.assertIn("pw-123", str(password_posts[0][1]))
+
     def test_run_uses_timeout_for_all_session_post_requests(self):
         workspace_payload = {
             "workspaces": [
