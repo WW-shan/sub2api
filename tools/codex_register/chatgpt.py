@@ -158,7 +158,30 @@ class ChatGPTService:
         identifier: str = "default"
     ) -> Dict[str, Any]:
         """注册新账号（占位实现）"""
-        del register_input, db_session, identifier
+        pipeline_result = await self._run_register_pipeline(
+            {
+                "register_input": register_input,
+                "db_session": db_session,
+                "identifier": identifier,
+            }
+        )
+
+        if not pipeline_result.get("success"):
+            return self._error_result(
+                pipeline_result.get("status_code", 0),
+                pipeline_result.get("error", "not implemented"),
+                pipeline_result.get("error_code", "unknown_error"),
+            )
+
+        data = dict(pipeline_result.get("data", {}))
+        if "identifier" not in data:
+            data["identifier"] = identifier
+
+        return self._success_result(data)
+
+    async def _run_register_pipeline(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """注册流水线占位钩子"""
+        del ctx
         return self._error_result(0, "not implemented", "unknown_error")
 
     def _success_result(self, data: Dict[str, Any]) -> Dict[str, Any]:

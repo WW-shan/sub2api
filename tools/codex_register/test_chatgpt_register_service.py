@@ -1,7 +1,7 @@
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 def _build_chatgpt_import_stubs() -> dict:
@@ -71,3 +71,95 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             set(result.keys()),
             {"success", "status_code", "data", "error", "error_code"},
         )
+
+    async def test_register_success_payload_contains_identifier(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_run_register_pipeline",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "email": "a@b.com",
+                        "account_id": "123",
+                        "access_token": "at",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ):
+            result = await service.register(
+                {
+                    "mail_worker_base_url": "x",
+                    "mail_worker_token": "y",
+                    "fixed_email": "a@b.com",
+                    "fixed_password": "pw",
+                    "mail_domain": "b.com",
+                },
+                identifier="acc_123",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["identifier"], "acc_123")
+
+    async def test_register_then_get_members_uses_returned_identifier_without_relogin(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_run_register_pipeline",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "email": "a@b.com",
+                        "identifier": "acc_123",
+                        "account_id": "123",
+                        "access_token": "at",
+                        "refresh_token": "rt",
+                        "id_token": "id",
+                        "session_token": "",
+                        "expires_at": "x",
+                        "plan_type": "",
+                        "organization_id": "",
+                        "workspace_id": "",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ):
+            reg = await service.register(
+                {
+                    "mail_worker_base_url": "x",
+                    "mail_worker_token": "y",
+                    "fixed_email": "a@b.com",
+                    "mail_domain": "b.com",
+                }
+            )
+
+        with patch.object(
+            service,
+            "_make_request",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"items": [], "total": 0},
+                    "error": None,
+                }
+            ),
+        ) as mocked:
+            await service.get_members(
+                reg["data"]["access_token"],
+                reg["data"]["account_id"],
+                db_session=None,
+                identifier=reg["data"]["identifier"],
+            )
+
+        self.assertEqual(mocked.await_args.kwargs["identifier"], "acc_123")
