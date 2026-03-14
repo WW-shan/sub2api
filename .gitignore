@@ -133,6 +133,6 @@ frontend/coverage/
 aicodex
 output/
 .sisyphus/
-.worktrees/
+tools/codex_register/.worktrees/
 __pycache__/
 *.pyc
