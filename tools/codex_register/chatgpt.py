@@ -49,6 +49,58 @@ class ChatGPTService:
             self._sessions[identifier] = await self._create_session(db_session)
         return self._sessions[identifier]
 
+
+    def _build_browser_base_headers(
+        self,
+        extra_headers: Optional[Dict[str, str]] = None,
+        *,
+        origin: str = "https://chatgpt.com",
+        referer: str = "https://chatgpt.com/",
+    ) -> Dict[str, str]:
+        """构建浏览器基础请求头"""
+        headers = {
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": referer,
+            "Origin": origin,
+            "Connection": "keep-alive",
+        }
+        if extra_headers:
+            headers.update(extra_headers)
+        return headers
+
+    def _build_auth_headers(
+        self,
+        access_token: Optional[str] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, str]:
+        """构建 auth.openai.com 请求头"""
+        headers = self._build_browser_base_headers(
+            origin="https://auth.openai.com",
+            referer="https://auth.openai.com/",
+        )
+        headers["Accept"] = "application/json"
+        headers["Content-Type"] = "application/json"
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+        if extra_headers:
+            headers.update(extra_headers)
+        return headers
+
+    def _build_sentinel_headers(
+        self,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, str]:
+        """构建 Sentinel 请求头"""
+        headers = self._build_browser_base_headers(
+            origin="https://sentinel.openai.com",
+            referer="https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
+        )
+        headers["Content-Type"] = "text/plain;charset=UTF-8"
+        if extra_headers:
+            headers.update(extra_headers)
+        return headers
+
     async def _make_request(
         self,
         method: str,
@@ -150,6 +202,36 @@ class ChatGPTService:
                 return {"success": False, "status_code": 0, "error": str(e)}
 
         return {"success": False, "status_code": 0, "error": "未知错误"}
+
+    async def _make_register_request(
+        self,
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        json_data: Optional[Dict[str, Any]] = None,
+        db_session: Optional[DBAsyncSession] = None,
+        identifier: str = "default",
+        special_session_step: bool = False,
+    ) -> Dict[str, Any]:
+        """注册流程请求分发器：默认走 _make_request"""
+        if special_session_step:
+            return await self._make_request(
+                method,
+                url,
+                headers,
+                json_data,
+                db_session,
+                identifier,
+            )
+
+        return await self._make_request(
+            method,
+            url,
+            headers,
+            json_data,
+            db_session,
+            identifier,
+        )
 
     async def register(
         self,

@@ -228,3 +228,69 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 result = await service.register(invalid_input)
                 self.assertFalse(result["success"])
                 self.assertEqual(result["error_code"], "input_invalid")
+
+    async def test_register_uses_build_browser_base_headers(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_build_browser_base_headers",
+            wraps=service._build_browser_base_headers,
+        ) as mocked_base_headers:
+            headers = service._build_auth_headers("access-token")
+
+        mocked_base_headers.assert_called_once()
+        self.assertEqual(headers["Authorization"], "Bearer access-token")
+        self.assertEqual(headers["Origin"], "https://auth.openai.com")
+
+    async def test_register_uses_build_auth_headers(self):
+        service = self.ChatGPTService()
+
+        headers = service._build_auth_headers("token-123", {"X-Test": "1"})
+
+        self.assertEqual(headers["Authorization"], "Bearer token-123")
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["X-Test"], "1")
+        self.assertEqual(headers["Referer"], "https://auth.openai.com/")
+
+    async def test_register_uses_build_sentinel_headers(self):
+        service = self.ChatGPTService()
+
+        headers = service._build_sentinel_headers({"X-Sentinel": "yes"})
+
+        self.assertEqual(headers["Origin"], "https://sentinel.openai.com")
+        self.assertEqual(
+            headers["Referer"],
+            "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
+        )
+        self.assertEqual(headers["Content-Type"], "text/plain;charset=UTF-8")
+        self.assertEqual(headers["X-Sentinel"], "yes")
+
+    async def test_register_non_session_special_requests_go_through_make_request(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_request",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ok": True},
+                    "error": None,
+                }
+            ),
+        ) as mocked_make_request:
+            result = await service._make_register_request(
+                "POST",
+                "https://auth.openai.com/api/accounts/user/register",
+                {"Content-Type": "application/json"},
+                {"username": "u@example.com"},
+                db_session=None,
+                identifier="acc_123",
+                special_session_step=False,
+            )
+
+        self.assertTrue(result["success"])
+        mocked_make_request.assert_awaited_once()
+        self.assertEqual(mocked_make_request.await_args.args[0], "POST")
