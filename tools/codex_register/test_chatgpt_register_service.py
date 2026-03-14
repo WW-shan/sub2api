@@ -1141,7 +1141,187 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status_code"], 0)
         self.assertEqual(result.get("error_code"), "network_error")
 
-    async def test_exchange_tokens_uses_endpoint_when_auth_code_provided(self):
+
+    async def test_register_blocks_on_network_region_check_failure(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_check_network_and_region",
+            new=AsyncMock(
+                return_value={
+                    "success": False,
+                    "status_code": 451,
+                    "data": None,
+                    "error": "region blocked: IR",
+                    "error_code": "region_blocked",
+                }
+            ),
+        ), patch.object(
+            service,
+            "_run_register_pipeline",
+            new=AsyncMock(side_effect=AssertionError("pipeline should not run")),
+        ):
+            result = await service.register(self._valid_register_input())
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status_code"], 451)
+        self.assertEqual(result["error_code"], "region_blocked")
+
+    async def test_register_prepare_identity_result_is_used_by_pipeline(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_check_network_and_region",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_prepare_identity",
+            return_value={
+                "success": True,
+                "status_code": 200,
+                "data": {
+                    "register_input": {
+                        **self._valid_register_input(),
+                        "resolved_email": "resolved@example.com",
+                        "fixed_email": "resolved@example.com",
+                        "fixed_password": "pw-123456",
+                    }
+                },
+                "error": None,
+                "error_code": None,
+            },
+        ) as mocked_prepare_identity, patch.object(
+            service,
+            "_run_register_pipeline",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "identifier": "acc_123",
+                        "email": "resolved@example.com",
+                        "account_id": "123",
+                        "access_token": "at",
+                        "refresh_token": "rt",
+                        "id_token": "id",
+                        "session_token": "st",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ) as mocked_pipeline, patch.object(
+            service,
+            "_enrich_account_context",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "plan_type": "",
+                        "organization_id": "",
+                        "workspace_id": "",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ):
+            result = await service.register(self._valid_register_input())
+
+        self.assertTrue(result["success"])
+        mocked_prepare_identity.assert_called_once()
+        passed_ctx = mocked_pipeline.await_args.args[0]
+        self.assertEqual(
+            passed_ctx["register_input"]["resolved_email"],
+            "resolved@example.com",
+        )
+
+    async def test_poll_and_validate_otp_invokes_mail_worker_when_otp_missing(self):
+        service = self.ChatGPTService()
+        ctx = {
+            "register_input": self._valid_register_input(),
+            "db_session": None,
+            "identifier": "acc_123",
+            "session": object(),
+        }
+
+        with patch.object(
+            service,
+            "_poll_otp_from_mail_worker",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"otp_code": "654321"},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ) as mocked_poll_worker, patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ok": True},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ) as mocked_make_register_request:
+            result = await service._poll_and_validate_otp(ctx)
+
+        self.assertTrue(result["success"])
+        mocked_poll_worker.assert_awaited_once()
+        validate_payload = mocked_make_register_request.await_args.args[3]
+        self.assertEqual(validate_payload["otp_code"], "654321")
+
+    async def test_step_wrappers_preserve_network_error_codes_from_request_layer(self):
+        service = self.ChatGPTService()
+        base_ctx = {
+            "register_input": self._valid_register_input(),
+            "db_session": None,
+            "identifier": "acc_123",
+            "session": object(),
+            "otp_code": "123456",
+        }
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": False,
+                    "status_code": 0,
+                    "error": "request timeout",
+                    "error_code": "network_timeout",
+                }
+            ),
+        ):
+            start_result = await service._start_auth_flow(dict(base_ctx))
+            send_result = await service._send_otp_with_fallback(dict(base_ctx))
+            validate_result = await service._poll_and_validate_otp(dict(base_ctx))
+            create_result = await service._create_account(dict(base_ctx))
+
+        self.assertEqual(start_result["error_code"], "network_timeout")
+        self.assertEqual(send_result["error_code"], "network_timeout")
+        self.assertEqual(validate_result["error_code"], "network_timeout")
+        self.assertEqual(create_result["error_code"], "network_timeout")
+
+    async def test_exchange_tokens_uses_callback_url_derived_auth_code(self):
         service = self.ChatGPTService()
 
         with patch.object(
@@ -1152,9 +1332,9 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                     "success": True,
                     "status_code": 200,
                     "data": {
-                        "access_token": "at_from_endpoint",
-                        "refresh_token": "rt_from_endpoint",
-                        "id_token": "id_from_endpoint",
+                        "access_token": "at_from_callback",
+                        "refresh_token": "rt_from_callback",
+                        "id_token": "id_from_callback",
                     },
                     "error": None,
                     "error_code": None,
@@ -1162,21 +1342,18 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             ),
         ) as mocked_make_request:
             result = await service._exchange_tokens(
-                pipeline_data={},
+                pipeline_data={
+                    "callback_url": "https://auth.openai.com/callback?code=cb-code-789&state=st1"
+                },
                 register_input={
-                    "auth_code": "auth-code-123",
                     "token_endpoint": "https://auth.openai.com/oauth/token",
+                    "client_id": "client-1",
                 },
                 db_session=None,
                 identifier="acc_123",
             )
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["data"]["access_token"], "at_from_endpoint")
+        self.assertEqual(result["data"]["access_token"], "at_from_callback")
         mocked_make_request.assert_awaited_once()
-        self.assertEqual(
-            mocked_make_request.await_args.args[1],
-            "https://auth.openai.com/oauth/token",
-        )
-        self.assertEqual(mocked_make_request.await_args.args[3]["code"], "auth-code-123")
-
+        self.assertEqual(mocked_make_request.await_args.args[3]["code"], "cb-code-789")

@@ -5,6 +5,7 @@ ChatGPT API 服务
 import asyncio
 import logging
 import random
+from urllib.parse import parse_qs, urlparse
 from typing import Optional, Dict, Any, List
 from curl_cffi.requests import AsyncSession
 from sqlalchemy.ext.asyncio import AsyncSession as DBAsyncSession
@@ -248,6 +249,126 @@ class ChatGPTService:
         prepared_ctx["register_input"] = register_input
         return self._success_result(prepared_ctx)
 
+    async def _check_network_and_region(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """注册前网络与区域检查（最小实现）"""
+        register_input = dict((ctx or {}).get("register_input") or {})
+
+        blocked_regions = {
+            str(region).strip().upper()
+            for region in (register_input.get("blocked_regions") or [])
+            if str(region).strip()
+        }
+        if not blocked_regions:
+            blocked_regions = {"IR", "KP", "SY", "CU"}
+
+        region = str(register_input.get("region") or "").strip().upper()
+        if region and region in blocked_regions:
+            return self._error_result(451, f"region blocked: {region}", "region_blocked")
+
+        return self._success_result(dict(ctx or {}))
+
+    def _resolve_step_error_code(self, result: Dict[str, Any], default_error_code: str) -> str:
+        """步骤错误码映射：保留网络层错误码，不重写"""
+        error_code = str((result or {}).get("error_code") or "").strip()
+        if error_code in {"network_timeout", "network_error"}:
+            return error_code
+        return default_error_code
+
+    def _parse_callback_url(self, callback_url: str) -> Dict[str, str]:
+        """解析 OAuth 回调地址中的 code/state"""
+        raw_url = str(callback_url or "").strip()
+        if not raw_url:
+            return {"auth_code": "", "state": ""}
+
+        parsed = urlparse(raw_url)
+        query_params = parse_qs(parsed.query or "", keep_blank_values=False)
+        fragment_params = parse_qs(parsed.fragment or "", keep_blank_values=False)
+
+        def _pick_first(params: Dict[str, List[str]], key: str) -> str:
+            values = params.get(key) or []
+            if not values:
+                return ""
+            return str(values[0] or "").strip()
+
+        auth_code = (
+            _pick_first(query_params, "code")
+            or _pick_first(query_params, "auth_code")
+            or _pick_first(fragment_params, "code")
+            or _pick_first(fragment_params, "auth_code")
+        )
+        state = _pick_first(query_params, "state") or _pick_first(fragment_params, "state")
+
+        return {
+            "auth_code": auth_code,
+            "state": state,
+        }
+
+    def _extract_otp_code_from_payload(self, payload: Dict[str, Any]) -> str:
+        """从 mail worker 返回体中提取 OTP"""
+        if not isinstance(payload, dict):
+            return ""
+
+        for key in ("otp_code", "code", "otp", "verification_code"):
+            value = payload.get(key)
+            code = str(value or "").strip()
+            if code:
+                return code
+
+        nested = payload.get("data")
+        if isinstance(nested, dict):
+            for key in ("otp_code", "code", "otp", "verification_code"):
+                value = nested.get(key)
+                code = str(value or "").strip()
+                if code:
+                    return code
+
+        return ""
+
+    async def _poll_otp_from_mail_worker(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """通过 mail worker 拉取 OTP"""
+        register_input = dict((ctx or {}).get("register_input") or {})
+        email = self._resolve_register_email(register_input)
+        mail_worker_base_url = str(register_input.get("mail_worker_base_url") or "").strip().rstrip("/")
+        mail_worker_token = str(register_input.get("mail_worker_token") or "").strip()
+
+        if not mail_worker_base_url or not mail_worker_token:
+            return self._error_result(400, "mail worker config missing", "input_invalid")
+
+        request_url = f"{mail_worker_base_url}/api/otp/latest"
+        request_headers = {
+            "Authorization": f"Bearer {mail_worker_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        request_payload = {
+            "email": email,
+        }
+
+        result = await self._make_register_request(
+            "POST",
+            request_url,
+            request_headers,
+            request_payload,
+            db_session=ctx.get("db_session"),
+            identifier=ctx.get("identifier", "default"),
+            special_session_step=False,
+            session=ctx.get("session"),
+        )
+
+        status_code = int(result.get("status_code", 0) or 0)
+        if not result.get("success") or status_code >= 300:
+            return self._error_result(
+                status_code,
+                result.get("error", "mail worker otp fetch failed"),
+                self._resolve_step_error_code(result, "otp_fetch_failed"),
+            )
+
+        otp_code = self._extract_otp_code_from_payload(result.get("data", {}))
+        if not otp_code:
+            return self._error_result(404, "otp code not found", "otp_not_found")
+
+        return self._success_result({"otp_code": otp_code})
+
     async def _send_signup_fallback_otp(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         """fallback 后显式触发 OTP 发送"""
         register_input = ctx.get("register_input", {})
@@ -269,7 +390,7 @@ class ChatGPTService:
             return self._error_result(
                 status_code,
                 result.get("error", "fallback otp send failed"),
-                "otp_send_failed",
+                self._resolve_step_error_code(result, "otp_send_failed"),
             )
 
         return self._success_result(result.get("data", {}))
@@ -418,6 +539,7 @@ class ChatGPTService:
         enriched = dict(result)
         enriched.setdefault("session", active_session)
         return enriched
+
     async def register(
         self,
         register_input: Dict[str, Any],
@@ -431,6 +553,16 @@ class ChatGPTService:
 
         runtime_context = runtime_context_result.get("data", {})
         runtime_identifier = runtime_context.get("identifier", identifier)
+
+        network_check_result = await self._check_network_and_region(
+            {
+                "register_input": runtime_context.get("register_input", {}),
+                "db_session": db_session,
+                "identifier": runtime_identifier,
+            }
+        )
+        if not network_check_result.get("success"):
+            return network_check_result
 
         identity_context_result = self._prepare_identity(
             {
@@ -466,7 +598,6 @@ class ChatGPTService:
             db_session=db_session,
             identifier=runtime_identifier,
         )
-
 
     def _build_runtime_context(self, register_input: Dict[str, Any], identifier: str) -> Dict[str, Any]:
         """构建注册运行时上下文并执行输入校验"""
@@ -546,7 +677,7 @@ class ChatGPTService:
             return self._error_result(
                 status_code,
                 result.get("error", "start auth flow failed"),
-                "auth_flow_failed",
+                self._resolve_step_error_code(result, "auth_flow_failed"),
             )
 
         return self._success_result(result.get("data", {}))
@@ -575,7 +706,7 @@ class ChatGPTService:
             return self._error_result(
                 status_code,
                 result.get("error", "signup failed"),
-                "signup_failed",
+                self._resolve_step_error_code(result, "signup_failed"),
             )
 
         return self._success_result(result.get("data", {}))
@@ -606,7 +737,7 @@ class ChatGPTService:
             return self._error_result(
                 passwordless_status,
                 passwordless_result.get("error", "send otp failed"),
-                "otp_send_failed",
+                self._resolve_step_error_code(passwordless_result, "otp_send_failed"),
             )
 
         signup_result = await self._submit_signup(ctx)
@@ -627,13 +758,23 @@ class ChatGPTService:
         register_input = ctx.get("register_input", {})
         email = self._resolve_register_email(register_input)
 
+        otp_code = str(ctx.get("otp_code") or "").strip()
+        if not otp_code:
+            otp_result = await self._poll_otp_from_mail_worker(ctx)
+            if otp_result.get("success"):
+                otp_code = str((otp_result.get("data") or {}).get("otp_code") or "").strip()
+            else:
+                otp_error_code = str(otp_result.get("error_code") or "").strip()
+                if otp_error_code in {"network_timeout", "network_error"}:
+                    return otp_result
+
         result = await self._make_register_request(
             "POST",
             "https://auth.openai.com/api/otp/validate",
             self._build_auth_headers(),
             {
                 "username": email,
-                "otp_code": str(ctx.get("otp_code") or ""),
+                "otp_code": otp_code,
             },
             db_session=ctx.get("db_session"),
             identifier=ctx.get("identifier", "default"),
@@ -646,7 +787,7 @@ class ChatGPTService:
             return self._error_result(
                 status_code,
                 result.get("error", "otp validate failed"),
-                "otp_validate_failed",
+                self._resolve_step_error_code(result, "otp_validate_failed"),
             )
 
         return self._success_result(result.get("data", {}))
@@ -672,7 +813,7 @@ class ChatGPTService:
             return self._error_result(
                 status_code,
                 result.get("error", "create account failed"),
-                "create_account_failed",
+                self._resolve_step_error_code(result, "create_account_failed"),
             )
 
         return self._success_result(result.get("data", {}))
@@ -695,7 +836,7 @@ class ChatGPTService:
             return self._error_result(
                 sentinel_status,
                 sentinel_result.get("error", "sentinel failed"),
-                "auth_flow_failed",
+                self._resolve_step_error_code(sentinel_result, "auth_flow_failed"),
             )
 
         step_ctx = dict(ctx)
@@ -727,7 +868,12 @@ class ChatGPTService:
         if not create_result.get("success"):
             return create_result
 
-        return self._success_result({"identifier": ctx.get("identifier", "default")})
+        pipeline_data = {"identifier": ctx.get("identifier", "default")}
+        create_data = create_result.get("data")
+        if isinstance(create_data, dict):
+            pipeline_data.update(create_data)
+
+        return self._success_result(pipeline_data)
 
     async def _exchange_tokens(
         self,
@@ -741,17 +887,39 @@ class ChatGPTService:
         if isinstance(pipeline_data, dict):
             source.update(pipeline_data)
 
-        auth_code = str(register_input.get("auth_code") or "").strip() if isinstance(register_input, dict) else ""
-        token_endpoint = str(register_input.get("token_endpoint") or "").strip() if isinstance(register_input, dict) else ""
+        normalized_register_input = register_input if isinstance(register_input, dict) else {}
+        auth_code = str(
+            source.get("auth_code")
+            or normalized_register_input.get("auth_code")
+            or ""
+        ).strip()
+
+        if not auth_code:
+            callback_url = str(
+                source.get("callback_url")
+                or normalized_register_input.get("callback_url")
+                or ""
+            ).strip()
+            parsed_callback = self._parse_callback_url(callback_url)
+            auth_code = str(parsed_callback.get("auth_code") or "").strip()
+            callback_state = str(parsed_callback.get("state") or "").strip()
+            if callback_state and not source.get("oauth_state"):
+                source["oauth_state"] = callback_state
+
+        token_endpoint = str(
+            normalized_register_input.get("token_endpoint")
+            or source.get("token_endpoint")
+            or ""
+        ).strip()
 
         if auth_code and token_endpoint:
             token_exchange_payload = {
-                "grant_type": str(register_input.get("grant_type") or "authorization_code"),
+                "grant_type": str(normalized_register_input.get("grant_type") or "authorization_code"),
                 "code": auth_code,
             }
-            client_id = str(register_input.get("client_id") or "").strip()
-            redirect_uri = str(register_input.get("redirect_uri") or "").strip()
-            code_verifier = str(register_input.get("code_verifier") or "").strip()
+            client_id = str(normalized_register_input.get("client_id") or "").strip()
+            redirect_uri = str(normalized_register_input.get("redirect_uri") or "").strip()
+            code_verifier = str(normalized_register_input.get("code_verifier") or "").strip()
             if client_id:
                 token_exchange_payload["client_id"] = client_id
             if redirect_uri:
@@ -769,8 +937,14 @@ class ChatGPTService:
             )
             if exchange_result.get("success"):
                 source.update(exchange_result.get("data", {}))
+            else:
+                return self._error_result(
+                    int(exchange_result.get("status_code", 0) or 0),
+                    exchange_result.get("error", "token exchange failed"),
+                    self._resolve_step_error_code(exchange_result, "token_exchange_failed"),
+                )
 
-        token_payload = register_input.get("token_payload") if isinstance(register_input, dict) else None
+        token_payload = normalized_register_input.get("token_payload")
         if isinstance(token_payload, dict):
             for key in ("access_token", "refresh_token", "id_token", "session_token", "expires_at"):
                 if key not in token_payload:
@@ -884,7 +1058,7 @@ class ChatGPTService:
             return self._error_result(
                 int(token_result.get("status_code", 0) or 0),
                 token_result.get("error", "token finalize failed"),
-                "token_finalize_failed",
+                self._resolve_step_error_code(token_result, "token_finalize_failed"),
             )
 
         payload.update(token_result.get("data", {}))
