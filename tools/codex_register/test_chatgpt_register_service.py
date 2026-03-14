@@ -679,6 +679,73 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["organization_id"], "org_1")
         self.assertEqual(result["data"]["workspace_id"], "ws_1")
 
+    async def test_register_uses_token_payload_fallback_when_pipeline_tokens_blank(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_run_register_pipeline",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "email": "a@b.com",
+                        "account_id": "123",
+                        "access_token": "",
+                        "refresh_token": "",
+                        "id_token": "",
+                        "session_token": "",
+                        "expires_at": "",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_enrich_account_context",
+            create=True,
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "plan_type": "",
+                        "organization_id": "",
+                        "workspace_id": "",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ):
+            result = await service.register(
+                {
+                    "mail_worker_base_url": "x",
+                    "mail_worker_token": "y",
+                    "fixed_email": "a@b.com",
+                    "mail_domain": "b.com",
+                    "token_payload": {
+                        "access_token": "at_fallback",
+                        "refresh_token": "rt_fallback",
+                        "id_token": "id_fallback",
+                        "session_token": "st_fallback",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    },
+                }
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status_code"], 200)
+        self.assertIsNone(result["error"])
+        self.assertIsNone(result["error_code"])
+        self.assertEqual(result["data"]["access_token"], "at_fallback")
+        self.assertEqual(result["data"]["refresh_token"], "rt_fallback")
+        self.assertEqual(result["data"]["id_token"], "id_fallback")
+        self.assertEqual(result["data"]["session_token"], "st_fallback")
+        self.assertEqual(result["data"]["expires_at"], "2099-01-01T00:00:00Z")
+
     async def test_register_maps_token_exchange_failure_to_token_finalize_failed(self):
         service = self.ChatGPTService()
 

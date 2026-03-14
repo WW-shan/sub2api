@@ -541,8 +541,12 @@ class ChatGPTService:
         token_payload = register_input.get("token_payload") if isinstance(register_input, dict) else None
         if isinstance(token_payload, dict):
             for key in ("access_token", "refresh_token", "id_token", "session_token", "expires_at"):
-                if key in token_payload and key not in source:
-                    source[key] = token_payload.get(key)
+                if key not in token_payload:
+                    continue
+                current_value = str(source.get(key) or "").strip()
+                fallback_value = token_payload.get(key)
+                if not current_value and fallback_value is not None:
+                    source[key] = fallback_value
 
         access_token = str(source.get("access_token") or "").strip()
         refresh_token = str(source.get("refresh_token") or "").strip()
