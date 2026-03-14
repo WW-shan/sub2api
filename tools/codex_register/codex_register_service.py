@@ -583,18 +583,6 @@ def _jwt_claims_no_verify(id_token: str) -> Dict[str, Any]:
         return {}
 
 
-def _decode_jwt_segment(segment: str) -> Dict[str, Any]:
-    raw = (segment or "").strip()
-    if not raw:
-        return {}
-    pad = "=" * ((4 - (len(raw) % 4)) % 4)
-    try:
-        decoded = base64.urlsafe_b64decode((raw + pad).encode("ascii"))
-        return json.loads(decoded.decode("utf-8"))
-    except Exception:
-        return {}
-
-
 def _to_int(value: Any) -> int:
     try:
         return int(value)
@@ -704,6 +692,111 @@ def extract_session_access_token(session_payload: JSONDict) -> str:
     if not isinstance(session_payload, dict):
         return ""
     return str(session_payload.get("accessToken") or "").strip()
+
+
+def _extract_parent_workspaces_from_auth_session(session_payload: JSONDict) -> List[JSONDict]:
+    if not isinstance(session_payload, dict):
+        return []
+
+    workspaces: List[JSONDict] = []
+    by_workspace_id: Dict[str, JSONDict] = {}
+
+    def upsert_workspace(*, workspace_id: str, organization_id: str = "", plan_type: str = "") -> None:
+        normalized_workspace_id = str(workspace_id or "").strip()
+        if not normalized_workspace_id:
+            return
+
+        entry = by_workspace_id.get(normalized_workspace_id)
+        if not entry:
+            entry = {"id": normalized_workspace_id}
+            by_workspace_id[normalized_workspace_id] = entry
+            workspaces.append(entry)
+
+        normalized_org_id = str(organization_id or "").strip()
+        normalized_plan_type = str(plan_type or "").strip().lower()
+        if normalized_org_id and not entry.get("organization_id"):
+            entry["organization_id"] = normalized_org_id
+        if normalized_plan_type and not entry.get("plan_type"):
+            entry["plan_type"] = normalized_plan_type
+
+    user = ensure_dict(session_payload.get("user"))
+    user_account = ensure_dict(user.get("account"))
+    current_account = ensure_dict(user_account.get("current_account") or user_account.get("currentAccount"))
+    current_workspace = ensure_dict(current_account.get("workspace"))
+    current_subscription = ensure_dict(current_workspace.get("subscription"))
+
+    upsert_workspace(
+        workspace_id=str(
+            current_workspace.get("id")
+            or current_workspace.get("workspace_id")
+            or current_workspace.get("workspaceId")
+            or current_account.get("id")
+            or current_account.get("account_id")
+            or ""
+        ),
+        organization_id=str(
+            current_workspace.get("organization_id")
+            or current_workspace.get("organizationId")
+            or current_account.get("organization_id")
+            or current_account.get("organizationId")
+            or ""
+        ),
+        plan_type=str(
+            current_subscription.get("plan_type")
+            or current_subscription.get("planType")
+            or current_workspace.get("plan_type")
+            or current_workspace.get("planType")
+            or current_account.get("plan_type")
+            or current_account.get("planType")
+            or ""
+        ),
+    )
+
+    accounts_map = ensure_dict(session_payload.get("accounts"))
+    for key, account_info in accounts_map.items():
+        account_payload = ensure_dict(ensure_dict(account_info).get("account"))
+        upsert_workspace(
+            workspace_id=str(
+                account_payload.get("account_id")
+                or account_payload.get("id")
+                or key
+                or ""
+            ),
+            organization_id=str(
+                account_payload.get("organization_id")
+                or account_payload.get("organizationId")
+                or ""
+            ),
+            plan_type=str(
+                account_payload.get("plan_type")
+                or account_payload.get("planType")
+                or account_payload.get("workspace_plan_type")
+                or ""
+            ),
+        )
+
+    return workspaces
+
+
+def fetch_parent_auth_session_payload(session: Any) -> JSONDict:
+    try:
+        response = session.get("https://chatgpt.com/api/auth/session", timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        append_log("warn", f"parent_auth_session_request_failed:{exc}")
+        return {}
+
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code != 200:
+        append_log("warn", f"parent_auth_session_status:{status_code}")
+        return {}
+
+    try:
+        payload = ensure_dict(response.json())
+    except Exception as exc:  # noqa: BLE001
+        append_log("warn", f"parent_auth_session_parse_failed:{exc}")
+        return {}
+
+    return payload
 
 
 def fetch_session_access_token(session: Any) -> str:
@@ -896,16 +989,12 @@ def run(proxy: Optional[str]) -> Optional[str]:
             info_log(create_account_resp.text)
             return None
 
-        auth_cookie = session.cookies.get("oai-client-auth-session")
-        if not auth_cookie:
-            info_log("[Error] 未能获取到授权 Cookie")
+        auth_session_payload = fetch_parent_auth_session_payload(session)
+        workspaces = _extract_parent_workspaces_from_auth_session(auth_session_payload)
+        if not workspaces:
+            info_log("[Error] auth/session 里没有 workspace 信息")
             return None
 
-        auth_json = _decode_jwt_segment(auth_cookie.split(".")[0])
-        workspaces = auth_json.get("workspaces") or []
-        if not workspaces:
-            info_log("[Error] 授权 Cookie 里没有 workspace 信息")
-            return None
         preferred_workspace_id = get_env("CODEX_PARENT_WORKSPACE_ID", "").strip()
         selected_workspace = select_parent_workspace(workspaces, preferred_workspace_id)
         selected_workspace_id = workspace_identifier(selected_workspace)
@@ -913,14 +1002,14 @@ def run(proxy: Optional[str]) -> Optional[str]:
             info_log("[Error] 无法解析 workspace_id")
             return None
 
-        select_body = f'{{"workspace_id":"{selected_workspace_id}"}}'
         select_resp = session.post(
             "https://auth.openai.com/api/accounts/workspace/select",
             headers={
                 "referer": "https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
+                "accept": "application/json",
                 "content-type": "application/json",
             },
-            data=select_body,
+            data=json.dumps({"workspace_id": selected_workspace_id}, ensure_ascii=False, separators=(",", ":")),
             timeout=register_http_timeout,
         )
         if select_resp.status_code != 200:
@@ -928,24 +1017,98 @@ def run(proxy: Optional[str]) -> Optional[str]:
             info_log(select_resp.text)
             return None
 
-        continue_url = str((select_resp.json() or {}).get("continue_url") or "").strip()
+        select_payload = ensure_dict(select_resp.json())
+        continue_url = str(select_payload.get("continue_url") or "").strip()
+
+        orgs = ensure_dict(select_payload.get("data")).get("orgs") or []
+        org_id = ""
+        project_id = ""
+        if isinstance(orgs, list) and orgs:
+            first_org = ensure_dict(orgs[0])
+            org_id = str(first_org.get("id") or "").strip()
+            projects = first_org.get("projects") or []
+            if isinstance(projects, list) and projects:
+                project_id = str(ensure_dict(projects[0]).get("id") or "").strip()
+
+        if org_id and not str(selected_workspace.get("organization_id") or "").strip():
+            selected_workspace["organization_id"] = org_id
+
+        if org_id:
+            org_body: JSONDict = {"org_id": org_id}
+            if project_id:
+                org_body["project_id"] = project_id
+            org_referer = continue_url if continue_url.startswith("http") else "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"
+            org_resp = session.post(
+                "https://auth.openai.com/api/accounts/organization/select",
+                headers={
+                    "referer": org_referer,
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                },
+                data=json.dumps(org_body, ensure_ascii=False, separators=(",", ":")),
+                timeout=register_http_timeout,
+                allow_redirects=False,
+            )
+            if org_resp.status_code in {301, 302, 303, 307, 308}:
+                location = str(org_resp.headers.get("Location") or "").strip()
+                if location:
+                    continue_url = urllib.parse.urljoin("https://auth.openai.com", location)
+            elif org_resp.status_code == 200:
+                org_payload = ensure_dict(org_resp.json())
+                org_continue_url = str(org_payload.get("continue_url") or "").strip()
+                if org_continue_url:
+                    continue_url = org_continue_url
+            else:
+                info_log(f"[Error] 选择 organization 失败，状态码: {org_resp.status_code}")
+                info_log(org_resp.text)
+                return None
+
         if not continue_url:
             info_log("[Error] workspace/select 响应里缺少 continue_url")
             return None
 
+        if continue_url.startswith("/"):
+            continue_url = urllib.parse.urljoin("https://auth.openai.com", continue_url)
+
         current_url = continue_url
         for _ in range(6):
             final_resp = session.get(current_url, allow_redirects=False, timeout=15)
-            location = final_resp.headers.get("Location") or ""
-            if final_resp.status_code not in [301, 302, 303, 307, 308]:
-                break
-            if not location:
-                break
+            location = str(final_resp.headers.get("Location") or "").strip()
 
-            next_url = urllib.parse.urljoin(current_url, location)
-            if "code=" in next_url and "state=" in next_url:
+            if final_resp.status_code in {301, 302, 303, 307, 308} and location:
+                next_url = urllib.parse.urljoin(current_url, location)
+                if "code=" in next_url and "state=" in next_url:
+                    token_json = submit_callback_url(
+                        callback_url=next_url,
+                        code_verifier=oauth.code_verifier,
+                        redirect_uri=oauth.redirect_uri,
+                        expected_state=oauth.state,
+                    )
+                    try:
+                        token_payload = ensure_dict(token_json)
+                        selected_plan_type = workspace_plan_type(selected_workspace)
+                        selected_organization_id = workspace_organization_id(selected_workspace)
+                        selected_workspace_id = workspace_identifier(selected_workspace)
+                        if selected_plan_type:
+                            token_payload["plan_type"] = selected_plan_type
+                            token_payload["codex_parent_plan_type"] = selected_plan_type
+                        if selected_organization_id:
+                            token_payload["organization_id"] = selected_organization_id
+                            token_payload["codex_parent_organization_id"] = selected_organization_id
+                        if selected_workspace_id:
+                            token_payload["workspace_id"] = selected_workspace_id
+                            token_payload["codex_parent_workspace_id"] = selected_workspace_id
+                        token_payload["codex_register_role"] = "parent"
+                        return json.dumps(token_payload, ensure_ascii=False, separators=(",", ":"))
+                    except Exception as exc:  # noqa: BLE001
+                        append_log("warn", f"token_payload_augment_failed:{exc}")
+                        return token_json
+                current_url = next_url
+                continue
+
+            if "code=" in current_url and "state=" in current_url:
                 token_json = submit_callback_url(
-                    callback_url=next_url,
+                    callback_url=current_url,
                     code_verifier=oauth.code_verifier,
                     redirect_uri=oauth.redirect_uri,
                     expected_state=oauth.state,
@@ -954,10 +1117,10 @@ def run(proxy: Optional[str]) -> Optional[str]:
                     token_payload = ensure_dict(token_json)
                     selected_plan_type = workspace_plan_type(selected_workspace)
                     selected_organization_id = workspace_organization_id(selected_workspace)
+                    selected_workspace_id = workspace_identifier(selected_workspace)
                     if selected_plan_type:
                         token_payload["plan_type"] = selected_plan_type
                         token_payload["codex_parent_plan_type"] = selected_plan_type
-                    selected_workspace_id = workspace_identifier(selected_workspace)
                     if selected_organization_id:
                         token_payload["organization_id"] = selected_organization_id
                         token_payload["codex_parent_organization_id"] = selected_organization_id
@@ -965,15 +1128,11 @@ def run(proxy: Optional[str]) -> Optional[str]:
                         token_payload["workspace_id"] = selected_workspace_id
                         token_payload["codex_parent_workspace_id"] = selected_workspace_id
                     token_payload["codex_register_role"] = "parent"
-                    session_access_token = fetch_session_access_token(session)
-                    if session_access_token:
-                        token_payload["session_access_token"] = session_access_token
-                        token_payload["access_token"] = session_access_token
                     return json.dumps(token_payload, ensure_ascii=False, separators=(",", ":"))
                 except Exception as exc:  # noqa: BLE001
                     append_log("warn", f"token_payload_augment_failed:{exc}")
                     return token_json
-            current_url = next_url
+            break
 
         info_log("[Error] 未能在重定向链中捕获到最终 Callback URL")
         return None
@@ -983,6 +1142,7 @@ def run(proxy: Optional[str]) -> Optional[str]:
 
 
 def run_auto_register_cli(*, proxy: Optional[str], once: bool, sleep_min: int, sleep_max: int, tokens_dir: Path) -> None:
+
     sleep_min = max(1, sleep_min)
     sleep_max = max(sleep_min, sleep_max)
     count = 0
@@ -2808,8 +2968,7 @@ class CodexRequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            redacted_accounts = [_redact_account_record(item) for item in accounts]
-            body = json.dumps({"accounts": redacted_accounts}).encode("utf-8")
+            body = json.dumps({"accounts": accounts}).encode("utf-8")
             self.send_response(200)
             self._cors_headers()
             self.send_header("Content-Type", "application/json")

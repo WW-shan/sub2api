@@ -1,5 +1,4 @@
 import ast
-import base64
 import io
 import json
 import os
@@ -204,18 +203,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertIn("mid-stderr", merged)
 
 
-    def test_run_falls_back_to_password_register_when_passwordless_disabled(self):
-        workspace_payload = {
-            "workspaces": [
-                {
-                    "id": "ws-parent",
-                    "subscription": {"plan_type": "business"},
-                    "organization_id": "org-1",
-                }
-            ]
-        }
-        auth_segment = base64.urlsafe_b64encode(json.dumps(workspace_payload).encode("utf-8")).decode("ascii").rstrip("=")
-
+    def test_run_uses_auth_session_workspace_selection_without_cookie_decode(self):
         class _FakeResponse:
             def __init__(self, *, status_code=200, text="", headers=None, json_data=None):
                 self.status_code = status_code
@@ -227,32 +215,54 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
                 return dict(self._json_data)
 
         post_calls = []
+        get_calls = []
 
         class _FakeSession:
             def __init__(self, *args, **kwargs):
                 del args, kwargs
-                self.cookies = {
-                    "oai-did": "did-1",
-                    "oai-client-auth-session": f"{auth_segment}.payload.signature",
-                }
+                self.cookies = {"oai-did": "did-1"}
 
             def get(self, url, **kwargs):
+                get_calls.append(url)
                 del kwargs
                 if "cloudflare.com/cdn-cgi/trace" in url:
                     return _FakeResponse(text="loc=US\n")
+                if url == "https://chatgpt.com/api/auth/session":
+                    return _FakeResponse(
+                        status_code=200,
+                        json_data={
+                            "user": {
+                                "account": {
+                                    "current_account": {
+                                        "id": "ws-parent",
+                                        "workspace": {
+                                            "id": "ws-parent",
+                                            "organization_id": "org-1",
+                                            "subscription": {"plan_type": "business"},
+                                        },
+                                    }
+                                }
+                            },
+                            "accounts": {
+                                "ws-parent": {
+                                    "account": {
+                                        "account_id": "ws-parent",
+                                        "organization_id": "org-1",
+                                        "plan_type": "business",
+                                    }
+                                }
+                            },
+                        },
+                    )
                 if url == "https://auth.local/continue":
                     return _FakeResponse(
                         status_code=302,
-                        headers={
-                            "Location": "http://localhost:1455/auth/callback?code=ok-code&state=state-1"
-                        },
+                        headers={"Location": "http://localhost:1455/auth/callback?code=ok-code&state=state-1"},
                     )
-                if url.endswith("/api/accounts/email-otp/send"):
-                    return _FakeResponse(status_code=200, json_data={"ok": True})
                 return _FakeResponse()
 
-            def post(self, url, *, headers=None, data=None, timeout=None):
-                post_calls.append((url, data, timeout))
+            def post(self, url, *, headers=None, data=None, timeout=None, allow_redirects=True):
+                post_calls.append((url, data, timeout, allow_redirects))
                 del headers
                 if url.endswith("/passwordless/send-otp"):
                     return _FakeResponse(
@@ -270,6 +280,8 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
                 if url.endswith("/email-otp/validate"):
                     return _FakeResponse(status_code=200, json_data={"ok": True})
                 if url.endswith("/workspace/select"):
+                    return _FakeResponse(status_code=200, json_data={"continue_url": "https://auth.local/continue"})
+                if url.endswith("/organization/select"):
                     return _FakeResponse(status_code=200, json_data={"continue_url": "https://auth.local/continue"})
                 return _FakeResponse(status_code=200)
 
@@ -297,20 +309,11 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
 
         self.assertIsNotNone(token_json)
         get_oai_code_mock.assert_called_once()
-        self.assertTrue(any(url.endswith("/api/accounts/user/register") for url, _data, _timeout in post_calls))
+        self.assertIn("https://chatgpt.com/api/auth/session", get_calls)
+        self.assertTrue(any(url.endswith("/api/accounts/user/register") for url, _data, _timeout, _allow in post_calls))
+        self.assertTrue(any(url.endswith("/workspace/select") for url, _data, _timeout, _allow in post_calls))
 
     def test_run_uses_timeout_for_all_session_post_requests(self):
-        workspace_payload = {
-            "workspaces": [
-                {
-                    "id": "ws-parent",
-                    "subscription": {"plan_type": "business"},
-                    "organization_id": "org-1",
-                }
-            ]
-        }
-        auth_segment = base64.urlsafe_b64encode(json.dumps(workspace_payload).encode("utf-8")).decode("ascii").rstrip("=")
-
         class _FakeResponse:
             def __init__(self, *, status_code=200, text="", headers=None, json_data=None):
                 self.status_code = status_code
@@ -326,13 +329,39 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
                 del args, kwargs
                 self.cookies = {
                     "oai-did": "did-1",
-                    "oai-client-auth-session": f"{auth_segment}.payload.signature",
                 }
 
             def get(self, url, **kwargs):
                 del kwargs
                 if "cloudflare.com/cdn-cgi/trace" in url:
                     return _FakeResponse(text="loc=US\n")
+                if url == "https://chatgpt.com/api/auth/session":
+                    return _FakeResponse(
+                        status_code=200,
+                        json_data={
+                            "user": {
+                                "account": {
+                                    "current_account": {
+                                        "id": "ws-parent",
+                                        "workspace": {
+                                            "id": "ws-parent",
+                                            "organization_id": "org-1",
+                                            "subscription": {"plan_type": "business"},
+                                        },
+                                    }
+                                }
+                            },
+                            "accounts": {
+                                "ws-parent": {
+                                    "account": {
+                                        "account_id": "ws-parent",
+                                        "organization_id": "org-1",
+                                        "plan_type": "business",
+                                    }
+                                }
+                            },
+                        },
+                    )
                 if url == "https://auth.local/continue":
                     return _FakeResponse(
                         status_code=302,
@@ -346,6 +375,8 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
                 del headers, data
                 self.post_timeouts.append(timeout)
                 if url.endswith("/workspace/select"):
+                    return _FakeResponse(status_code=200, json_data={"continue_url": "https://auth.local/continue"})
+                if url.endswith("/organization/select"):
                     return _FakeResponse(status_code=200, json_data={"continue_url": "https://auth.local/continue"})
                 return _FakeResponse(status_code=200)
 
@@ -388,7 +419,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
                     "refresh_token": "refresh-1",
                 }
             ),
-        ), mock.patch.object(service, "fetch_session_access_token", return_value=""):
+        ):
             token_json = service.run(proxy=None)
 
         self.assertIsNotNone(token_json)
@@ -1330,7 +1361,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             )
         )
 
-    def test_do_get_accounts_masks_tokens(self):
+    def test_do_get_accounts_returns_full_tokens_for_copy(self):
         handler = _FakeRequestHandler('/accounts')
 
         with mock.patch.object(
@@ -1349,8 +1380,8 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(handler.response_code, 200)
         payload = json.loads(handler.wfile.getvalue().decode('utf-8'))
         account = payload['accounts'][0]
-        self.assertNotEqual(account['refresh_token'], 'refresh-token-123')
-        self.assertNotEqual(account['access_token'], 'access-token-456')
+        self.assertEqual(account['refresh_token'], 'refresh-token-123')
+        self.assertEqual(account['access_token'], 'access-token-456')
 
     def test_do_get_accounts_rejects_when_auth_enabled_and_missing_api_key(self):
         handler = _FakeRequestHandler('/accounts')
