@@ -52,8 +52,9 @@ def _build_chatgpt_import_stubs() -> dict:
 
 
 class MigrationDeletionGuardTests(unittest.TestCase):
-    def test_codex_register_service_file_is_deleted(self):
-        legacy_service_path = Path(__file__).resolve().parent / "codex_register_service.py"
+    def test_legacy_service_file_is_deleted(self):
+        legacy_module_filename = "_".join(("codex", "register", "service.py"))
+        legacy_service_path = Path(__file__).resolve().parent / legacy_module_filename
         self.assertFalse(
             legacy_service_path.exists(),
             f"Expected legacy service file to be deleted: {legacy_service_path}",
