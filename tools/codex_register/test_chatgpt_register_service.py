@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 
@@ -48,6 +49,15 @@ def _build_chatgpt_import_stubs() -> dict:
         "app.utils": app_utils_module,
         "app.utils.jwt_parser": app_jwt_parser_module,
     }
+
+
+class MigrationDeletionGuardTests(unittest.TestCase):
+    def test_codex_register_service_file_is_deleted(self):
+        legacy_service_path = Path(__file__).resolve().parent / "codex_register_service.py"
+        self.assertFalse(
+            legacy_service_path.exists(),
+            f"Expected legacy service file to be deleted: {legacy_service_path}",
+        )
 
 
 class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
