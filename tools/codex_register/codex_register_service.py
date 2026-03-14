@@ -991,12 +991,17 @@ def run(proxy: Optional[str]) -> Optional[str]:
 
         auth_session_payload = fetch_parent_auth_session_payload(session)
         workspaces = _extract_parent_workspaces_from_auth_session(auth_session_payload)
-        if not workspaces:
-            info_log("[Error] auth/session 里没有 workspace 信息")
-            return None
-
         preferred_workspace_id = get_env("CODEX_PARENT_WORKSPACE_ID", "").strip()
-        selected_workspace = select_parent_workspace(workspaces, preferred_workspace_id)
+
+        if workspaces:
+            selected_workspace = select_parent_workspace(workspaces, preferred_workspace_id)
+        else:
+            if not preferred_workspace_id:
+                info_log("[Error] auth/session 里没有 workspace 信息")
+                return None
+            info_log("[Info] auth/session 无 workspace，回退使用 CODEX_PARENT_WORKSPACE_ID")
+            selected_workspace = {"id": preferred_workspace_id}
+
         selected_workspace_id = workspace_identifier(selected_workspace)
         if not selected_workspace_id:
             info_log("[Error] 无法解析 workspace_id")

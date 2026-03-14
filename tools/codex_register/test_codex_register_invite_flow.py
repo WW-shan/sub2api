@@ -419,7 +419,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
                     "refresh_token": "refresh-1",
                 }
             ),
-        ):
+        ), mock.patch.object(service, "fetch_session_access_token", return_value=""):
             token_json = service.run(proxy=None)
 
         self.assertIsNotNone(token_json)
@@ -1361,7 +1361,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             )
         )
 
-    def test_do_get_accounts_returns_full_tokens_for_copy(self):
+    def test_do_get_accounts_masks_tokens(self):
         handler = _FakeRequestHandler('/accounts')
 
         with mock.patch.object(
@@ -1380,8 +1380,8 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertEqual(handler.response_code, 200)
         payload = json.loads(handler.wfile.getvalue().decode('utf-8'))
         account = payload['accounts'][0]
-        self.assertEqual(account['refresh_token'], 'refresh-token-123')
-        self.assertEqual(account['access_token'], 'access-token-456')
+        self.assertNotEqual(account['refresh_token'], 'refresh-token-123')
+        self.assertNotEqual(account['access_token'], 'access-token-456')
 
     def test_do_get_accounts_rejects_when_auth_enabled_and_missing_api_key(self):
         handler = _FakeRequestHandler('/accounts')
