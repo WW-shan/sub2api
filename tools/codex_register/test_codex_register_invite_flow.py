@@ -204,7 +204,7 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
         self.assertIn("mid-stderr", merged)
 
 
-    def test_run_falls_back_to_password_when_passwordless_disabled(self):
+    def test_run_falls_back_to_password_register_when_passwordless_disabled(self):
         workspace_payload = {
             "workspaces": [
                 {
@@ -247,6 +247,8 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
                             "Location": "http://localhost:1455/auth/callback?code=ok-code&state=state-1"
                         },
                     )
+                if url.endswith("/api/accounts/email-otp/send"):
+                    return _FakeResponse(status_code=200, json_data={"ok": True})
                 return _FakeResponse()
 
             def post(self, url, *, headers=None, data=None, timeout=None):
@@ -263,6 +265,10 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
                             }
                         },
                     )
+                if url.endswith("/api/accounts/user/register"):
+                    return _FakeResponse(status_code=200, json_data={"ok": True})
+                if url.endswith("/email-otp/validate"):
+                    return _FakeResponse(status_code=200, json_data={"ok": True})
                 if url.endswith("/workspace/select"):
                     return _FakeResponse(status_code=200, json_data={"continue_url": "https://auth.local/continue"})
                 return _FakeResponse(status_code=200)
@@ -290,11 +296,8 @@ class CodexRegisterInviteFlowTests(unittest.TestCase):
             token_json = service.run(proxy=None)
 
         self.assertIsNotNone(token_json)
-        get_oai_code_mock.assert_not_called()
-        self.assertTrue(any(url.endswith("/api/accounts/password") for url, _data, _timeout in post_calls))
-        password_posts = [item for item in post_calls if item[0].endswith("/api/accounts/password")]
-        self.assertEqual(len(password_posts), 1)
-        self.assertIn("pw-123", str(password_posts[0][1]))
+        get_oai_code_mock.assert_called_once()
+        self.assertTrue(any(url.endswith("/api/accounts/user/register") for url, _data, _timeout in post_calls))
 
     def test_run_uses_timeout_for_all_session_post_requests(self):
         workspace_payload = {

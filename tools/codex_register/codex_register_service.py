@@ -808,7 +808,6 @@ def run(proxy: Optional[str]) -> Optional[str]:
             timeout=register_http_timeout,
         )
         info_log(f"[*] 验证码发送状态: {otp_resp.status_code}")
-        used_password_fallback = False
         if otp_resp.status_code != 200:
             otp_error_code = ""
             try:
@@ -823,50 +822,62 @@ def run(proxy: Optional[str]) -> Optional[str]:
                 otp_error_code = "passwordless_signup_disabled"
 
             if otp_error_code == "passwordless_signup_disabled":
-                info_log("[Info] Passwordless 不可用，尝试密码注册流程")
-                password_body = json.dumps({"password": password}, ensure_ascii=False, separators=(",", ":"))
-                password_resp = session.post(
-                    "https://auth.openai.com/api/accounts/password",
+                info_log("[Info] Passwordless 不可用，切换 register+email-otp 流程")
+                register_resp = session.post(
+                    "https://auth.openai.com/api/accounts/user/register",
                     headers={
                         "referer": "https://auth.openai.com/create-account/password",
                         "accept": "application/json",
                         "content-type": "application/json",
+                        "origin": "https://auth.openai.com",
                     },
-                    data=password_body,
+                    data=json.dumps({"username": email, "password": password}, ensure_ascii=False, separators=(",", ":")),
                     timeout=register_http_timeout,
                 )
-                info_log(f"[*] 密码设置状态: {password_resp.status_code}")
-                if password_resp.status_code != 200:
-                    info_log(f"[Error] 密码设置失败，状态码: {password_resp.status_code}")
-                    info_log(password_resp.text)
+                info_log(f"[*] 用户注册状态: {register_resp.status_code}")
+                if register_resp.status_code != 200:
+                    info_log(f"[Error] 用户注册失败，状态码: {register_resp.status_code}")
+                    info_log(register_resp.text)
                     return None
-                used_password_fallback = True
+
+                otp_send_resp = session.get(
+                    "https://auth.openai.com/api/accounts/email-otp/send",
+                    headers={
+                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "referer": "https://auth.openai.com/create-account/password",
+                    },
+                    timeout=register_http_timeout,
+                )
+                info_log(f"[*] 备用验证码发送状态: {otp_send_resp.status_code}")
+                if otp_send_resp.status_code != 200:
+                    info_log(f"[Error] 备用验证码发送失败，状态码: {otp_send_resp.status_code}")
+                    info_log(getattr(otp_send_resp, "text", ""))
+                    return None
             else:
                 info_log(f"[Error] 验证码发送失败，状态码: {otp_resp.status_code}")
                 info_log(otp_text)
                 return None
 
-        if not used_password_fallback:
-            code = get_oai_code(dev_token, email, proxies)
-            if not code:
-                return None
+        code = get_oai_code(dev_token, email, proxies)
+        if not code:
+            return None
 
-            code_body = f'{{"code":"{code}"}}'
-            code_resp = session.post(
-                "https://auth.openai.com/api/accounts/email-otp/validate",
-                headers={
-                    "referer": "https://auth.openai.com/email-verification",
-                    "accept": "application/json",
-                    "content-type": "application/json",
-                },
-                data=code_body,
-                timeout=register_http_timeout,
-            )
-            info_log(f"[*] 验证码校验状态: {code_resp.status_code}")
-            if code_resp.status_code != 200:
-                info_log(f"[Error] 验证码校验失败，状态码: {code_resp.status_code}")
-                info_log(code_resp.text)
-                return None
+        code_body = f'{{"code":"{code}"}}'
+        code_resp = session.post(
+            "https://auth.openai.com/api/accounts/email-otp/validate",
+            headers={
+                "referer": "https://auth.openai.com/email-verification",
+                "accept": "application/json",
+                "content-type": "application/json",
+            },
+            data=code_body,
+            timeout=register_http_timeout,
+        )
+        info_log(f"[*] 验证码校验状态: {code_resp.status_code}")
+        if code_resp.status_code != 200:
+            info_log(f"[Error] 验证码校验失败，状态码: {code_resp.status_code}")
+            info_log(code_resp.text)
+            return None
 
         create_account_body = '{"name":"Neo","birthdate":"2000-02-20"}'
         create_account_resp = session.post(
