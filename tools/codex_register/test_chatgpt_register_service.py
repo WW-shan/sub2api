@@ -163,3 +163,50 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(mocked.await_args.kwargs["identifier"], "acc_123")
+
+    async def test_register_input_invalid_when_mail_worker_token_missing(self):
+        service = self.ChatGPTService()
+
+        result = await service.register(
+            {
+                "mail_worker_base_url": "https://mail.example.com",
+                "fixed_email": "user@example.com",
+            }
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "input_invalid")
+
+    async def test_register_input_invalid_when_mail_domain_missing_without_fixed_email(self):
+        service = self.ChatGPTService()
+
+        result = await service.register(
+            {
+                "mail_worker_base_url": "https://mail.example.com",
+                "mail_worker_token": "token",
+            }
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "input_invalid")
+
+    async def test_register_input_invalid_for_non_positive_runtime_values(self):
+        service = self.ChatGPTService()
+        base_input = {
+            "mail_worker_base_url": "https://mail.example.com",
+            "mail_worker_token": "token",
+            "fixed_email": "user@example.com",
+        }
+
+        for field in (
+            "register_http_timeout",
+            "mail_poll_seconds",
+            "mail_poll_max_attempts",
+        ):
+            invalid_input = dict(base_input)
+            invalid_input[field] = 0
+
+            with self.subTest(field=field):
+                result = await service.register(invalid_input)
+                self.assertFalse(result["success"])
+                self.assertEqual(result["error_code"], "input_invalid")

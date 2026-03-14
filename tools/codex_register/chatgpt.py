@@ -158,11 +158,19 @@ class ChatGPTService:
         identifier: str = "default"
     ) -> Dict[str, Any]:
         """注册新账号（占位实现）"""
+        runtime_context_result = self._build_runtime_context(register_input, identifier)
+        if not runtime_context_result.get("success"):
+            return runtime_context_result
+
+        runtime_context = runtime_context_result.get("data", {})
+        runtime_identifier = runtime_context.get("identifier", identifier)
+
         pipeline_result = await self._run_register_pipeline(
             {
-                "register_input": register_input,
+                "register_input": runtime_context.get("register_input", {}),
+                "runtime_context": runtime_context,
                 "db_session": db_session,
-                "identifier": identifier,
+                "identifier": runtime_identifier,
             }
         )
 
@@ -175,9 +183,58 @@ class ChatGPTService:
 
         data = dict(pipeline_result.get("data", {}))
         if "identifier" not in data:
-            data["identifier"] = identifier
+            data["identifier"] = runtime_identifier
 
         return self._success_result(data)
+
+    def _build_runtime_context(self, register_input: Dict[str, Any], identifier: str) -> Dict[str, Any]:
+        """构建注册运行时上下文并执行输入校验"""
+        if not isinstance(register_input, dict):
+            return self._error_result(400, "register_input must be an object", "input_invalid")
+
+        normalized_input = dict(register_input)
+
+        mail_worker_token = str(normalized_input.get("mail_worker_token") or "").strip()
+        if not mail_worker_token:
+            return self._error_result(400, "mail_worker_token is required", "input_invalid")
+        normalized_input["mail_worker_token"] = mail_worker_token
+
+        fixed_email = str(normalized_input.get("fixed_email") or "").strip()
+        normalized_input["fixed_email"] = fixed_email
+        if not fixed_email:
+            mail_domain = str(normalized_input.get("mail_domain") or "").strip().lower()
+            if not mail_domain:
+                return self._error_result(
+                    400,
+                    "mail_domain is required when fixed_email is absent",
+                    "input_invalid",
+                )
+            normalized_input["mail_domain"] = mail_domain
+
+        for field_name, default_value in (
+            ("register_http_timeout", 15),
+            ("mail_poll_seconds", 3),
+            ("mail_poll_max_attempts", 40),
+        ):
+            raw_value = normalized_input.get(field_name, default_value)
+            try:
+                int_value = int(raw_value)
+            except (TypeError, ValueError):
+                return self._error_result(400, f"{field_name} must be a positive integer", "input_invalid")
+
+            if int_value <= 0:
+                return self._error_result(400, f"{field_name} must be > 0", "input_invalid")
+
+            normalized_input[field_name] = int_value
+
+        runtime_identifier = str(identifier or "").strip() or "default"
+
+        return self._success_result(
+            {
+                "identifier": runtime_identifier,
+                "register_input": normalized_input,
+            }
+        )
 
     async def _run_register_pipeline(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         """注册流水线占位钩子"""
