@@ -151,6 +151,36 @@ class ChatGPTService:
 
         return {"success": False, "status_code": 0, "error": "未知错误"}
 
+    async def register(
+        self,
+        register_input: Dict[str, Any],
+        db_session: Optional[DBAsyncSession] = None,
+        identifier: str = "default"
+    ) -> Dict[str, Any]:
+        """注册新账号（占位实现）"""
+        del register_input, db_session, identifier
+        return self._error_result(0, "not implemented", "unknown_error")
+
+    def _success_result(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """构建统一成功响应"""
+        return {
+            "success": True,
+            "status_code": 200,
+            "data": data,
+            "error": None,
+            "error_code": None,
+        }
+
+    def _error_result(self, status_code: int, error: str, error_code: str) -> Dict[str, Any]:
+        """构建统一错误响应"""
+        return {
+            "success": False,
+            "status_code": status_code,
+            "data": None,
+            "error": error,
+            "error_code": error_code,
+        }
+
     async def send_invite(
         self,
         access_token: str,
