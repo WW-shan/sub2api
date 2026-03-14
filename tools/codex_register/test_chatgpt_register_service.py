@@ -164,6 +164,24 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(mocked.await_args.kwargs["identifier"], "acc_123")
 
+    async def test_register_input_invalid_when_mail_worker_base_url_missing_or_blank(self):
+        service = self.ChatGPTService()
+
+        test_cases = (
+            {"mail_worker_token": "token", "fixed_email": "user@example.com"},
+            {
+                "mail_worker_base_url": "   ",
+                "mail_worker_token": "token",
+                "fixed_email": "user@example.com",
+            },
+        )
+
+        for register_input in test_cases:
+            with self.subTest(register_input=register_input):
+                result = await service.register(register_input)
+                self.assertFalse(result["success"])
+                self.assertEqual(result["error_code"], "input_invalid")
+
     async def test_register_input_invalid_when_mail_worker_token_missing(self):
         service = self.ChatGPTService()
 

@@ -194,6 +194,11 @@ class ChatGPTService:
 
         normalized_input = dict(register_input)
 
+        mail_worker_base_url = str(normalized_input.get("mail_worker_base_url") or "").strip()
+        if not mail_worker_base_url:
+            return self._error_result(400, "mail_worker_base_url is required", "input_invalid")
+        normalized_input["mail_worker_base_url"] = mail_worker_base_url.rstrip("/")
+
         mail_worker_token = str(normalized_input.get("mail_worker_token") or "").strip()
         if not mail_worker_token:
             return self._error_result(400, "mail_worker_token is required", "input_invalid")
