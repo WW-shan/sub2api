@@ -212,19 +212,10 @@ class ChatGPTService:
         db_session: Optional[DBAsyncSession] = None,
         identifier: str = "default",
         special_session_step: bool = False,
+        session: Optional[AsyncSession] = None,
     ) -> Dict[str, Any]:
         """注册流程请求分发器：默认走 _make_request"""
-        if special_session_step:
-            return await self._make_request(
-                method,
-                url,
-                headers,
-                json_data,
-                db_session,
-                identifier,
-            )
-
-        return await self._make_request(
+        result = await self._make_request(
             method,
             url,
             headers,
@@ -232,6 +223,13 @@ class ChatGPTService:
             db_session,
             identifier,
         )
+
+        if special_session_step and session is not None:
+            enriched = dict(result)
+            enriched.setdefault("session", session)
+            return enriched
+
+        return result
 
     async def register(
         self,
@@ -323,10 +321,192 @@ class ChatGPTService:
             }
         )
 
+    async def _start_auth_flow(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """启动注册鉴权前置步骤"""
+        register_input = ctx.get("register_input", {})
+        email = str(register_input.get("fixed_email") or "").strip()
+
+        result = await self._make_register_request(
+            "POST",
+            "https://auth.openai.com/api/accounts/check/v4",
+            self._build_auth_headers(),
+            {
+                "username": email,
+                "state": "register",
+            },
+            db_session=ctx.get("db_session"),
+            identifier=ctx.get("identifier", "default"),
+            special_session_step=True,
+            session=ctx.get("session"),
+        )
+
+        status_code = int(result.get("status_code", 0) or 0)
+        if not result.get("success") or status_code >= 300:
+            return self._error_result(
+                status_code,
+                result.get("error", "start auth flow failed"),
+                "auth_flow_failed",
+            )
+
+        return self._success_result(result.get("data", {}))
+
+    async def _submit_signup(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """提交注册信息"""
+        register_input = ctx.get("register_input", {})
+        body = {
+            "username": str(register_input.get("fixed_email") or "").strip(),
+            "password": str(register_input.get("fixed_password") or ""),
+        }
+
+        result = await self._make_register_request(
+            "POST",
+            "https://auth.openai.com/api/accounts/user/register",
+            self._build_auth_headers(),
+            body,
+            db_session=ctx.get("db_session"),
+            identifier=ctx.get("identifier", "default"),
+            special_session_step=True,
+            session=ctx.get("session"),
+        )
+
+        status_code = int(result.get("status_code", 0) or 0)
+        if not result.get("success") or status_code >= 300:
+            return self._error_result(
+                status_code,
+                result.get("error", "signup failed"),
+                "signup_failed",
+            )
+
+        return self._success_result(result.get("data", {}))
+
+    async def _send_otp_with_fallback(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """发送 OTP，密码免注册禁用时走 fallback"""
+        register_input = ctx.get("register_input", {})
+        email = str(register_input.get("fixed_email") or "").strip()
+
+        passwordless_result = await self._make_register_request(
+            "POST",
+            "https://auth.openai.com/api/passwordless/start",
+            self._build_auth_headers(),
+            {"username": email},
+            db_session=ctx.get("db_session"),
+            identifier=ctx.get("identifier", "default"),
+            special_session_step=True,
+            session=ctx.get("session"),
+        )
+
+        passwordless_status = int(passwordless_result.get("status_code", 0) or 0)
+        if passwordless_result.get("success") and passwordless_status < 300:
+            data = dict(passwordless_result.get("data", {}))
+            data["used_fallback"] = False
+            return self._success_result(data)
+
+        if passwordless_result.get("error_code") != "passwordless_signup_disabled":
+            return self._error_result(
+                passwordless_status,
+                passwordless_result.get("error", "send otp failed"),
+                "otp_send_failed",
+            )
+
+        signup_result = await self._submit_signup(ctx)
+        if not signup_result.get("success"):
+            return signup_result
+
+        fallback_data = dict(signup_result.get("data", {}))
+        fallback_data["used_fallback"] = True
+        return self._success_result(fallback_data)
+
+    async def _poll_and_validate_otp(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """轮询并校验 OTP"""
+        register_input = ctx.get("register_input", {})
+        email = str(register_input.get("fixed_email") or "").strip()
+
+        result = await self._make_register_request(
+            "POST",
+            "https://auth.openai.com/api/otp/validate",
+            self._build_auth_headers(),
+            {
+                "username": email,
+                "otp_code": str(ctx.get("otp_code") or ""),
+            },
+            db_session=ctx.get("db_session"),
+            identifier=ctx.get("identifier", "default"),
+            special_session_step=True,
+            session=ctx.get("session"),
+        )
+
+        status_code = int(result.get("status_code", 0) or 0)
+        if not result.get("success") or status_code >= 300:
+            return self._error_result(
+                status_code,
+                result.get("error", "otp validate failed"),
+                "otp_validate_failed",
+            )
+
+        return self._success_result(result.get("data", {}))
+
+    async def _create_account(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """创建账号"""
+        register_input = ctx.get("register_input", {})
+        email = str(register_input.get("fixed_email") or "").strip()
+
+        result = await self._make_register_request(
+            "POST",
+            "https://auth.openai.com/api/accounts/create",
+            self._build_auth_headers(),
+            {"email": email},
+            db_session=ctx.get("db_session"),
+            identifier=ctx.get("identifier", "default"),
+            special_session_step=True,
+            session=ctx.get("session"),
+        )
+
+        status_code = int(result.get("status_code", 0) or 0)
+        if not result.get("success") or status_code >= 300:
+            return self._error_result(
+                status_code,
+                result.get("error", "create account failed"),
+                "create_account_failed",
+            )
+
+        return self._success_result(result.get("data", {}))
+
     async def _run_register_pipeline(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """注册流水线占位钩子"""
-        del ctx
-        return self._error_result(0, "not implemented", "unknown_error")
+        """执行注册流水线"""
+        sentinel_result = await self._make_register_request(
+            "POST",
+            "https://chatgpt.com/backend-api/sentinel/chat-requirements",
+            self._build_sentinel_headers(),
+            {},
+            db_session=ctx.get("db_session"),
+            identifier=ctx.get("identifier", "default"),
+            special_session_step=True,
+            session=ctx.get("session"),
+        )
+
+        sentinel_status = int(sentinel_result.get("status_code", 0) or 0)
+        if not sentinel_result.get("success") or sentinel_status >= 300:
+            return self._error_result(
+                sentinel_status,
+                sentinel_result.get("error", "sentinel failed"),
+                "auth_flow_failed",
+            )
+
+        step_ctx = dict(ctx)
+        step_ctx["session"] = sentinel_result.get("session", ctx.get("session"))
+
+        for step in (
+            self._start_auth_flow,
+            self._submit_signup,
+            self._send_otp_with_fallback,
+            self._poll_and_validate_otp,
+            self._create_account,
+        ):
+            step_result = await step(step_ctx)
+            if not step_result.get("success"):
+                return step_result
+
+        return self._success_result({"identifier": ctx.get("identifier", "default")})
 
     def _success_result(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """构建统一成功响应"""

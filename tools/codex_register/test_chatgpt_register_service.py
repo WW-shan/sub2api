@@ -64,6 +64,15 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         sys.modules.pop("chatgpt", None)
         self._module_patch.stop()
 
+    def _valid_register_input(self):
+        return {
+            "mail_worker_base_url": "https://mail.example.com",
+            "mail_worker_token": "token",
+            "fixed_email": "user@example.com",
+            "fixed_password": "pw-123456",
+            "mail_domain": "example.com",
+        }
+
     async def test_register_response_contains_fixed_top_level_keys(self):
         service = self.ChatGPTService()
         result = await service.register({"mail_worker_base_url": "x"})
@@ -294,3 +303,198 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         mocked_make_request.assert_awaited_once()
         self.assertEqual(mocked_make_request.await_args.args[0], "POST")
+
+    async def test_register_maps_start_auth_flow_failure(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": False,
+                    "status_code": 502,
+                    "error": "bad gateway",
+                }
+            ),
+        ):
+            result = await service._start_auth_flow(
+                {
+                    "register_input": self._valid_register_input(),
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "auth_flow_failed")
+
+    async def test_register_maps_signup_non_200_to_signup_failed(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 409,
+                    "error": "email already used",
+                }
+            ),
+        ):
+            result = await service._submit_signup(
+                {
+                    "register_input": self._valid_register_input(),
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "signup_failed")
+
+    async def test_register_uses_fallback_when_passwordless_disabled(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": False,
+                    "status_code": 400,
+                    "error": "passwordless disabled",
+                    "error_code": "passwordless_signup_disabled",
+                }
+            ),
+        ), patch.object(
+            service,
+            "_submit_signup",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ticket": "signup-fallback"},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ) as mocked_submit_signup:
+            result = await service._send_otp_with_fallback(
+                {
+                    "register_input": self._valid_register_input(),
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["data"]["used_fallback"])
+        mocked_submit_signup.assert_awaited_once()
+
+    async def test_register_maps_otp_validate_non_200_to_otp_validate_failed(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 400,
+                    "error": "invalid otp",
+                }
+            ),
+        ):
+            result = await service._poll_and_validate_otp(
+                {
+                    "register_input": self._valid_register_input(),
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "otp_validate_failed")
+
+    async def test_register_maps_create_account_non_200_to_create_account_failed(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 409,
+                    "error": "cannot create account",
+                }
+            ),
+        ):
+            result = await service._create_account(
+                {
+                    "register_input": self._valid_register_input(),
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "create_account_failed")
+
+    async def test_register_special_steps_share_single_session_cookie_jar(self):
+        service = self.ChatGPTService()
+        shared_session = object()
+        call_sessions = {}
+
+        async def _side_effect(
+            method,
+            url,
+            headers,
+            json_data=None,
+            db_session=None,
+            identifier="default",
+            special_session_step=False,
+            session=None,
+        ):
+            del method, headers, json_data, db_session, identifier, special_session_step
+            call_sessions[url] = session
+            if "sentinel/chat-requirements" in url:
+                return {
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ok": True},
+                    "session": shared_session,
+                }
+            return {
+                "success": True,
+                "status_code": 200,
+                "data": {"ok": True},
+            }
+
+        with patch.object(service, "_make_register_request", new=AsyncMock(side_effect=_side_effect)):
+            result = await service._run_register_pipeline(
+                {
+                    "register_input": self._valid_register_input(),
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+
+        self.assertTrue(result["success"])
+        self.assertIs(
+            call_sessions["https://auth.openai.com/api/accounts/check/v4"],
+            shared_session,
+        )
+        self.assertIs(
+            call_sessions["https://auth.openai.com/api/accounts/user/register"],
+            shared_session,
+        )
+        self.assertIs(
+            call_sessions["https://auth.openai.com/api/passwordless/start"],
+            shared_session,
+        )
+        self.assertIs(
+            call_sessions["https://auth.openai.com/api/accounts/create"],
+            shared_session,
+        )
