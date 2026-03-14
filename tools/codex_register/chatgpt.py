@@ -237,7 +237,7 @@ class ChatGPTService:
         db_session: Optional[DBAsyncSession] = None,
         identifier: str = "default"
     ) -> Dict[str, Any]:
-        """注册新账号（占位实现）"""
+        """注册新账号"""
         runtime_context_result = self._build_runtime_context(register_input, identifier)
         if not runtime_context_result.get("success"):
             return runtime_context_result
@@ -261,11 +261,13 @@ class ChatGPTService:
                 pipeline_result.get("error_code", "unknown_error"),
             )
 
-        data = dict(pipeline_result.get("data", {}))
-        if "identifier" not in data:
-            data["identifier"] = runtime_identifier
+        return await self._finalize_registration_result(
+            pipeline_result.get("data", {}),
+            register_input=runtime_context.get("register_input", {}),
+            db_session=db_session,
+            identifier=runtime_identifier,
+        )
 
-        return self._success_result(data)
 
     def _build_runtime_context(self, register_input: Dict[str, Any], identifier: str) -> Dict[str, Any]:
         """构建注册运行时上下文并执行输入校验"""
@@ -522,6 +524,175 @@ class ChatGPTService:
             return create_result
 
         return self._success_result({"identifier": ctx.get("identifier", "default")})
+
+    async def _exchange_tokens(
+        self,
+        pipeline_data: Dict[str, Any],
+        register_input: Dict[str, Any],
+        db_session: Optional[DBAsyncSession] = None,
+        identifier: str = "default",
+    ) -> Dict[str, Any]:
+        """最小 token 交换实现：优先复用已有字段"""
+        del db_session, identifier
+        source: Dict[str, Any] = {}
+        if isinstance(pipeline_data, dict):
+            source.update(pipeline_data)
+
+        token_payload = register_input.get("token_payload") if isinstance(register_input, dict) else None
+        if isinstance(token_payload, dict):
+            for key in ("access_token", "refresh_token", "id_token", "session_token", "expires_at"):
+                if key in token_payload and key not in source:
+                    source[key] = token_payload.get(key)
+
+        access_token = str(source.get("access_token") or "").strip()
+        refresh_token = str(source.get("refresh_token") or "").strip()
+        id_token = str(source.get("id_token") or "").strip()
+        session_token = str(source.get("session_token") or "").strip()
+        expires_at = str(source.get("expires_at") or "").strip()
+
+        if not any((access_token, refresh_token, id_token, session_token)):
+            return self._error_result(0, "token exchange failed", "token_exchange_failed")
+
+        return self._success_result(
+            {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "id_token": id_token,
+                "session_token": session_token,
+                "expires_at": expires_at,
+            }
+        )
+
+    async def _enrich_account_context(
+        self,
+        base_payload: Dict[str, Any],
+        db_session: Optional[DBAsyncSession] = None,
+        identifier: str = "default",
+    ) -> Dict[str, Any]:
+        """best-effort 补充 plan/org/workspace 字段"""
+        enriched = {
+            "plan_type": str(base_payload.get("plan_type") or "").strip(),
+            "organization_id": str(base_payload.get("organization_id") or "").strip(),
+            "workspace_id": str(base_payload.get("workspace_id") or "").strip(),
+        }
+
+        if all(enriched.values()):
+            return self._success_result(enriched)
+
+        access_token = str(base_payload.get("access_token") or "").strip()
+        if not access_token:
+            return self._success_result(enriched)
+
+        try:
+            info_result = await self.get_account_info(access_token, db_session, identifier=identifier)
+        except Exception:
+            return self._success_result(enriched)
+
+        accounts = info_result.get("accounts") or []
+        account_id = str(base_payload.get("account_id") or "").strip()
+        selected = None
+        for account in accounts:
+            if str((account or {}).get("account_id") or "").strip() == account_id and account_id:
+                selected = account
+                break
+        if selected is None and accounts:
+            selected = accounts[0]
+
+        if isinstance(selected, dict):
+            if not enriched["plan_type"]:
+                enriched["plan_type"] = str(selected.get("plan_type") or "").strip()
+            if not enriched["organization_id"]:
+                enriched["organization_id"] = str(selected.get("organization_id") or "").strip()
+            if not enriched["workspace_id"]:
+                enriched["workspace_id"] = str(
+                    selected.get("workspace_id")
+                    or selected.get("account_id")
+                    or ""
+                ).strip()
+
+        return self._success_result(enriched)
+
+    async def _finalize_registration_result(
+        self,
+        pipeline_data: Dict[str, Any],
+        register_input: Dict[str, Any],
+        db_session: Optional[DBAsyncSession] = None,
+        identifier: str = "default",
+    ) -> Dict[str, Any]:
+        """聚合注册流水线结果并完成 token 与上下文补充"""
+        payload = dict(pipeline_data or {})
+        payload.setdefault("email", str(register_input.get("fixed_email") or "").strip())
+
+        if any(
+            str(payload.get(field) or "").strip()
+            for field in ("access_token", "refresh_token", "id_token", "session_token")
+        ):
+            token_result = self._success_result(
+                {
+                    "access_token": str(payload.get("access_token") or "").strip(),
+                    "refresh_token": str(payload.get("refresh_token") or "").strip(),
+                    "id_token": str(payload.get("id_token") or "").strip(),
+                    "session_token": str(payload.get("session_token") or "").strip(),
+                    "expires_at": str(payload.get("expires_at") or "").strip(),
+                }
+            )
+        else:
+            token_result = await self._exchange_tokens(
+                payload,
+                register_input,
+                db_session=db_session,
+                identifier=identifier,
+            )
+
+        if not token_result.get("success"):
+            return self._error_result(
+                int(token_result.get("status_code", 0) or 0),
+                token_result.get("error", "token finalize failed"),
+                "token_finalize_failed",
+            )
+
+        payload.update(token_result.get("data", {}))
+
+        account_id = str(payload.get("account_id") or "").strip()
+        provided_identifier = str(identifier or "").strip()
+        pipeline_identifier = str(payload.get("identifier") or "").strip()
+        email = str(payload.get("email") or "").strip()
+
+        if provided_identifier and provided_identifier != "default":
+            final_identifier = provided_identifier
+        elif pipeline_identifier:
+            final_identifier = pipeline_identifier
+        elif account_id:
+            final_identifier = f"acc_{account_id}"
+        elif email:
+            final_identifier = email
+        else:
+            final_identifier = "default"
+
+        payload["identifier"] = final_identifier
+
+        enrich_result = await self._enrich_account_context(
+            payload,
+            db_session=db_session,
+            identifier=final_identifier,
+        )
+        if enrich_result.get("success"):
+            payload.update(enrich_result.get("data", {}))
+
+        final_payload = {
+            "email": str(payload.get("email") or "").strip(),
+            "identifier": final_identifier,
+            "account_id": account_id,
+            "access_token": str(payload.get("access_token") or "").strip(),
+            "refresh_token": str(payload.get("refresh_token") or "").strip(),
+            "id_token": str(payload.get("id_token") or "").strip(),
+            "session_token": str(payload.get("session_token") or "").strip(),
+            "expires_at": str(payload.get("expires_at") or "").strip(),
+            "plan_type": str(payload.get("plan_type") or "").strip(),
+            "organization_id": str(payload.get("organization_id") or "").strip(),
+            "workspace_id": str(payload.get("workspace_id") or "").strip(),
+        }
+        return self._success_result(final_payload)
 
     def _success_result(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """构建统一成功响应"""
