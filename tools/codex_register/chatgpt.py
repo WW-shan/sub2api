@@ -214,7 +214,7 @@ class ChatGPTService:
         special_session_step: bool = False,
         session: Optional[AsyncSession] = None,
     ) -> Dict[str, Any]:
-        """注册流程请求分发器：默认走 _make_request"""
+        """注册流程请求分发器。special_session_step 仅用于步骤标注，session 仅用于结果回传。"""
         result = await self._make_request(
             method,
             url,
@@ -494,17 +494,32 @@ class ChatGPTService:
 
         step_ctx = dict(ctx)
         step_ctx["session"] = sentinel_result.get("session", ctx.get("session"))
+        step_ctx["signup_completed"] = False
 
-        for step in (
-            self._start_auth_flow,
-            self._submit_signup,
-            self._send_otp_with_fallback,
-            self._poll_and_validate_otp,
-            self._create_account,
-        ):
-            step_result = await step(step_ctx)
-            if not step_result.get("success"):
-                return step_result
+        start_result = await self._start_auth_flow(step_ctx)
+        if not start_result.get("success"):
+            return start_result
+
+        otp_send_result = await self._send_otp_with_fallback(step_ctx)
+        if not otp_send_result.get("success"):
+            return otp_send_result
+
+        if otp_send_result.get("data", {}).get("used_fallback"):
+            step_ctx["signup_completed"] = True
+
+        if not step_ctx.get("signup_completed"):
+            signup_result = await self._submit_signup(step_ctx)
+            if not signup_result.get("success"):
+                return signup_result
+            step_ctx["signup_completed"] = True
+
+        otp_validate_result = await self._poll_and_validate_otp(step_ctx)
+        if not otp_validate_result.get("success"):
+            return otp_validate_result
+
+        create_result = await self._create_account(step_ctx)
+        if not create_result.get("success"):
+            return create_result
 
         return self._success_result({"identifier": ctx.get("identifier", "default")})
 

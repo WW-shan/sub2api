@@ -494,7 +494,109 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             call_sessions["https://auth.openai.com/api/passwordless/start"],
             shared_session,
         )
+
         self.assertIs(
             call_sessions["https://auth.openai.com/api/accounts/create"],
             shared_session,
         )
+
+    async def test_register_pipeline_fallback_calls_submit_signup_once(self):
+        service = self.ChatGPTService()
+        shared_session = object()
+
+        async def _make_register_request_side_effect(
+            method,
+            url,
+            headers,
+            json_data=None,
+            db_session=None,
+            identifier="default",
+            special_session_step=False,
+            session=None,
+        ):
+            del method, headers, json_data, db_session, identifier, special_session_step
+            if "sentinel/chat-requirements" in url:
+                return {
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ok": True},
+                    "session": shared_session,
+                }
+            if "api/passwordless/start" in url:
+                return {
+                    "success": False,
+                    "status_code": 400,
+                    "error": "passwordless disabled",
+                    "error_code": "passwordless_signup_disabled",
+                    "session": session,
+                }
+            return {
+                "success": True,
+                "status_code": 200,
+                "data": {"ok": True},
+                "session": session,
+            }
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(side_effect=_make_register_request_side_effect),
+        ), patch.object(
+            service,
+            "_start_auth_flow",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ok": True},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_submit_signup",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ticket": "signup"},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ) as mocked_submit_signup, patch.object(
+            service,
+            "_poll_and_validate_otp",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ok": True},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_create_account",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"account_id": "acc"},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ):
+            result = await service._run_register_pipeline(
+                {
+                    "register_input": self._valid_register_input(),
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+
+        self.assertTrue(result["success"])
+        mocked_submit_signup.assert_awaited_once()
