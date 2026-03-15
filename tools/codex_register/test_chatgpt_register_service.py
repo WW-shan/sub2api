@@ -1110,23 +1110,28 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(mocked.await_args.kwargs["identifier"], "acc_123")
 
-    async def test_register_prepare_identity_generates_email_when_fixed_email_absent(self):
+    async def test_prepare_identity_generates_email_from_register_mail_domain(self):
         service = self.ChatGPTService()
+
+        with self._register_env(
+            REGISTER_MAIL_DOMAIN="wwcloud.me",
+            REGISTER_MAIL_WORKER_BASE_URL="https://worker.example.com",
+            REGISTER_MAIL_WORKER_TOKEN="token",
+        ):
+            runtime_context_result = service._build_runtime_context("acc_123")
+
+        self.assertTrue(runtime_context_result["success"])
+        runtime_register_input = runtime_context_result["data"]["register_input"]
 
         result = service._prepare_identity(
             {
-                "register_input": {
-                    "mail_domain": "example.com",
-                    "fixed_email": "",
-                    "fixed_password": "",
-                }
+                "register_input": runtime_register_input,
             }
         )
 
         self.assertTrue(result["success"])
         prepared_input = result["data"]["register_input"]
-        self.assertTrue(prepared_input["fixed_email"].endswith("@example.com"))
-        self.assertEqual(prepared_input["resolved_email"], prepared_input["fixed_email"])
+        self.assertTrue(prepared_input["resolved_email"].endswith("@wwcloud.me"))
         self.assertTrue(prepared_input["fixed_password"])
 
     async def test_register_special_steps_use_resolved_email(self):
