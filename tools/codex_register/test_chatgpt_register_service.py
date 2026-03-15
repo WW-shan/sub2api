@@ -1983,6 +1983,8 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             called_url,
             "https://worker.example.com/v1/code?email=user%40example.com",
         )
+        called_headers = mocked_make_register_request.await_args.args[2]
+        self.assertEqual(called_headers.get("Authorization"), "Bearer token")
 
     async def test_poll_and_validate_otp_fails_when_mail_worker_fetch_fails(self):
         service = self.ChatGPTService()
