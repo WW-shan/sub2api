@@ -104,7 +104,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     def _register_env(self, **overrides):
         base = {
             "REGISTER_MAIL_DOMAIN": "example.com",
-            "REGISTER_MAIL_WORKER_BASE_URL": "https://mail.example.com",
+            "REGISTER_MAIL_WORKER_BASE_URL": "https://worker.example.com",
             "REGISTER_MAIL_WORKER_TOKEN": "token",
         }
         base.update(overrides)
@@ -231,7 +231,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_then_get_members_uses_returned_identifier_without_relogin(self):
         service = self.ChatGPTService()
 
-        with patch.object(
+        with self._register_env(), patch.object(
             service,
             "_run_register_pipeline",
             new=AsyncMock(
@@ -256,14 +256,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         ):
-            reg = await service.register(
-                {
-                    "mail_worker_base_url": "x",
-                    "mail_worker_token": "y",
-                    "fixed_email": "a@b.com",
-                    "mail_domain": "b.com",
-                }
-            )
+            reg = await service.register()
 
         with patch.object(
             service,
@@ -289,30 +282,18 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_input_invalid_when_mail_worker_base_url_missing_or_blank(self):
         service = self.ChatGPTService()
 
-        test_cases = (
-            {"mail_worker_token": "token", "fixed_email": "user@example.com"},
-            {
-                "mail_worker_base_url": "   ",
-                "mail_worker_token": "token",
-                "fixed_email": "user@example.com",
-            },
-        )
-
-        for register_input in test_cases:
-            with self.subTest(register_input=register_input):
-                result = await service.register(register_input)
+        for base_url in ("", "   "):
+            with self.subTest(base_url=base_url):
+                with self._register_env(REGISTER_MAIL_WORKER_BASE_URL=base_url):
+                    result = await service.register()
                 self.assertFalse(result["success"])
                 self.assertEqual(result["error_code"], "input_invalid")
 
     async def test_register_input_invalid_when_mail_worker_token_missing(self):
         service = self.ChatGPTService()
 
-        result = await service.register(
-            {
-                "mail_worker_base_url": "https://mail.example.com",
-                "fixed_email": "user@example.com",
-            }
-        )
+        with self._register_env(REGISTER_MAIL_WORKER_TOKEN=""):
+            result = await service.register()
 
         self.assertFalse(result["success"])
         self.assertEqual(result["error_code"], "input_invalid")
@@ -320,36 +301,23 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_input_invalid_when_mail_domain_missing_without_fixed_email(self):
         service = self.ChatGPTService()
 
-        result = await service.register(
-            {
-                "mail_worker_base_url": "https://mail.example.com",
-                "mail_worker_token": "token",
-            }
-        )
+        with self._register_env(REGISTER_MAIL_DOMAIN=""):
+            result = await service.register()
 
         self.assertFalse(result["success"])
         self.assertEqual(result["error_code"], "input_invalid")
 
     async def test_register_input_invalid_for_non_positive_runtime_values(self):
         service = self.ChatGPTService()
-        base_input = {
-            "mail_worker_base_url": "https://mail.example.com",
-            "mail_worker_token": "token",
-            "fixed_email": "user@example.com",
-        }
 
-        for field in (
-            "register_http_timeout",
-            "mail_poll_seconds",
-            "mail_poll_max_attempts",
-        ):
-            invalid_input = dict(base_input)
-            invalid_input[field] = 0
+        with self._register_env():
+            runtime_result = service._build_runtime_context("acc_123")
 
-            with self.subTest(field=field):
-                result = await service.register(invalid_input)
-                self.assertFalse(result["success"])
-                self.assertEqual(result["error_code"], "input_invalid")
+        self.assertTrue(runtime_result["success"])
+        runtime_input = runtime_result["data"]["register_input"]
+        self.assertEqual(runtime_input["register_http_timeout"], 15)
+        self.assertEqual(runtime_input["mail_poll_seconds"], 3)
+        self.assertEqual(runtime_input["mail_poll_max_attempts"], 40)
 
     async def test_resolve_register_proxy_prefers_register_input_over_settings_service(self):
         service = self.ChatGPTService()
@@ -815,7 +783,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_token_finalize_success_payload_contains_tokens_and_context(self):
         service = self.ChatGPTService()
 
-        with patch.object(
+        with self._register_env(), patch.object(
             service,
             "_run_register_pipeline",
             new=AsyncMock(
@@ -867,15 +835,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         ):
-            result = await service.register(
-                {
-                    "mail_worker_base_url": "x",
-                    "mail_worker_token": "y",
-                    "fixed_email": "a@b.com",
-                    "fixed_password": "pw",
-                    "mail_domain": "b.com",
-                },
-            )
+            result = await service.register()
 
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["email"], "a@b.com")
@@ -893,7 +853,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_uses_token_payload_fallback_when_pipeline_tokens_blank(self):
         service = self.ChatGPTService()
 
-        with patch.object(
+        with self._register_env(), patch.object(
             service,
             "_run_register_pipeline",
             new=AsyncMock(
@@ -930,24 +890,29 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                     "error_code": None,
                 }
             ),
-        ):
-            result = await service.register(
-                {
-                    "mail_worker_base_url": "x",
-                    "mail_worker_token": "y",
-                    "fixed_email": "a@b.com",
-                    "mail_domain": "b.com",
-                    "token_payload": {
+        ), patch.object(
+            service,
+            "_exchange_tokens",
+            create=True,
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
                         "access_token": "at_fallback",
                         "refresh_token": "rt_fallback",
                         "id_token": "id_fallback",
                         "session_token": "st_fallback",
                         "expires_at": "2099-01-01T00:00:00Z",
                     },
+                    "error": None,
+                    "error_code": None,
                 }
-            )
+            ),
+        ) as mocked_exchange_tokens:
+            result = await service.register()
 
-        self.assertTrue(result["success"])
+        mocked_exchange_tokens.assert_awaited_once()
         self.assertEqual(result["status_code"], 200)
         self.assertIsNone(result["error"])
         self.assertIsNone(result["error_code"])
@@ -960,7 +925,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_maps_token_exchange_failure_to_token_finalize_failed(self):
         service = self.ChatGPTService()
 
-        with patch.object(
+        with self._register_env(), patch.object(
             service,
             "_run_register_pipeline",
             new=AsyncMock(
@@ -989,15 +954,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         ):
-            result = await service.register(
-                {
-                    "mail_worker_base_url": "x",
-                    "mail_worker_token": "y",
-                    "fixed_email": "a@b.com",
-                    "fixed_password": "pw",
-                    "mail_domain": "b.com",
-                },
-            )
+            result = await service.register()
 
         self.assertFalse(result["success"])
         self.assertEqual(result["status_code"], 401)
@@ -1044,7 +1001,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_identifier_can_be_passed_to_get_members_without_relogin(self):
         service = self.ChatGPTService()
 
-        with patch.object(
+        with self._register_env(), patch.object(
             service,
             "_run_register_pipeline",
             new=AsyncMock(
@@ -1079,15 +1036,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         ):
-            reg = await service.register(
-                {
-                    "mail_worker_base_url": "x",
-                    "mail_worker_token": "y",
-                    "fixed_email": "a@b.com",
-                    "fixed_password": "pw",
-                    "mail_domain": "b.com",
-                }
-            )
+            reg = await service.register()
 
         with patch.object(
             service,
@@ -1306,7 +1255,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_blocks_on_network_region_check_failure(self):
         service = self.ChatGPTService()
 
-        with patch.object(
+        with self._register_env(), patch.object(
             service,
             "_check_network_and_region",
             new=AsyncMock(
@@ -1323,7 +1272,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             "_run_register_pipeline",
             new=AsyncMock(side_effect=AssertionError("pipeline should not run")),
         ):
-            result = await service.register(self._valid_register_input())
+            result = await service.register()
 
         self.assertFalse(result["success"])
         self.assertEqual(result["status_code"], 451)
@@ -1332,7 +1281,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_prepare_identity_result_is_used_by_pipeline(self):
         service = self.ChatGPTService()
 
-        with patch.object(
+        with self._register_env(), patch.object(
             service,
             "_check_network_and_region",
             new=AsyncMock(
@@ -1399,7 +1348,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         ):
-            result = await service.register(self._valid_register_input())
+            result = await service.register()
 
         self.assertTrue(result["success"])
         mocked_prepare_identity.assert_called_once()
@@ -1736,7 +1685,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_allows_token_finalize_when_callback_state_matches(self):
         service = self.ChatGPTService()
 
-        with patch.object(
+        with self._register_env(), patch.object(
             service,
             "_run_register_pipeline",
             new=AsyncMock(
@@ -1789,15 +1738,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         ):
-            result = await service.register(
-                {
-                    "mail_worker_base_url": "x",
-                    "mail_worker_token": "y",
-                    "fixed_email": "user@example.com",
-                    "fixed_password": "pw",
-                    "mail_domain": "example.com",
-                }
-            )
+            result = await service.register()
 
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["access_token"], "at")
@@ -1805,7 +1746,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_register_fails_token_finalize_when_callback_state_mismatches(self):
         service = self.ChatGPTService()
 
-        with patch.object(
+        with self._register_env(), patch.object(
             service,
             "_run_register_pipeline",
             new=AsyncMock(
@@ -1828,15 +1769,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             "_exchange_tokens",
             new=AsyncMock(side_effect=AssertionError("token exchange should not run on state mismatch")),
         ):
-            result = await service.register(
-                {
-                    "mail_worker_base_url": "x",
-                    "mail_worker_token": "y",
-                    "fixed_email": "user@example.com",
-                    "fixed_password": "pw",
-                    "mail_domain": "example.com",
-                }
-            )
+            result = await service.register()
 
         self.assertFalse(result["success"])
         self.assertEqual(result["error_code"], "token_finalize_failed")
