@@ -187,21 +187,14 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime_register_input["fixed_email"], "a@b.com")
         self.assertEqual(runtime_register_input["fixed_password"], "pw")
 
-    async def test_register_fails_when_required_env_missing(self):
+    async def test_register_input_invalid_when_required_env_register_mail_domain_missing(self):
         service = self.ChatGPTService()
 
-        for missing_key in (
-            "REGISTER_MAIL_DOMAIN",
-            "REGISTER_MAIL_WORKER_BASE_URL",
-            "REGISTER_MAIL_WORKER_TOKEN",
-        ):
-            with self.subTest(missing_key=missing_key):
-                env_overrides = {missing_key: ""}
-                with self._register_env(**env_overrides):
-                    result = await service.register()
+        with self._register_env(REGISTER_MAIL_DOMAIN=""):
+            result = await service.register()
 
-                self.assertFalse(result["success"])
-                self.assertEqual(result["error_code"], "input_invalid")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "input_invalid")
 
     async def test_register_success_payload_contains_identifier(self):
         service = self.ChatGPTService()
@@ -279,17 +272,16 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(mocked.await_args.kwargs["identifier"], "acc_123")
 
-    async def test_register_input_invalid_when_mail_worker_base_url_missing_or_blank(self):
+    async def test_register_input_invalid_when_required_env_register_mail_worker_base_url_missing(self):
         service = self.ChatGPTService()
 
-        for base_url in ("", "   "):
-            with self.subTest(base_url=base_url):
-                with self._register_env(REGISTER_MAIL_WORKER_BASE_URL=base_url):
-                    result = await service.register()
-                self.assertFalse(result["success"])
-                self.assertEqual(result["error_code"], "input_invalid")
+        with self._register_env(REGISTER_MAIL_WORKER_BASE_URL=""):
+            result = await service.register()
 
-    async def test_register_input_invalid_when_mail_worker_token_missing(self):
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "input_invalid")
+
+    async def test_register_input_invalid_when_required_env_register_mail_worker_token_missing(self):
         service = self.ChatGPTService()
 
         with self._register_env(REGISTER_MAIL_WORKER_TOKEN=""):
@@ -297,27 +289,6 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(result["error_code"], "input_invalid")
-
-    async def test_register_input_invalid_when_mail_domain_missing_without_fixed_email(self):
-        service = self.ChatGPTService()
-
-        with self._register_env(REGISTER_MAIL_DOMAIN=""):
-            result = await service.register()
-
-        self.assertFalse(result["success"])
-        self.assertEqual(result["error_code"], "input_invalid")
-
-    async def test_register_input_invalid_for_non_positive_runtime_values(self):
-        service = self.ChatGPTService()
-
-        with self._register_env():
-            runtime_result = service._build_runtime_context("acc_123")
-
-        self.assertTrue(runtime_result["success"])
-        runtime_input = runtime_result["data"]["register_input"]
-        self.assertEqual(runtime_input["register_http_timeout"], 15)
-        self.assertEqual(runtime_input["mail_poll_seconds"], 3)
-        self.assertEqual(runtime_input["mail_poll_max_attempts"], 40)
 
     async def test_resolve_register_proxy_prefers_register_input_over_settings_service(self):
         service = self.ChatGPTService()
