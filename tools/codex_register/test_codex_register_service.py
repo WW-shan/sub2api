@@ -86,18 +86,17 @@ class _MissingCodexRegisterService:
 
 
 def _load_service_class():
-    candidates = (
-        "tools.codex_register.codex_register_service",
-        "codex_register_service",
-    )
-    for module_name in candidates:
-        try:
-            module = importlib.import_module(module_name)
-        except ModuleNotFoundError:
-            continue
-        service_cls = getattr(module, "CodexRegisterService", None)
-        if service_cls is not None:
-            return service_cls
+    module_name = "tools.codex_register.codex_register_service"
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name == module_name:
+            return _MissingCodexRegisterService
+        raise
+
+    service_cls = getattr(module, "CodexRegisterService", None)
+    if service_cls is not None:
+        return service_cls
     return _MissingCodexRegisterService
 
 
@@ -229,6 +228,21 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
                     sleep_max=1,
                 )
                 await self._enable_and_create(created_count)
+
+                if created_count == 5:
+                    self.store.state.update(
+                        {
+                            "job_phase": "waiting_manual:parent_upgrade",
+                            "waiting_reason": "parent_upgrade",
+                            "can_start": False,
+                            "can_resume": True,
+                            "can_abandon": True,
+                        }
+                    )
+
+                status_before_resume = (await self.service.handle_path("/status"))["data"]
+                self.assertEqual(status_before_resume["job_phase"], "waiting_manual:parent_upgrade")
+                self.assertEqual(status_before_resume["waiting_reason"], "parent_upgrade")
 
                 result = await self.service.handle_path("/resume")
                 status_payload = (await self.service.handle_path("/status"))["data"]
