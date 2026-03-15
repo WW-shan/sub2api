@@ -87,10 +87,6 @@ func (h *CodexHandler) Disable(c *gin.Context) {
 	h.proxyPost(c, "/disable")
 }
 
-func (h *CodexHandler) RunOnce(c *gin.Context) {
-	h.proxyPost(c, "/run-once")
-}
-
 func (h *CodexHandler) Resume(c *gin.Context) {
 	h.proxyPost(c, "/resume")
 }

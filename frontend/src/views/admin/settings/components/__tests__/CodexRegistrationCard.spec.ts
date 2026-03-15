@@ -14,7 +14,6 @@ const codexApiMocks = vi.hoisted(() => ({
   getAccounts: vi.fn(),
   enable: vi.fn(),
   disable: vi.fn(),
-  runOnce: vi.fn(),
   resume: vi.fn(),
   retry: vi.fn()
 }))

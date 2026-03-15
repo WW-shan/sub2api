@@ -43,3 +43,21 @@ func TestRegisterCodexRoutesIncludesResumeEndpoint(t *testing.T) {
 	require.NotEqual(t, http.StatusNotFound, w.Code)
 	require.Equal(t, http.StatusOK, w.Code)
 }
+
+func TestRegisterCodexRoutesRejectsDeprecatedRunOnceEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{
+			Codex: adminhandler.NewCodexHandler(),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/codex/run-once", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+}

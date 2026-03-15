@@ -73,11 +73,6 @@ export async function disable(): Promise<CodexStatus> {
   return res.data
 }
 
-export async function runOnce(): Promise<CodexStatus> {
-  const res = await apiClient.post<CodexStatus>('/admin/codex/run-once')
-  return res.data
-}
-
 export async function resume(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus>('/admin/codex/resume')
   return res.data
@@ -94,7 +89,6 @@ export default {
   getAccounts,
   enable,
   disable,
-  runOnce,
   resume,
   retry
 }
