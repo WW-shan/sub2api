@@ -271,6 +271,93 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result["success"])
                 self.assertEqual(result["error_code"], "input_invalid")
 
+    async def test_resolve_register_proxy_prefers_register_input_over_settings_service(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_resolve_settings_service_proxy",
+            new=AsyncMock(return_value="http://settings-proxy.example:9000"),
+        ) as mocked_settings_proxy:
+            resolved_proxy = await service._resolve_register_proxy(
+                {
+                    "proxy": "http://input-proxy.example:8000",
+                },
+                db_session=None,
+            )
+
+        self.assertEqual(resolved_proxy, "http://input-proxy.example:8000")
+        mocked_settings_proxy.assert_not_awaited()
+
+    async def test_resolve_register_proxy_falls_back_to_settings_service(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_resolve_settings_service_proxy",
+            new=AsyncMock(return_value="http://settings-proxy.example:9000"),
+        ) as mocked_settings_proxy:
+            resolved_proxy = await service._resolve_register_proxy(
+                {
+                    "fixed_email": "user@example.com",
+                },
+                db_session=None,
+            )
+
+        self.assertEqual(resolved_proxy, "http://settings-proxy.example:9000")
+        mocked_settings_proxy.assert_awaited_once()
+
+    async def test_resolve_register_proxy_returns_empty_when_settings_service_unavailable(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_resolve_settings_service_proxy",
+            new=AsyncMock(side_effect=RuntimeError("settings unavailable")),
+        ):
+            resolved_proxy = await service._resolve_register_proxy(
+                {
+                    "fixed_email": "user@example.com",
+                },
+                db_session=None,
+            )
+
+        self.assertEqual(resolved_proxy, "")
+
+    async def test_check_network_and_region_uses_resolved_proxy_for_session_creation(self):
+        service = self.ChatGPTService()
+
+        trace_session = types.SimpleNamespace(
+            get=AsyncMock(
+                return_value=types.SimpleNamespace(
+                    status_code=200,
+                    text="fl=29f88\nloc=US\n",
+                )
+            )
+        )
+
+        with patch.object(
+            service,
+            "_create_session",
+            new=AsyncMock(return_value=trace_session),
+        ) as mocked_create_session:
+            result = await service._check_network_and_region(
+                {
+                    "register_input": {
+                        **self._valid_register_input(),
+                        "resolved_proxy": "http://register-proxy.example:8080",
+                    },
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+
+        self.assertTrue(result["success"])
+        mocked_create_session.assert_awaited_once_with(
+            None,
+            "http://register-proxy.example:8080",
+        )
+
     async def test_register_uses_build_browser_base_headers(self):
         service = self.ChatGPTService()
 
@@ -503,8 +590,9 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             identifier="default",
             special_session_step=False,
             session=None,
+            proxy=None,
         ):
-            del method, headers, json_data, db_session, identifier, special_session_step
+            del method, headers, json_data, db_session, identifier, special_session_step, proxy
             call_sessions[url] = session
             if "sentinel/chat-requirements" in url:
                 return {
@@ -561,8 +649,9 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             identifier="default",
             special_session_step=False,
             session=None,
+            proxy=None,
         ):
-            del method, headers, json_data, db_session, identifier, special_session_step
+            del method, headers, json_data, db_session, identifier, special_session_step, proxy
             if "sentinel/chat-requirements" in url:
                 return {
                     "success": True,
@@ -1057,8 +1146,9 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             identifier="default",
             special_session_step=False,
             session=None,
+            proxy=None,
         ):
-            del method, headers, json_data, db_session, identifier, special_session_step, session
+            del method, headers, json_data, db_session, identifier, special_session_step, session, proxy
             if url.endswith("/api/passwordless/start"):
                 return {
                     "success": False,
@@ -1178,7 +1268,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                     "status_code": 451,
                     "data": None,
                     "error": "region blocked: IR",
-                    "error_code": "region_blocked",
+                    "error_code": "network_error",
                 }
             ),
         ), patch.object(
@@ -1190,7 +1280,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(result["status_code"], 451)
-        self.assertEqual(result["error_code"], "region_blocked")
+        self.assertEqual(result["error_code"], "network_error")
 
     async def test_register_prepare_identity_result_is_used_by_pipeline(self):
         service = self.ChatGPTService()
@@ -1488,6 +1578,217 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             "https://auth.openai.com/oauth/token",
         )
 
+    async def test_run_register_pipeline_bootstraps_oauth_state_when_absent(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "token_endpoint": "https://auth.openai.com/oauth/token",
+                    },
+                    "session": object(),
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_start_auth_flow",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_send_otp_with_fallback",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "token_endpoint": "https://auth.openai.com/oauth/token",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_submit_signup",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_poll_and_validate_otp",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_create_account",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "account_id": "acc_001",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ):
+            result_one = await service._run_register_pipeline(
+                {
+                    "register_input": self._valid_register_input(),
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+            result_two = await service._run_register_pipeline(
+                {
+                    "register_input": self._valid_register_input(),
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+
+        self.assertTrue(result_one["success"])
+        self.assertTrue(result_two["success"])
+        self.assertTrue(result_one["data"].get("oauth_state"))
+        self.assertEqual(result_one["data"]["oauth_state"], result_two["data"]["oauth_state"])
+
+    async def test_register_allows_token_finalize_when_callback_state_matches(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_run_register_pipeline",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "email": "user@example.com",
+                        "account_id": "acc_001",
+                        "oauth_state": "state-ok",
+                        "callback_url": "https://auth.openai.com/callback?code=cb-ok-001&state=state-ok",
+                        "token_endpoint": "https://auth.openai.com/oauth/token",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_exchange_tokens",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "access_token": "at",
+                        "refresh_token": "rt",
+                        "id_token": "id",
+                        "session_token": "st",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_enrich_account_context",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "plan_type": "",
+                        "organization_id": "",
+                        "workspace_id": "",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ):
+            result = await service.register(
+                {
+                    "mail_worker_base_url": "x",
+                    "mail_worker_token": "y",
+                    "fixed_email": "user@example.com",
+                    "fixed_password": "pw",
+                    "mail_domain": "example.com",
+                }
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["access_token"], "at")
+
+    async def test_register_fails_token_finalize_when_callback_state_mismatches(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_run_register_pipeline",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {
+                        "email": "user@example.com",
+                        "account_id": "acc_001",
+                        "oauth_state": "state-expected",
+                        "callback_url": "https://auth.openai.com/callback?code=cb-mismatch-001&state=state-actual",
+                        "token_endpoint": "https://auth.openai.com/oauth/token",
+                    },
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ), patch.object(
+            service,
+            "_exchange_tokens",
+            new=AsyncMock(side_effect=AssertionError("token exchange should not run on state mismatch")),
+        ):
+            result = await service.register(
+                {
+                    "mail_worker_base_url": "x",
+                    "mail_worker_token": "y",
+                    "fixed_email": "user@example.com",
+                    "fixed_password": "pw",
+                    "mail_domain": "example.com",
+                }
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "token_finalize_failed")
+
     async def test_finalize_uses_pipeline_callback_artifacts_without_token_payload(self):
         service = self.ChatGPTService()
 
@@ -1576,7 +1877,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(result["status_code"], 451)
-        self.assertEqual(result["error_code"], "region_blocked")
+        self.assertEqual(result["error_code"], "network_error")
 
     async def test_check_network_and_region_maps_timeout_to_network_timeout(self):
         service = self.ChatGPTService()
@@ -1688,7 +1989,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             result = await service._poll_and_validate_otp(ctx)
 
         self.assertFalse(result["success"])
-        self.assertEqual(result["error_code"], "otp_fetch_failed")
+        self.assertEqual(result["error_code"], "otp_validate_failed")
         mocked_poll_worker.assert_awaited_once()
 
     async def test_poll_and_validate_otp_propagates_mail_worker_not_found_error(self):
@@ -1720,7 +2021,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             result = await service._poll_and_validate_otp(ctx)
 
         self.assertFalse(result["success"])
-        self.assertEqual(result["error_code"], "otp_not_found")
+        self.assertEqual(result["error_code"], "otp_validate_failed")
 
     async def test_poll_and_validate_otp_propagates_mail_worker_network_timeout_error(self):
         service = self.ChatGPTService()

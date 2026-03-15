@@ -3,6 +3,8 @@ ChatGPT API 服务
 用于调用 ChatGPT 后端 API,实现 Team 成员管理功能
 """
 import asyncio
+import hashlib
+import importlib
 import logging
 import random
 from urllib.parse import parse_qs, urlparse
@@ -28,27 +30,59 @@ class ChatGPTService:
         self.jwt_parser = JWTParser()
         # 会话池：按标识符（如 Email 或 TeamID）隔离，防止身份泄漏并提高 CF 稳定性
         self._sessions: Dict[str, AsyncSession] = {}
+        # 记录标识符对应代理，确保注册流程内后续请求复用同一代理会话
+        self._identifier_proxies: Dict[str, str] = {}
 
-    async def _create_session(self, db_session: DBAsyncSession) -> AsyncSession:
+    async def _create_session(
+        self,
+        db_session: DBAsyncSession,
+        proxy: Optional[str] = None,
+    ) -> AsyncSession:
         """
         创建 HTTP 会话
         """
+        del db_session
+        session_kwargs: Dict[str, Any] = {
+            "impersonate": "chrome110",
+            "timeout": 30,
+            "verify": False,  # 某些代理环境下需要，或根据需求开启
+        }
+        normalized_proxy = str(proxy or "").strip()
+        if normalized_proxy:
+            session_kwargs["proxy"] = normalized_proxy
+
         # 使用 chrome110 指纹，这是 curl_cffi 中绕过 CF 最稳定的版本之一
-        session = AsyncSession(
-            impersonate="chrome110",
-            timeout=30,
-            verify=False # 某些代理环境下需要，或根据需求开启
-        )
+        session = AsyncSession(**session_kwargs)
         return session
 
-    async def _get_session(self, db_session: DBAsyncSession, identifier: str) -> AsyncSession:
+    async def _get_session(
+        self,
+        db_session: DBAsyncSession,
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> AsyncSession:
         """
         根据标识符获取或创建持久会话
         """
-        if identifier not in self._sessions:
-            logger.info(f"为标识符 {identifier} 创建新会话")
-            self._sessions[identifier] = await self._create_session(db_session)
-        return self._sessions[identifier]
+        normalized_identifier = str(identifier or "").strip() or "default"
+        normalized_proxy = str(proxy or "").strip()
+        if not normalized_proxy:
+            normalized_proxy = str(self._identifier_proxies.get(normalized_identifier) or "").strip()
+
+        if normalized_proxy:
+            self._identifier_proxies[normalized_identifier] = normalized_proxy
+
+        session_cache_key = normalized_identifier
+        if normalized_proxy:
+            session_cache_key = f"{normalized_identifier}::proxy::{normalized_proxy}"
+
+        if session_cache_key not in self._sessions:
+            logger.info(f"为标识符 {session_cache_key} 创建新会话")
+            self._sessions[session_cache_key] = await self._create_session(
+                db_session,
+                normalized_proxy,
+            )
+        return self._sessions[session_cache_key]
 
 
     def _build_browser_base_headers(
@@ -108,6 +142,186 @@ class ChatGPTService:
         if resolved_email:
             return resolved_email
         return str(register_input.get("fixed_email") or "").strip()
+
+    def _resolve_register_proxy_from_input(self, register_input: Dict[str, Any]) -> str:
+        """解析注册代理：优先 resolved_proxy，再回退 proxy"""
+        if not isinstance(register_input, dict):
+            return ""
+
+        for key in ("resolved_proxy", "proxy"):
+            value = str(register_input.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    async def _resolve_settings_service_proxy(
+        self,
+        db_session: Optional[DBAsyncSession],
+    ) -> str:
+        """从 settings service best-effort 获取代理"""
+        candidate_modules = (
+            "settings_service",
+            "app.services.settings_service",
+            "services.settings_service",
+        )
+
+        for module_name in candidate_modules:
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                continue
+
+            for service_ref in (
+                getattr(module, "settings_service", None),
+                getattr(module, "SettingsService", None),
+            ):
+                if service_ref is None:
+                    continue
+
+                try:
+                    service_obj = service_ref() if isinstance(service_ref, type) else service_ref
+                except Exception:
+                    continue
+
+                for method_name in (
+                    "get_register_proxy",
+                    "resolve_register_proxy",
+                    "get_proxy",
+                    "resolve_proxy",
+                ):
+                    method = getattr(service_obj, method_name, None)
+                    if not callable(method):
+                        continue
+
+                    try:
+                        if db_session is None:
+                            maybe_proxy = method()
+                        else:
+                            maybe_proxy = method(db_session)
+                    except TypeError:
+                        try:
+                            maybe_proxy = method(db_session)
+                        except Exception:
+                            continue
+                    except Exception:
+                        continue
+
+                    if asyncio.iscoroutine(maybe_proxy):
+                        try:
+                            maybe_proxy = await maybe_proxy
+                        except Exception:
+                            continue
+
+                    normalized_proxy = str(maybe_proxy or "").strip()
+                    if normalized_proxy:
+                        return normalized_proxy
+
+                for attr_name in ("proxy", "proxy_url"):
+                    normalized_proxy = str(getattr(service_obj, attr_name, "") or "").strip()
+                    if normalized_proxy:
+                        return normalized_proxy
+
+        return ""
+
+    async def _resolve_register_proxy(
+        self,
+        register_input: Dict[str, Any],
+        db_session: Optional[DBAsyncSession],
+    ) -> str:
+        """解析注册代理优先级: 输入代理 > settings service > 空"""
+        input_proxy = self._resolve_register_proxy_from_input(register_input)
+        if input_proxy:
+            return input_proxy
+
+        try:
+            return await self._resolve_settings_service_proxy(db_session)
+        except Exception:
+            return ""
+
+    def _resolve_register_proxy_from_ctx(self, ctx: Dict[str, Any]) -> str:
+        """从上下文中解析注册代理"""
+        register_input = dict((ctx or {}).get("register_input") or {})
+        return self._resolve_register_proxy_from_input(register_input)
+
+    def _build_deterministic_oauth_state(self, ctx: Dict[str, Any]) -> str:
+        """构建确定性的 oauth_state，保证同一输入状态稳定"""
+        source_ctx = ctx if isinstance(ctx, dict) else {}
+        register_input = source_ctx.get("register_input") or {}
+        if not isinstance(register_input, dict):
+            register_input = {}
+
+        seed_parts = [
+            str(source_ctx.get("identifier") or "default").strip() or "default",
+            self._resolve_register_email(register_input),
+            str(register_input.get("mail_domain") or "").strip().lower(),
+            str(register_input.get("token_endpoint") or "").strip(),
+        ]
+        seed = "|".join(seed_parts)
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        return f"state-{digest[:24]}"
+
+    def _ensure_oauth_bootstrap(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """注册流水线 oauth bootstrap：在缺失时补全并固化 oauth_state"""
+        normalized_ctx = dict(ctx or {})
+        register_input = dict(normalized_ctx.get("register_input") or {})
+
+        oauth_state = str(
+            normalized_ctx.get("oauth_state")
+            or register_input.get("oauth_state")
+            or register_input.get("state")
+            or ""
+        ).strip()
+
+        if not oauth_state:
+            oauth_state = self._build_deterministic_oauth_state(
+                {
+                    "identifier": normalized_ctx.get("identifier", "default"),
+                    "register_input": register_input,
+                }
+            )
+
+        normalized_ctx["oauth_state"] = oauth_state
+        register_input["oauth_state"] = oauth_state
+        normalized_ctx["register_input"] = register_input
+        return normalized_ctx
+
+    def _verify_callback_state(
+        self,
+        pipeline_data: Dict[str, Any],
+        register_input: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """校验 callback_url 中 state 与预期 oauth_state 一致性"""
+        merged_source: Dict[str, Any] = {}
+        if isinstance(register_input, dict):
+            merged_source.update(register_input)
+        if isinstance(pipeline_data, dict):
+            merged_source.update(pipeline_data)
+
+        callback_url = str(merged_source.get("callback_url") or "").strip()
+        if not callback_url:
+            return self._success_result({})
+
+        parsed = self._parse_callback_url(callback_url)
+        callback_state = str(parsed.get("state") or "").strip()
+        expected_state = str(
+            merged_source.get("oauth_state")
+            or merged_source.get("state")
+            or ""
+        ).strip()
+
+        if callback_state and expected_state and callback_state != expected_state:
+            return self._error_result(
+                400,
+                f"oauth callback state mismatch: expected {expected_state}, got {callback_state}",
+                "token_finalize_failed",
+            )
+
+        return self._success_result(
+            {
+                "oauth_state": expected_state or callback_state,
+                "callback_state": callback_state,
+            }
+        )
 
     def _map_network_exception(self, exc: Exception) -> str:
         """网络异常映射"""
@@ -277,11 +491,14 @@ class ChatGPTService:
 
         resolved_region = str(register_input.get("region") or "").strip().upper()
 
+        resolved_proxy = self._resolve_register_proxy_from_input(register_input)
+
         if not resolved_region:
             try:
                 active_session = await self._get_session(
                     ctx.get("db_session"),
                     ctx.get("identifier", "default"),
+                    proxy=resolved_proxy,
                 )
                 trace_response = await active_session.get(
                     "https://www.cloudflare.com/cdn-cgi/trace",
@@ -311,7 +528,7 @@ class ChatGPTService:
                 )
 
         if resolved_region and resolved_region in blocked_regions:
-            return self._error_result(451, f"region blocked: {resolved_region}", "region_blocked")
+            return self._error_result(451, f"region blocked: {resolved_region}", "network_error")
 
         checked_ctx = dict(ctx or {})
         checked_ctx["detected_region"] = resolved_region
@@ -411,12 +628,12 @@ class ChatGPTService:
             return self._error_result(
                 status_code,
                 result.get("error", "mail worker otp fetch failed"),
-                self._resolve_step_error_code(result, "otp_fetch_failed"),
+                self._resolve_step_error_code(result, "otp_validate_failed"),
             )
 
         otp_code = self._extract_otp_code_from_payload(result.get("data", {}))
         if not otp_code:
-            return self._error_result(404, "otp code not found", "otp_not_found")
+            return self._error_result(404, "otp code not found", "otp_validate_failed")
 
         return self._success_result({"otp_code": otp_code})
 
@@ -453,7 +670,8 @@ class ChatGPTService:
         headers: Dict[str, str],
         json_data: Optional[Dict[str, Any]] = None,
         db_session: Optional[DBAsyncSession] = None,
-        identifier: str = "default"
+        identifier: str = "default",
+        proxy: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         发送 HTTP 请求 (使用持久化隔离会话，提高 CF 通过率并防止污染)
@@ -471,15 +689,16 @@ class ChatGPTService:
                 if email:
                     identifier = email
 
-        session = await self._get_session(db_session, identifier)
-        
+        proxy = str(proxy or "").strip()
+        session = await self._get_session(db_session, identifier, proxy=proxy)
+
         # 补全基础浏览器请求头
         base_headers = {
             "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://chatgpt.com/",
             "Origin": "https://chatgpt.com",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
         }
         # 合并请求头，不要轻易覆盖 User-Agent 以免破坏 impersonate 的指纹
         for k, v in base_headers.items():
@@ -563,6 +782,7 @@ class ChatGPTService:
         identifier: str = "default",
         special_session_step: bool = False,
         session: Optional[AsyncSession] = None,
+        proxy: Optional[str] = None,
     ) -> Dict[str, Any]:
         """注册流程请求分发器。special_session_step 会强制同一会话执行。"""
         if not special_session_step:
@@ -573,11 +793,12 @@ class ChatGPTService:
                 json_data,
                 db_session,
                 identifier,
+                proxy=proxy,
             )
 
         active_session = session
         if active_session is None:
-            active_session = await self._get_session(db_session, identifier)
+            active_session = await self._get_session(db_session, identifier, proxy=proxy)
 
         result = await self._make_special_session_request(
             method,
@@ -604,6 +825,12 @@ class ChatGPTService:
 
         runtime_context = runtime_context_result.get("data", {})
         runtime_identifier = runtime_context.get("identifier", identifier)
+        runtime_register_input = dict(runtime_context.get("register_input", {}))
+
+        resolved_proxy = await self._resolve_register_proxy(runtime_register_input, db_session)
+        if resolved_proxy:
+            runtime_register_input["resolved_proxy"] = resolved_proxy
+            runtime_context["register_input"] = runtime_register_input
 
         network_check_result = await self._check_network_and_region(
             {
@@ -813,10 +1040,20 @@ class ChatGPTService:
         if not otp_code:
             otp_result = await self._poll_otp_from_mail_worker(ctx)
             if not otp_result.get("success"):
-                return otp_result
+                otp_error_code = self._resolve_step_error_code(
+                    otp_result,
+                    "otp_validate_failed",
+                )
+                if otp_error_code not in {"network_timeout", "network_error"}:
+                    otp_error_code = "otp_validate_failed"
+                return self._error_result(
+                    int(otp_result.get("status_code", 0) or 0),
+                    otp_result.get("error", "otp validate failed"),
+                    otp_error_code,
+                )
             otp_code = str((otp_result.get("data") or {}).get("otp_code") or "").strip()
             if not otp_code:
-                return self._error_result(404, "otp code not found", "otp_not_found")
+                return self._error_result(404, "otp code not found", "otp_validate_failed")
 
         result = await self._make_register_request(
             "POST",
@@ -935,15 +1172,18 @@ class ChatGPTService:
 
     async def _run_register_pipeline(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         """执行注册流水线"""
+        bootstrap_ctx = self._ensure_oauth_bootstrap(ctx)
+
         sentinel_result = await self._make_register_request(
             "POST",
             "https://chatgpt.com/backend-api/sentinel/chat-requirements",
             self._build_sentinel_headers(),
             {},
-            db_session=ctx.get("db_session"),
-            identifier=ctx.get("identifier", "default"),
+            db_session=bootstrap_ctx.get("db_session"),
+            identifier=bootstrap_ctx.get("identifier", "default"),
             special_session_step=True,
-            session=ctx.get("session"),
+            session=bootstrap_ctx.get("session"),
+            proxy=self._resolve_register_proxy_from_ctx(bootstrap_ctx),
         )
 
         sentinel_status = int(sentinel_result.get("status_code", 0) or 0)
@@ -954,13 +1194,16 @@ class ChatGPTService:
                 self._resolve_step_error_code(sentinel_result, "auth_flow_failed"),
             )
 
-        step_ctx = dict(ctx)
-        step_ctx["session"] = sentinel_result.get("session", ctx.get("session"))
+        step_ctx = dict(bootstrap_ctx)
+        step_ctx["session"] = sentinel_result.get("session", bootstrap_ctx.get("session"))
         step_ctx["signup_completed"] = False
 
         pipeline_data = self._merge_pipeline_artifacts(
-            {"identifier": ctx.get("identifier", "default")},
-            ctx,
+            {
+                "identifier": bootstrap_ctx.get("identifier", "default"),
+                "oauth_state": bootstrap_ctx.get("oauth_state"),
+            },
+            bootstrap_ctx,
             sentinel_result,
         )
 
@@ -1157,6 +1400,13 @@ class ChatGPTService:
         """聚合注册流水线结果并完成 token 与上下文补充"""
         payload = dict(pipeline_data or {})
         payload.setdefault("email", self._resolve_register_email(register_input))
+
+        state_verification_result = self._verify_callback_state(payload, register_input)
+        if not state_verification_result.get("success"):
+            return state_verification_result
+
+        if state_verification_result.get("data"):
+            payload.update(state_verification_result.get("data", {}))
 
         if any(
             str(payload.get(field) or "").strip()
@@ -1504,12 +1754,19 @@ class ChatGPTService:
     async def clear_session(self, identifier: Optional[str] = None):
         """清理指定身份的会话，若不提供则清理所有"""
         if identifier:
-            if identifier in self._sessions:
+            normalized_identifier = str(identifier or "").strip()
+            session_keys = [
+                key
+                for key in self._sessions.keys()
+                if key == normalized_identifier or key.startswith(f"{normalized_identifier}::proxy::")
+            ]
+            for session_key in session_keys:
                 try:
-                    await self._sessions[identifier].close()
+                    await self._sessions[session_key].close()
                 except:
                     pass
-                del self._sessions[identifier]
+                del self._sessions[session_key]
+            self._identifier_proxies.pop(normalized_identifier, None)
         else:
             await self.close()
 
@@ -1521,6 +1778,7 @@ class ChatGPTService:
             except:
                 pass
         self._sessions.clear()
+        self._identifier_proxies.clear()
 
 
 # 创建全局实例
