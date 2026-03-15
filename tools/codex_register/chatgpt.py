@@ -249,8 +249,22 @@ class ChatGPTService:
         prepared_ctx["register_input"] = register_input
         return self._success_result(prepared_ctx)
 
+    def _parse_cloudflare_trace_location(self, trace_body: str) -> str:
+        """解析 Cloudflare trace 返回中的 loc 字段"""
+        raw_trace = str(trace_body or "")
+        if not raw_trace:
+            return ""
+
+        for line in raw_trace.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip().lower() == "loc":
+                return str(value or "").strip().upper()
+        return ""
+
     async def _check_network_and_region(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """注册前网络与区域检查（最小实现）"""
+        """注册前网络与区域检查：预检连通性并校验区域策略"""
         register_input = dict((ctx or {}).get("register_input") or {})
 
         blocked_regions = {
@@ -261,11 +275,48 @@ class ChatGPTService:
         if not blocked_regions:
             blocked_regions = {"IR", "KP", "SY", "CU"}
 
-        region = str(register_input.get("region") or "").strip().upper()
-        if region and region in blocked_regions:
-            return self._error_result(451, f"region blocked: {region}", "region_blocked")
+        resolved_region = str(register_input.get("region") or "").strip().upper()
 
-        return self._success_result(dict(ctx or {}))
+        if not resolved_region:
+            try:
+                active_session = await self._get_session(
+                    ctx.get("db_session"),
+                    ctx.get("identifier", "default"),
+                )
+                trace_response = await active_session.get(
+                    "https://www.cloudflare.com/cdn-cgi/trace",
+                    headers=self._build_browser_base_headers(
+                        {"Accept": "text/plain"},
+                        origin="https://www.cloudflare.com",
+                        referer="https://www.cloudflare.com/",
+                    ),
+                )
+                trace_status = int(getattr(trace_response, "status_code", 0) or 0)
+                if trace_status and trace_status >= 400:
+                    return self._error_result(
+                        trace_status,
+                        f"network precheck failed: http {trace_status}",
+                        "network_error",
+                    )
+
+                resolved_region = self._parse_cloudflare_trace_location(
+                    str(getattr(trace_response, "text", "") or "")
+                )
+            except Exception as exc:
+                mapped_code = self._map_network_exception(exc)
+                return self._error_result(
+                    0,
+                    f"network precheck failed: {exc}",
+                    mapped_code,
+                )
+
+        if resolved_region and resolved_region in blocked_regions:
+            return self._error_result(451, f"region blocked: {resolved_region}", "region_blocked")
+
+        checked_ctx = dict(ctx or {})
+        checked_ctx["detected_region"] = resolved_region
+        return self._success_result(checked_ctx)
+
 
     def _resolve_step_error_code(self, result: Dict[str, Any], default_error_code: str) -> str:
         """步骤错误码映射：保留网络层错误码，不重写"""
@@ -761,12 +812,11 @@ class ChatGPTService:
         otp_code = str(ctx.get("otp_code") or "").strip()
         if not otp_code:
             otp_result = await self._poll_otp_from_mail_worker(ctx)
-            if otp_result.get("success"):
-                otp_code = str((otp_result.get("data") or {}).get("otp_code") or "").strip()
-            else:
-                otp_error_code = str(otp_result.get("error_code") or "").strip()
-                if otp_error_code in {"network_timeout", "network_error"}:
-                    return otp_result
+            if not otp_result.get("success"):
+                return otp_result
+            otp_code = str((otp_result.get("data") or {}).get("otp_code") or "").strip()
+            if not otp_code:
+                return self._error_result(404, "otp code not found", "otp_not_found")
 
         result = await self._make_register_request(
             "POST",
@@ -818,6 +868,71 @@ class ChatGPTService:
 
         return self._success_result(result.get("data", {}))
 
+    def _merge_pipeline_artifacts(
+        self,
+        pipeline_data: Dict[str, Any],
+        *artifact_sources: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """将关键鉴权产物从多步输出合并到 pipeline_data"""
+        merged = dict(pipeline_data or {})
+        artifact_keys = {
+            "auth_code",
+            "callback_url",
+            "token_endpoint",
+            "oauth_state",
+            "state",
+            "code",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "session_token",
+            "expires_at",
+            "account_id",
+            "email",
+        }
+
+        for source in artifact_sources:
+            if not isinstance(source, dict):
+                continue
+
+            candidates = [source]
+            nested_data = source.get("data")
+            if isinstance(nested_data, dict):
+                candidates.append(nested_data)
+
+            for candidate in candidates:
+                for key, value in candidate.items():
+                    if key not in artifact_keys:
+                        continue
+                    if value is None:
+                        continue
+                    normalized = str(value).strip() if isinstance(value, str) else value
+                    if isinstance(normalized, str) and not normalized:
+                        continue
+                    merged[key] = value
+
+        callback_url = str(merged.get("callback_url") or "").strip()
+        if callback_url:
+            parsed_callback = self._parse_callback_url(callback_url)
+            parsed_auth_code = str(parsed_callback.get("auth_code") or "").strip()
+            if parsed_auth_code and not str(merged.get("auth_code") or "").strip():
+                merged["auth_code"] = parsed_auth_code
+            parsed_state = str(parsed_callback.get("state") or "").strip()
+            if parsed_state and not str(merged.get("oauth_state") or "").strip():
+                merged["oauth_state"] = parsed_state
+
+        if not str(merged.get("auth_code") or "").strip():
+            code_alias = str(merged.get("code") or "").strip()
+            if code_alias:
+                merged["auth_code"] = code_alias
+
+        if not str(merged.get("oauth_state") or "").strip():
+            state_alias = str(merged.get("state") or "").strip()
+            if state_alias:
+                merged["oauth_state"] = state_alias
+
+        return merged
+
     async def _run_register_pipeline(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         """执行注册流水线"""
         sentinel_result = await self._make_register_request(
@@ -843,13 +958,21 @@ class ChatGPTService:
         step_ctx["session"] = sentinel_result.get("session", ctx.get("session"))
         step_ctx["signup_completed"] = False
 
+        pipeline_data = self._merge_pipeline_artifacts(
+            {"identifier": ctx.get("identifier", "default")},
+            ctx,
+            sentinel_result,
+        )
+
         start_result = await self._start_auth_flow(step_ctx)
         if not start_result.get("success"):
             return start_result
+        pipeline_data = self._merge_pipeline_artifacts(pipeline_data, start_result)
 
         otp_send_result = await self._send_otp_with_fallback(step_ctx)
         if not otp_send_result.get("success"):
             return otp_send_result
+        pipeline_data = self._merge_pipeline_artifacts(pipeline_data, otp_send_result)
 
         if otp_send_result.get("data", {}).get("used_fallback"):
             step_ctx["signup_completed"] = True
@@ -859,19 +982,21 @@ class ChatGPTService:
             if not signup_result.get("success"):
                 return signup_result
             step_ctx["signup_completed"] = True
+            pipeline_data = self._merge_pipeline_artifacts(pipeline_data, signup_result)
 
         otp_validate_result = await self._poll_and_validate_otp(step_ctx)
         if not otp_validate_result.get("success"):
             return otp_validate_result
+        pipeline_data = self._merge_pipeline_artifacts(pipeline_data, otp_validate_result)
 
         create_result = await self._create_account(step_ctx)
         if not create_result.get("success"):
             return create_result
 
-        pipeline_data = {"identifier": ctx.get("identifier", "default")}
-        create_data = create_result.get("data")
-        if isinstance(create_data, dict):
-            pipeline_data.update(create_data)
+        pipeline_data = self._merge_pipeline_artifacts(
+            pipeline_data,
+            create_result,
+        )
 
         return self._success_result(pipeline_data)
 
