@@ -925,6 +925,7 @@ class ChatGPTService:
 
     async def register(
         self,
+        *,
         db_session: Optional[DBAsyncSession] = None,
         identifier: str = "default"
     ) -> Dict[str, Any]:
