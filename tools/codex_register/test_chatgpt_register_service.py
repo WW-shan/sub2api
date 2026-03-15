@@ -452,7 +452,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["error_code"], "auth_flow_failed")
 
-    async def test_register_maps_signup_non_200_to_signup_failed(self):
+    async def test_submit_signup_uses_password_register_referer_and_password(self):
         service = self.ChatGPTService()
 
         with patch.object(
@@ -461,11 +461,13 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(
                 return_value={
                     "success": True,
-                    "status_code": 409,
-                    "error": "email already used",
+                    "status_code": 200,
+                    "data": {"ok": True},
+                    "error": None,
+                    "error_code": None,
                 }
             ),
-        ):
+        ) as mocked_make_register_request:
             result = await service._submit_signup(
                 {
                     "register_input": self._valid_register_input(),
@@ -473,38 +475,28 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                     "identifier": "acc_123",
                 }
             )
-        self.assertFalse(result["success"])
-        self.assertEqual(result["error_code"], "signup_failed")
 
-    async def test_register_uses_fallback_when_passwordless_disabled(self):
+        self.assertTrue(result["success"])
+        mocked_make_register_request.assert_awaited_once()
+        self.assertEqual(
+            mocked_make_register_request.await_args.args[1],
+            "https://auth.openai.com/api/accounts/user/register",
+        )
+        headers = mocked_make_register_request.await_args.args[2]
+        self.assertEqual(headers["Referer"], "https://auth.openai.com/create-account/password")
+        body = (
+            mocked_make_register_request.await_args.kwargs.get("json_data")
+            if "json_data" in mocked_make_register_request.await_args.kwargs
+            else mocked_make_register_request.await_args.args[3]
+        )
+        self.assertTrue(bool(str(body.get("password") or "").strip()))
+
+    async def test_send_otp_uses_email_otp_send_endpoint_without_passwordless(self):
         service = self.ChatGPTService()
 
         with patch.object(
             service,
             "_make_register_request",
-            new=AsyncMock(
-                return_value={
-                    "success": False,
-                    "status_code": 400,
-                    "error": "passwordless disabled",
-                    "error_code": "passwordless_signup_disabled",
-                }
-            ),
-        ), patch.object(
-            service,
-            "_submit_signup",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {"ticket": "signup-fallback"},
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ) as mocked_submit_signup, patch.object(
-            service,
-            "_send_signup_fallback_otp",
             new=AsyncMock(
                 return_value={
                     "success": True,
@@ -514,7 +506,11 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                     "error_code": None,
                 }
             ),
-        ) as mocked_send_signup_fallback_otp:
+        ) as mocked_make_register_request, patch.object(
+            service,
+            "_submit_signup",
+            new=AsyncMock(),
+        ) as mocked_submit_signup:
             result = await service._send_otp_with_fallback(
                 {
                     "register_input": self._valid_register_input(),
@@ -524,9 +520,14 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result["success"])
-        self.assertTrue(result["data"]["used_fallback"])
-        mocked_submit_signup.assert_awaited_once()
-        mocked_send_signup_fallback_otp.assert_awaited_once()
+        self.assertFalse(result["data"]["used_fallback"])
+        mocked_submit_signup.assert_not_awaited()
+        mocked_make_register_request.assert_awaited_once()
+        self.assertEqual(mocked_make_register_request.await_args.args[0], "GET")
+        self.assertEqual(
+            mocked_make_register_request.await_args.args[1],
+            "https://auth.openai.com/api/accounts/email-otp/send",
+        )
 
     async def test_register_maps_otp_validate_non_200_to_otp_validate_failed(self):
         service = self.ChatGPTService()
@@ -630,7 +631,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             shared_session,
         )
         self.assertIs(
-            call_sessions["https://auth.openai.com/api/passwordless/start"],
+            call_sessions["https://auth.openai.com/api/accounts/email-otp/send"],
             shared_session,
         )
 
@@ -639,7 +640,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             shared_session,
         )
 
-    async def test_register_pipeline_fallback_calls_submit_signup_once(self):
+    async def test_register_pipeline_calls_submit_signup_once(self):
         service = self.ChatGPTService()
         shared_session = object()
 
@@ -661,14 +662,6 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                     "status_code": 200,
                     "data": {"ok": True},
                     "session": shared_session,
-                }
-            if "api/passwordless/start" in url:
-                return {
-                    "success": False,
-                    "status_code": 400,
-                    "error": "passwordless disabled",
-                    "error_code": "passwordless_signup_disabled",
-                    "session": session,
                 }
             return {
                 "success": True,
@@ -740,6 +733,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["success"])
         mocked_submit_signup.assert_awaited_once()
+
 
     async def test_register_token_finalize_success_payload_contains_tokens_and_context(self):
         service = self.ChatGPTService()
@@ -1093,11 +1087,16 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             await service._create_account(ctx)
 
         request_payloads = [
-            call.args[3] for call in mocked_make_register_request.await_args_list
+            (
+                call.kwargs.get("json_data")
+                if "json_data" in call.kwargs
+                else (call.args[3] if len(call.args) > 3 else None)
+            )
+            for call in mocked_make_register_request.await_args_list
         ]
         self.assertEqual(request_payloads[0]["username"], resolved_email)
         self.assertEqual(request_payloads[1]["username"], resolved_email)
-        self.assertEqual(request_payloads[2]["username"], resolved_email)
+        self.assertIsNone(request_payloads[2])
         self.assertEqual(request_payloads[3]["username"], resolved_email)
         self.assertEqual(request_payloads[4]["email"], resolved_email)
 
@@ -1137,74 +1136,37 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result.get("session"), special_session)
         special_session.post.assert_awaited_once()
 
-    async def test_register_fallback_triggers_explicit_otp_send(self):
+    async def test_register_send_signup_fallback_otp_reuses_email_otp_send_endpoint(self):
         service = self.ChatGPTService()
 
-        async def _make_register_request_side_effect(
-            method,
-            url,
-            headers,
-            json_data=None,
-            db_session=None,
-            identifier="default",
-            special_session_step=False,
-            session=None,
-            proxy=None,
-        ):
-            del method, headers, json_data, db_session, identifier, special_session_step, session, proxy
-            if url.endswith("/api/passwordless/start"):
-                return {
-                    "success": False,
-                    "status_code": 400,
-                    "error": "passwordless disabled",
-                    "error_code": "passwordless_signup_disabled",
-                }
-            if url.endswith("/api/otp/send"):
-                return {
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
                     "success": True,
                     "status_code": 200,
                     "data": {"delivery": "queued"},
                     "error": None,
                     "error_code": None,
                 }
-            return {
-                "success": False,
-                "status_code": 500,
-                "error": "unexpected url",
-                "error_code": "unexpected",
-            }
-
-        with patch.object(
-            service,
-            "_make_register_request",
-            new=AsyncMock(side_effect=_make_register_request_side_effect),
-        ) as mocked_make_register_request, patch.object(
-            service,
-            "_submit_signup",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {"ticket": "signup-fallback"},
-                    "error": None,
-                    "error_code": None,
-                }
             ),
-        ):
-            result = await service._send_otp_with_fallback(
+        ) as mocked_make_register_request:
+            result = await service._send_signup_fallback_otp(
                 {
                     "register_input": self._valid_register_input(),
                     "db_session": None,
                     "identifier": "acc_123",
-                    "session": object(),
                 }
             )
 
         self.assertTrue(result["success"])
-        self.assertTrue(result["data"]["used_fallback"])
-        self.assertEqual(mocked_make_register_request.await_count, 2)
-        called_urls = [call.args[1] for call in mocked_make_register_request.await_args_list]
-        self.assertEqual(called_urls[1], "https://auth.openai.com/api/otp/send")
+        mocked_make_register_request.assert_awaited_once()
+        self.assertEqual(mocked_make_register_request.await_args.args[0], "GET")
+        self.assertEqual(
+            mocked_make_register_request.await_args.args[1],
+            "https://auth.openai.com/api/accounts/email-otp/send",
+        )
 
     async def test_make_request_maps_timeout_to_network_timeout(self):
         service = self.ChatGPTService()
@@ -1403,7 +1365,11 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["success"])
         mocked_poll_worker.assert_awaited_once()
-        validate_payload = mocked_make_register_request.await_args.args[3]
+        validate_payload = (
+            mocked_make_register_request.await_args.kwargs.get("json_data")
+            if "json_data" in mocked_make_register_request.await_args.kwargs
+            else mocked_make_register_request.await_args.args[3]
+        )
         self.assertEqual(validate_payload["otp_code"], "654321")
 
     async def test_step_wrappers_preserve_network_error_codes_from_request_layer(self):
@@ -1499,7 +1465,11 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result["success"])
-        payload = mocked_make_register_request.await_args.args[3]
+        payload = (
+            mocked_make_register_request.await_args.kwargs.get("json_data")
+            if "json_data" in mocked_make_register_request.await_args.kwargs
+            else mocked_make_register_request.await_args.args[3]
+        )
         self.assertEqual(payload["state"], "state-pipeline-123")
 
         returned_data = result["data"]
@@ -1963,6 +1933,42 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["detected_region"], "US")
         self.assertEqual(result["data"]["identifier"], "acc_123")
 
+    async def test_poll_otp_from_mail_worker_uses_v1_code_query_url(self):
+        service = self.ChatGPTService()
+        register_input = self._valid_register_input()
+        register_input["mail_worker_base_url"] = "https://worker.example.com/"
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"code": "123456"},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ) as mocked_make_register_request:
+            result = await service._poll_otp_from_mail_worker(
+                {
+                    "register_input": register_input,
+                    "db_session": None,
+                    "identifier": "acc_123",
+                }
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["otp_code"], "123456")
+        mocked_make_register_request.assert_awaited_once()
+        self.assertEqual(mocked_make_register_request.await_args.args[0], "GET")
+        called_url = mocked_make_register_request.await_args.args[1]
+        self.assertEqual(
+            called_url,
+            "https://worker.example.com/v1/code?email=user%40example.com",
+        )
+
     async def test_poll_and_validate_otp_fails_when_mail_worker_fetch_fails(self):
         service = self.ChatGPTService()
         ctx = {
@@ -1995,7 +2001,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error_code"], "otp_validate_failed")
         mocked_poll_worker.assert_awaited_once()
 
-    async def test_poll_and_validate_otp_propagates_mail_worker_not_found_error(self):
+
         service = self.ChatGPTService()
         ctx = {
             "register_input": self._valid_register_input(),

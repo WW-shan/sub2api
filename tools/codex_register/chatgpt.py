@@ -9,6 +9,7 @@ import importlib
 import json
 import logging
 import random
+import urllib.parse
 from urllib.parse import parse_qs, urlparse, parse_qsl, urlencode
 from typing import Optional, Dict, Any, List
 from curl_cffi.requests import AsyncSession
@@ -704,21 +705,16 @@ class ChatGPTService:
         if not mail_worker_base_url or not mail_worker_token:
             return self._error_result(400, "mail worker config missing", "input_invalid")
 
-        request_url = f"{mail_worker_base_url}/api/otp/latest"
+        request_url = f"{mail_worker_base_url}/v1/code?email={urllib.parse.quote(email)}"
         request_headers = {
             "Authorization": f"Bearer {mail_worker_token}",
-            "Content-Type": "application/json",
             "Accept": "application/json",
-        }
-        request_payload = {
-            "email": email,
         }
 
         result = await self._make_register_request(
-            "POST",
+            "GET",
             request_url,
             request_headers,
-            request_payload,
             db_session=ctx.get("db_session"),
             identifier=ctx.get("identifier", "default"),
             special_session_step=False,
@@ -740,15 +736,17 @@ class ChatGPTService:
         return self._success_result({"otp_code": otp_code})
 
     async def _send_signup_fallback_otp(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """fallback 后显式触发 OTP 发送"""
-        register_input = ctx.get("register_input", {})
-        email = self._resolve_register_email(register_input)
-
+        """兼容辅助方法：统一使用 email-otp/send，无 passwordless fallback"""
         result = await self._make_register_request(
-            "POST",
-            "https://auth.openai.com/api/otp/send",
-            self._build_auth_headers(),
-            {"username": email, "reason": "signup_fallback"},
+            "GET",
+            "https://auth.openai.com/api/accounts/email-otp/send",
+            self._build_browser_base_headers(
+                {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+                origin="https://auth.openai.com",
+                referer="https://auth.openai.com/create-account/password",
+            ),
             db_session=ctx.get("db_session"),
             identifier=ctx.get("identifier", "default"),
             special_session_step=True,
@@ -759,7 +757,7 @@ class ChatGPTService:
         if not result.get("success") or status_code >= 300:
             return self._error_result(
                 status_code,
-                result.get("error", "fallback otp send failed"),
+                result.get("error", "send otp failed"),
                 self._resolve_step_error_code(result, "otp_send_failed"),
             )
 
@@ -1086,17 +1084,26 @@ class ChatGPTService:
         return self._success_result(response_data)
 
     async def _submit_signup(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """提交注册信息"""
+        """提交注册信息（必须密码注册）"""
         register_input = ctx.get("register_input", {})
+        password = str(register_input.get("fixed_password") or "").strip()
+        if not password:
+            return self._error_result(400, "password is required", "signup_failed")
+
         body = {
             "username": self._resolve_register_email(register_input),
-            "password": str(register_input.get("fixed_password") or ""),
+            "password": password,
         }
 
         result = await self._make_register_request(
             "POST",
             "https://auth.openai.com/api/accounts/user/register",
-            self._build_auth_headers(),
+            self._build_auth_headers(
+                extra_headers={
+                    "Referer": "https://auth.openai.com/create-account/password",
+                    "Origin": "https://auth.openai.com",
+                }
+            ),
             body,
             db_session=ctx.get("db_session"),
             identifier=ctx.get("identifier", "default"),
@@ -1115,46 +1122,34 @@ class ChatGPTService:
         return self._success_result(result.get("data", {}))
 
     async def _send_otp_with_fallback(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """发送 OTP，密码免注册禁用时走 fallback"""
-        register_input = ctx.get("register_input", {})
-        email = self._resolve_register_email(register_input)
-
-        passwordless_result = await self._make_register_request(
-            "POST",
-            "https://auth.openai.com/api/passwordless/start",
-            self._build_auth_headers(),
-            {"username": email},
+        """发送 OTP（禁用 passwordless，固定使用 email-otp/send）"""
+        result = await self._make_register_request(
+            "GET",
+            "https://auth.openai.com/api/accounts/email-otp/send",
+            self._build_browser_base_headers(
+                {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+                origin="https://auth.openai.com",
+                referer="https://auth.openai.com/create-account/password",
+            ),
             db_session=ctx.get("db_session"),
             identifier=ctx.get("identifier", "default"),
             special_session_step=True,
             session=ctx.get("session"),
         )
 
-        passwordless_status = int(passwordless_result.get("status_code", 0) or 0)
-        if passwordless_result.get("success") and passwordless_status < 300:
-            data = dict(passwordless_result.get("data", {}))
-            data["used_fallback"] = False
-            return self._success_result(data)
-
-        if passwordless_result.get("error_code") != "passwordless_signup_disabled":
+        status_code = int(result.get("status_code", 0) or 0)
+        if not result.get("success") or status_code >= 300:
             return self._error_result(
-                passwordless_status,
-                passwordless_result.get("error", "send otp failed"),
-                self._resolve_step_error_code(passwordless_result, "otp_send_failed"),
+                status_code,
+                result.get("error", "send otp failed"),
+                self._resolve_step_error_code(result, "otp_send_failed"),
             )
 
-        signup_result = await self._submit_signup(ctx)
-        if not signup_result.get("success"):
-            return signup_result
-
-        otp_send_result = await self._send_signup_fallback_otp(ctx)
-        if not otp_send_result.get("success"):
-            return otp_send_result
-
-        fallback_data = dict(signup_result.get("data", {}))
-        fallback_data.update(otp_send_result.get("data", {}))
-        fallback_data["used_fallback"] = True
-        return self._success_result(fallback_data)
+        data = dict(result.get("data", {}))
+        data["used_fallback"] = False
+        return self._success_result(data)
 
     async def _poll_and_validate_otp(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         """轮询并校验 OTP"""
