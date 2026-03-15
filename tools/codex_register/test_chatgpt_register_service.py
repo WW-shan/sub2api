@@ -178,7 +178,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime_register_input["mail_domain"], "example.com")
         self.assertEqual(
             runtime_register_input["mail_worker_base_url"],
-            "https://mail.example.com",
+            "https://worker.example.com",
         )
         self.assertEqual(runtime_register_input["mail_worker_token"], "token")
         self.assertEqual(runtime_register_input["register_http_timeout"], 15)
