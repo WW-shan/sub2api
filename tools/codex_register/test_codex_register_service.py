@@ -1,7 +1,15 @@
+import asyncio
 import importlib
+import pathlib
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 STATUS_PAYLOAD_FIELDS = {
@@ -88,6 +96,8 @@ class _MissingCodexRegisterService:
 def _load_service_class():
     module_name = "tools.codex_register.codex_register_service"
     try:
+        if module_name in sys.modules:
+            del sys.modules[module_name]
         module = importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
         if exc.name == module_name:
@@ -283,6 +293,69 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
             any(log.get("message") == "resume_request_ignored" for log in self.store.logs),
             "expected resume_request_ignored log entry",
         )
+
+    async def test_resume_transitions_to_create_children_and_run_once_creates_next_child(self):
+        await self._enable_and_create(6)
+
+        resume_result = await self.service.handle_path("/resume")
+        status_after_resume = (await self.service.handle_path("/status"))["data"]
+
+        self.assertTrue(resume_result["success"])
+        self.assertEqual(status_after_resume["job_phase"], "running:create_children")
+
+        run_result = await self.service.run_once()
+        status_after_run = (await self.service.handle_path("/status"))["data"]
+
+        self.assertTrue(run_result["success"])
+        self.assertEqual(status_after_run["total_created"], 7)
+        self.assertEqual(status_after_run["job_phase"], "running:create_children")
+        self.assertEqual(status_after_run["waiting_reason"], "")
+
+    async def test_resume_fails_when_refresh_access_token_fails(self):
+        await self._enable_and_create(6)
+
+        self.chatgpt.refresh_access_token_with_session_token = AsyncMock(
+            return_value={"success": False, "error": "refresh_failed"}
+        )
+
+        result = await self.service.handle_path("/resume")
+        status_payload = (await self.service.handle_path("/status"))["data"]
+
+        self.assertFalse(result["success"])
+        self.assertEqual(status_payload["job_phase"], "waiting_manual:parent_upgrade")
+        self.assertEqual(status_payload["last_resume_gate_reason"], "refresh_access_token_failed")
+        self.chatgpt.get_account_info.assert_not_awaited()
+
+    async def test_resume_fails_when_get_account_info_fails(self):
+        await self._enable_and_create(6)
+
+        self.chatgpt.refresh_access_token_with_session_token = AsyncMock(
+            return_value={"success": True, "access_token": "parent-at"}
+        )
+        self.chatgpt.get_account_info = AsyncMock(return_value={"success": False, "error": "forbidden"})
+
+        result = await self.service.handle_path("/resume")
+        status_payload = (await self.service.handle_path("/status"))["data"]
+
+        self.assertFalse(result["success"])
+        self.assertEqual(status_payload["job_phase"], "waiting_manual:parent_upgrade")
+        self.assertEqual(status_payload["last_resume_gate_reason"], "account_info_failed")
+
+    async def test_run_once_is_serialized_by_async_lock(self):
+        await self._enable_and_create(5)
+
+        async def _slow_register():
+            await asyncio.sleep(0.01)
+            return _register_success(6)
+
+        self.chatgpt.register = AsyncMock(side_effect=_slow_register)
+
+        await asyncio.gather(self.service.run_once(), self.service.run_once())
+        status_payload = (await self.service.handle_path("/status"))["data"]
+
+        self.assertEqual(self.chatgpt.register.await_count, 1)
+        self.assertEqual(status_payload["total_created"], 6)
+        self.assertEqual(status_payload["job_phase"], "waiting_manual:parent_upgrade")
 
 
 if __name__ == "__main__":
