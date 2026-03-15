@@ -3,11 +3,13 @@ ChatGPT API 服务
 用于调用 ChatGPT 后端 API,实现 Team 成员管理功能
 """
 import asyncio
+import base64
 import hashlib
 import importlib
+import json
 import logging
 import random
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, parse_qsl, urlencode
 from typing import Optional, Dict, Any, List
 from curl_cffi.requests import AsyncSession
 from sqlalchemy.ext.asyncio import AsyncSession as DBAsyncSession
@@ -285,6 +287,93 @@ class ChatGPTService:
         normalized_ctx["register_input"] = register_input
         return normalized_ctx
 
+    def _build_register_oauth_url(
+        self,
+        register_input: Dict[str, Any],
+        oauth_state: str,
+    ) -> str:
+        """构建注册域 OAuth authorize URL，兼容 legacy 语义"""
+        source = register_input if isinstance(register_input, dict) else {}
+        base_url = str(
+            source.get("authorize_endpoint")
+            or source.get("authorization_endpoint")
+            or "https://auth.openai.com/oauth/authorize"
+        ).strip()
+        if not base_url:
+            return ""
+
+        existing_params = dict(parse_qsl(urlparse(base_url).query, keep_blank_values=True))
+        query: Dict[str, str] = dict(existing_params)
+
+        query["response_type"] = str(source.get("response_type") or query.get("response_type") or "code").strip() or "code"
+
+        def _maybe_set(field: str, fallback: str = ""):
+            value = str(source.get(field) or "").strip()
+            if value:
+                query[field] = value
+            elif fallback and fallback not in query:
+                query[fallback] = query.get(fallback, "")
+
+        for field in (
+            "client_id",
+            "redirect_uri",
+            "scope",
+            "audience",
+            "prompt",
+            "code_challenge",
+            "code_challenge_method",
+        ):
+            _maybe_set(field)
+
+        if str(oauth_state or "").strip():
+            query["state"] = str(oauth_state).strip()
+
+        parsed = urlparse(base_url)
+        return parsed._replace(query=urlencode(query, doseq=True)).geturl()
+
+    def _extract_token_claims_without_verification(self, token: str) -> Dict[str, Any]:
+        """无签名校验解析 JWT claims，等价 legacy 非验证读取"""
+        raw_token = str(token or "").strip()
+        if not raw_token:
+            return {}
+
+        parts = raw_token.split(".")
+        if len(parts) < 2:
+            return {}
+
+        payload = parts[1].strip()
+        if not payload:
+            return {}
+
+        padding = "=" * ((4 - len(payload) % 4) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode((payload + padding).encode("utf-8"))
+            parsed = json.loads(decoded.decode("utf-8"))
+        except Exception:
+            return {}
+
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _extract_session_access_token(self, payload: Dict[str, Any]) -> str:
+        """从 session 响应结构中提取 access token"""
+        if not isinstance(payload, dict):
+            return ""
+
+        candidates: List[Any] = [payload]
+        nested_session = payload.get("session")
+        if isinstance(nested_session, dict):
+            candidates.append(nested_session)
+
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            for key in ("access_token", "accessToken", "token", "idp_access_token"):
+                token_value = str(candidate.get(key) or "").strip()
+                if token_value:
+                    return token_value
+
+        return ""
+
     def _verify_callback_state(
         self,
         pipeline_data: Dict[str, Any],
@@ -338,13 +427,18 @@ class ChatGPTService:
         url: str,
         headers: Dict[str, str],
         json_data: Optional[Dict[str, Any]] = None,
+        form_data: Optional[Dict[str, Any]] = None,
     ):
         """在给定会话上发送 HTTP 请求"""
         if method == "GET":
             return await session.get(url, headers=headers)
         if method == "POST":
+            if form_data is not None:
+                return await session.post(url, headers=headers, data=form_data)
             return await session.post(url, headers=headers, json=json_data)
         if method == "DELETE":
+            if form_data is not None:
+                return await session.delete(url, headers=headers, data=form_data)
             return await session.delete(url, headers=headers, json=json_data)
         raise ValueError(f"不支持的 HTTP 方法: {method}")
 
@@ -356,6 +450,7 @@ class ChatGPTService:
         json_data: Optional[Dict[str, Any]],
         session: AsyncSession,
         identifier: str,
+        form_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """特殊注册步骤：强制使用传入会话"""
         base_headers = {
@@ -376,7 +471,14 @@ class ChatGPTService:
                     await asyncio.sleep(delay)
 
                 logger.info(f"[{identifier}] 特殊步骤请求: {method} {url} (尝试 {attempt + 1})")
-                response = await self._dispatch_http_call(session, method, url, headers, json_data)
+                response = await self._dispatch_http_call(
+                    session,
+                    method,
+                    url,
+                    headers,
+                    json_data,
+                    form_data=form_data,
+                )
                 status_code = response.status_code
 
                 if 200 <= status_code < 300:
@@ -672,6 +774,7 @@ class ChatGPTService:
         db_session: Optional[DBAsyncSession] = None,
         identifier: str = "default",
         proxy: Optional[str] = None,
+        form_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         发送 HTTP 请求 (使用持久化隔离会话，提高 CF 通过率并防止污染)
@@ -717,9 +820,15 @@ class ChatGPTService:
                 if method == "GET":
                     response = await session.get(url, headers=headers)
                 elif method == "POST":
-                    response = await session.post(url, headers=headers, json=json_data)
+                    if form_data is not None:
+                        response = await session.post(url, headers=headers, data=form_data)
+                    else:
+                        response = await session.post(url, headers=headers, json=json_data)
                 elif method == "DELETE":
-                    response = await session.delete(url, headers=headers, json=json_data)
+                    if form_data is not None:
+                        response = await session.delete(url, headers=headers, data=form_data)
+                    else:
+                        response = await session.delete(url, headers=headers, json=json_data)
                 else:
                     raise ValueError(f"不支持的 HTTP 方法: {method}")
 
@@ -746,11 +855,11 @@ class ChatGPTService:
                             error_code = error_info.get("code") if isinstance(error_info, dict) else error_data.get("code")
                     except Exception:
                         pass
-                    
+
                     if error_code == "token_invalidated" or "token_invalidated" in str(error_msg).lower():
                         logger.warning(f"检测到 Token 失效，清理会话缓存: {identifier}")
                         await self.clear_session(identifier)
-                    
+
                     logger.warning(f"客户端错误 {status_code}: {error_msg}")
                     return {"success": False, "status_code": status_code, "error": error_msg, "error_code": error_code}
 
@@ -783,6 +892,7 @@ class ChatGPTService:
         special_session_step: bool = False,
         session: Optional[AsyncSession] = None,
         proxy: Optional[str] = None,
+        form_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """注册流程请求分发器。special_session_step 会强制同一会话执行。"""
         if not special_session_step:
@@ -794,6 +904,7 @@ class ChatGPTService:
                 db_session,
                 identifier,
                 proxy=proxy,
+                form_data=form_data,
             )
 
         active_session = session
@@ -807,6 +918,7 @@ class ChatGPTService:
             json_data,
             active_session,
             identifier,
+            form_data=form_data,
         )
         enriched = dict(result)
         enriched.setdefault("session", active_session)
@@ -935,6 +1047,12 @@ class ChatGPTService:
         """启动注册鉴权前置步骤"""
         register_input = ctx.get("register_input", {})
         email = self._resolve_register_email(register_input)
+        oauth_state = str(
+            ctx.get("oauth_state")
+            or register_input.get("oauth_state")
+            or register_input.get("state")
+            or ""
+        ).strip()
 
         result = await self._make_register_request(
             "POST",
@@ -942,7 +1060,7 @@ class ChatGPTService:
             self._build_auth_headers(),
             {
                 "username": email,
-                "state": "register",
+                "state": oauth_state or "register",
             },
             db_session=ctx.get("db_session"),
             identifier=ctx.get("identifier", "default"),
@@ -958,7 +1076,14 @@ class ChatGPTService:
                 self._resolve_step_error_code(result, "auth_flow_failed"),
             )
 
-        return self._success_result(result.get("data", {}))
+        response_data = dict(result.get("data", {}))
+        response_data["oauth_state"] = oauth_state or str(response_data.get("oauth_state") or "").strip()
+
+        authorize_url = self._build_register_oauth_url(register_input, response_data.get("oauth_state", ""))
+        if authorize_url:
+            response_data["authorize_url"] = authorize_url
+
+        return self._success_result(response_data)
 
     async def _submit_signup(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         """提交注册信息"""
@@ -1255,7 +1380,9 @@ class ChatGPTService:
         if isinstance(pipeline_data, dict):
             source.update(pipeline_data)
 
+        source = self._merge_pipeline_artifacts(source)
         normalized_register_input = register_input if isinstance(register_input, dict) else {}
+
         auth_code = str(
             source.get("auth_code")
             or normalized_register_input.get("auth_code")
@@ -1298,13 +1425,32 @@ class ChatGPTService:
             exchange_result = await self._make_request(
                 "POST",
                 token_endpoint,
-                {"Content-Type": "application/json"},
-                token_exchange_payload,
+                {"Content-Type": "application/x-www-form-urlencoded"},
                 db_session=db_session,
                 identifier=identifier,
+                form_data=token_exchange_payload,
             )
             if exchange_result.get("success"):
-                source.update(exchange_result.get("data", {}))
+                exchange_data = exchange_result.get("data", {}) if isinstance(exchange_result.get("data"), dict) else {}
+                source.update(exchange_data)
+
+                session_access_token = self._extract_session_access_token(exchange_data)
+                if session_access_token and not str(source.get("access_token") or "").strip():
+                    source["access_token"] = session_access_token
+
+                if not str(source.get("session_token") or "").strip():
+                    for key in ("session_token", "sessionToken"):
+                        maybe_session_token = str(exchange_data.get(key) or "").strip()
+                        if maybe_session_token:
+                            source["session_token"] = maybe_session_token
+                            break
+
+                if not str(source.get("id_token") or "").strip():
+                    for key in ("id_token", "idToken"):
+                        maybe_id_token = str(exchange_data.get(key) or "").strip()
+                        if maybe_id_token:
+                            source["id_token"] = maybe_id_token
+                            break
             else:
                 return self._error_result(
                     int(exchange_result.get("status_code", 0) or 0),
@@ -1321,6 +1467,22 @@ class ChatGPTService:
                 fallback_value = token_payload.get(key)
                 if not current_value and fallback_value is not None:
                     source[key] = fallback_value
+
+        if not str(source.get("access_token") or "").strip():
+            session_access_token = self._extract_session_access_token(source)
+            if session_access_token:
+                source["access_token"] = session_access_token
+
+        id_token_claims = self._extract_token_claims_without_verification(str(source.get("id_token") or ""))
+        if id_token_claims:
+            if not str(source.get("email") or "").strip():
+                source["email"] = str(id_token_claims.get("email") or "").strip() or source.get("email")
+            if not str(source.get("account_id") or "").strip():
+                source["account_id"] = (
+                    str(id_token_claims.get("account_id") or "").strip()
+                    or str(id_token_claims.get("sub") or "").strip()
+                    or source.get("account_id")
+                )
 
         access_token = str(source.get("access_token") or "").strip()
         refresh_token = str(source.get("refresh_token") or "").strip()

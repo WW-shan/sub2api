@@ -1,7 +1,10 @@
+import base64
+import json
 import sys
 import types
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, patch
 
 
@@ -24,12 +27,12 @@ def _build_chatgpt_import_stubs() -> dict:
             del url, headers
             return self._Response()
 
-        async def post(self, url, headers=None, json=None):
-            del url, headers, json
+        async def post(self, url, headers=None, json=None, data=None):
+            del url, headers, json, data
             return self._Response()
 
-        async def delete(self, url, headers=None, json=None):
-            del url, headers, json
+        async def delete(self, url, headers=None, json=None, data=None):
+            del url, headers, json, data
             return self._Response()
 
         async def close(self):
@@ -1435,7 +1438,76 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(validate_result["error_code"], "network_timeout")
         self.assertEqual(create_result["error_code"], "network_timeout")
 
-    async def test_exchange_tokens_uses_callback_url_derived_auth_code(self):
+    async def test_build_register_oauth_url_contains_expected_query(self):
+        service = self.ChatGPTService()
+
+        oauth_url = service._build_register_oauth_url(
+            {
+                "authorize_endpoint": "https://auth.openai.com/oauth/authorize",
+                "client_id": "client-123",
+                "redirect_uri": "https://chatgpt.com/a/callback",
+                "scope": "openid profile email",
+                "code_challenge": "challenge-abc",
+                "code_challenge_method": "S256",
+                "audience": "chatgpt",
+            },
+            oauth_state="state-xyz",
+        )
+
+        parsed = urlparse(oauth_url)
+        query = parse_qs(parsed.query)
+
+        self.assertEqual(parsed.scheme, "https")
+        self.assertEqual(parsed.netloc, "auth.openai.com")
+        self.assertEqual(parsed.path, "/oauth/authorize")
+        self.assertEqual(query["client_id"][0], "client-123")
+        self.assertEqual(query["redirect_uri"][0], "https://chatgpt.com/a/callback")
+        self.assertEqual(query["scope"][0], "openid profile email")
+        self.assertEqual(query["code_challenge"][0], "challenge-abc")
+        self.assertEqual(query["code_challenge_method"][0], "S256")
+        self.assertEqual(query["state"][0], "state-xyz")
+
+    async def test_start_auth_flow_uses_pipeline_oauth_state_and_returns_authorize_url(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ticket": "ok"},
+                    "error": None,
+                    "error_code": None,
+                }
+            ),
+        ) as mocked_make_register_request:
+            result = await service._start_auth_flow(
+                {
+                    "register_input": {
+                        **self._valid_register_input(),
+                        "authorize_endpoint": "https://auth.openai.com/oauth/authorize",
+                        "client_id": "client-1",
+                        "redirect_uri": "https://chatgpt.com/a/callback",
+                    },
+                    "db_session": None,
+                    "identifier": "acc_123",
+                    "oauth_state": "state-pipeline-123",
+                    "session": object(),
+                }
+            )
+
+        self.assertTrue(result["success"])
+        payload = mocked_make_register_request.await_args.args[3]
+        self.assertEqual(payload["state"], "state-pipeline-123")
+
+        returned_data = result["data"]
+        self.assertEqual(returned_data["oauth_state"], "state-pipeline-123")
+        authorize_query = parse_qs(urlparse(returned_data["authorize_url"]).query)
+        self.assertEqual(authorize_query["state"][0], "state-pipeline-123")
+
+    async def test_exchange_tokens_uses_form_post_contract_for_token_request(self):
         service = self.ChatGPTService()
 
         with patch.object(
@@ -1462,6 +1534,8 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 register_input={
                     "token_endpoint": "https://auth.openai.com/oauth/token",
                     "client_id": "client-1",
+                    "redirect_uri": "https://chatgpt.com/a/callback",
+                    "code_verifier": "verifier-1",
                 },
                 db_session=None,
                 identifier="acc_123",
@@ -1470,216 +1544,142 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["access_token"], "at_from_callback")
         mocked_make_request.assert_awaited_once()
-        self.assertEqual(mocked_make_request.await_args.args[3]["code"], "cb-code-789")
+        await_call = mocked_make_request.await_args
+        self.assertEqual(await_call.args[0], "POST")
+        self.assertEqual(await_call.args[1], "https://auth.openai.com/oauth/token")
+        self.assertEqual(await_call.args[2]["Content-Type"], "application/x-www-form-urlencoded")
+        self.assertEqual(await_call.kwargs["form_data"]["code"], "cb-code-789")
+        self.assertEqual(await_call.kwargs["form_data"]["client_id"], "client-1")
+        self.assertEqual(await_call.kwargs["form_data"]["redirect_uri"], "https://chatgpt.com/a/callback")
+        self.assertEqual(await_call.kwargs["form_data"]["code_verifier"], "verifier-1")
 
-    async def test_run_register_pipeline_propagates_auth_artifacts_for_finalize(self):
+    async def test_exchange_tokens_extracts_session_access_token_from_exchange_payload(self):
         service = self.ChatGPTService()
+
+        id_token_header = base64.urlsafe_b64encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).decode().rstrip("=")
+        id_token_payload = base64.urlsafe_b64encode(
+            json.dumps({"email": "flow@example.com", "sub": "acct_sub_001"}).encode()
+        ).decode().rstrip("=")
+        id_token = f"{id_token_header}.{id_token_payload}.signature"
 
         with patch.object(
             service,
-            "_make_register_request",
+            "_make_request",
             new=AsyncMock(
                 return_value={
                     "success": True,
                     "status_code": 200,
                     "data": {
-                        "callback_url": "https://auth.openai.com/callback?code=pipe-code-001&state=pipe-state",
-                        "token_endpoint": "https://auth.openai.com/oauth/token",
-                    },
-                    "session": object(),
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_start_auth_flow",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {
-                        "oauth_state": "state-from-start",
-                    },
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_send_otp_with_fallback",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {
-                        "token_endpoint": "https://auth.openai.com/oauth/token",
-                    },
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_submit_signup",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {},
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_poll_and_validate_otp",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {
-                        "callback_url": "https://auth.openai.com/callback?code=pipe-code-001&state=pipe-state",
-                    },
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_create_account",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {
-                        "account_id": "acc_001",
+                        "id_token": id_token,
+                        "session": {
+                            "accessToken": "at_from_session_payload",
+                        },
                     },
                     "error": None,
                     "error_code": None,
                 }
             ),
         ):
+            result = await service._exchange_tokens(
+                pipeline_data={
+                    "callback_url": "https://auth.openai.com/callback?code=cb-code-900&state=st2"
+                },
+                register_input={
+                    "token_endpoint": "https://auth.openai.com/oauth/token",
+                    "client_id": "client-1",
+                },
+                db_session=None,
+                identifier="acc_123",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["access_token"], "at_from_session_payload")
+
+        service = self.ChatGPTService()
+        shared_session = object()
+        observed_state = {"value": ""}
+
+        expected_state = service._build_deterministic_oauth_state(
+            {
+                "identifier": "acc_123",
+                "register_input": self._valid_register_input(),
+            }
+        )
+
+        async def _side_effect(
+            method,
+            url,
+            headers,
+            json_data=None,
+            db_session=None,
+            identifier="default",
+            special_session_step=False,
+            session=None,
+            proxy=None,
+        ):
+            del method, headers, db_session, identifier, special_session_step, proxy
+            if "sentinel/chat-requirements" in url:
+                return {
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"ok": True},
+                    "session": shared_session,
+                }
+            if "api/accounts/check/v4" in url:
+                observed_state["value"] = str((json_data or {}).get("state") or "")
+                return {
+                    "success": True,
+                    "status_code": 200,
+                    "data": {"oauth_state": observed_state["value"]},
+                    "session": session,
+                }
+            return {
+                "success": True,
+                "status_code": 200,
+                "data": {"ok": True},
+                "session": session,
+            }
+
+        with patch.object(service, "_make_register_request", new=AsyncMock(side_effect=_side_effect)):
             result = await service._run_register_pipeline(
                 {
                     "register_input": self._valid_register_input(),
                     "db_session": None,
                     "identifier": "acc_123",
-                    "oauth_state": "ctx-state",
+                    "otp_code": "123456",
                 }
             )
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["data"]["identifier"], "acc_123")
-        self.assertEqual(result["data"]["auth_code"], "pipe-code-001")
-        self.assertEqual(result["data"]["oauth_state"], "state-from-start")
-        self.assertEqual(
-            result["data"]["token_endpoint"],
-            "https://auth.openai.com/oauth/token",
-        )
+        self.assertEqual(observed_state["value"], expected_state)
 
-    async def test_run_register_pipeline_bootstraps_oauth_state_when_absent(self):
+    async def test_extract_token_claims_without_verification_parses_jwt_payload(self):
         service = self.ChatGPTService()
 
-        with patch.object(
-            service,
-            "_make_register_request",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {
-                        "token_endpoint": "https://auth.openai.com/oauth/token",
-                    },
-                    "session": object(),
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_start_auth_flow",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {},
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_send_otp_with_fallback",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {
-                        "token_endpoint": "https://auth.openai.com/oauth/token",
-                    },
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_submit_signup",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {},
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_poll_and_validate_otp",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {},
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ), patch.object(
-            service,
-            "_create_account",
-            new=AsyncMock(
-                return_value={
-                    "success": True,
-                    "status_code": 200,
-                    "data": {
-                        "account_id": "acc_001",
-                    },
-                    "error": None,
-                    "error_code": None,
-                }
-            ),
-        ):
-            result_one = await service._run_register_pipeline(
-                {
-                    "register_input": self._valid_register_input(),
-                    "db_session": None,
-                    "identifier": "acc_123",
-                }
-            )
-            result_two = await service._run_register_pipeline(
-                {
-                    "register_input": self._valid_register_input(),
-                    "db_session": None,
-                    "identifier": "acc_123",
-                }
-            )
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).decode().rstrip("=")
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"email": "claims@example.com", "sub": "user_001", "exp": 1893456000}).encode()
+        ).decode().rstrip("=")
+        token = f"{header}.{payload}.signature"
 
-        self.assertTrue(result_one["success"])
-        self.assertTrue(result_two["success"])
-        self.assertTrue(result_one["data"].get("oauth_state"))
-        self.assertEqual(result_one["data"]["oauth_state"], result_two["data"]["oauth_state"])
+        claims = service._extract_token_claims_without_verification(token)
+
+        self.assertEqual(claims["email"], "claims@example.com")
+        self.assertEqual(claims["sub"], "user_001")
+        self.assertEqual(claims["exp"], 1893456000)
+
+    async def test_extract_session_access_token_reads_nested_session_shapes(self):
+        service = self.ChatGPTService()
+
+        session_access_token = service._extract_session_access_token(
+            {
+                "session": {
+                    "accessToken": "at-from-session",
+                }
+            }
+        )
+
+        self.assertEqual(session_access_token, "at-from-session")
 
     async def test_register_allows_token_finalize_when_callback_state_matches(self):
         service = self.ChatGPTService()
@@ -1845,8 +1845,11 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["access_token"], "at_from_finalize")
         mocked_make_request.assert_awaited_once()
-        exchange_payload = mocked_make_request.await_args.args[3]
-        self.assertEqual(exchange_payload["code"], "cb-final-123")
+        await_call = mocked_make_request.await_args
+        self.assertEqual(await_call.args[0], "POST")
+        self.assertEqual(await_call.args[1], "https://auth.openai.com/oauth/token")
+        self.assertEqual(await_call.args[2]["Content-Type"], "application/x-www-form-urlencoded")
+        self.assertEqual(await_call.kwargs["form_data"]["code"], "cb-final-123")
 
     async def test_check_network_and_region_blocks_detected_region_from_trace(self):
         service = self.ChatGPTService()
