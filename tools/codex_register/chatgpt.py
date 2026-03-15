@@ -8,6 +8,7 @@ import hashlib
 import importlib
 import json
 import logging
+import os
 import random
 import urllib.parse
 from urllib.parse import parse_qs, urlparse, parse_qsl, urlencode
@@ -924,12 +925,11 @@ class ChatGPTService:
 
     async def register(
         self,
-        register_input: Dict[str, Any],
         db_session: Optional[DBAsyncSession] = None,
         identifier: str = "default"
     ) -> Dict[str, Any]:
         """注册新账号"""
-        runtime_context_result = self._build_runtime_context(register_input, identifier)
+        runtime_context_result = self._build_runtime_context(identifier)
         if not runtime_context_result.get("success"):
             return runtime_context_result
 
@@ -987,50 +987,30 @@ class ChatGPTService:
             identifier=runtime_identifier,
         )
 
-    def _build_runtime_context(self, register_input: Dict[str, Any], identifier: str) -> Dict[str, Any]:
+    def _build_runtime_context(self, identifier: str) -> Dict[str, Any]:
         """构建注册运行时上下文并执行输入校验"""
-        if not isinstance(register_input, dict):
-            return self._error_result(400, "register_input must be an object", "input_invalid")
+        mail_domain = str(os.getenv("REGISTER_MAIL_DOMAIN") or "").strip().lower()
+        if not mail_domain:
+            return self._error_result(400, "REGISTER_MAIL_DOMAIN is required", "input_invalid")
 
-        normalized_input = dict(register_input)
-
-        mail_worker_base_url = str(normalized_input.get("mail_worker_base_url") or "").strip()
+        mail_worker_base_url = str(os.getenv("REGISTER_MAIL_WORKER_BASE_URL") or "").strip()
         if not mail_worker_base_url:
-            return self._error_result(400, "mail_worker_base_url is required", "input_invalid")
-        normalized_input["mail_worker_base_url"] = mail_worker_base_url.rstrip("/")
+            return self._error_result(400, "REGISTER_MAIL_WORKER_BASE_URL is required", "input_invalid")
 
-        mail_worker_token = str(normalized_input.get("mail_worker_token") or "").strip()
+        mail_worker_token = str(os.getenv("REGISTER_MAIL_WORKER_TOKEN") or "").strip()
         if not mail_worker_token:
-            return self._error_result(400, "mail_worker_token is required", "input_invalid")
-        normalized_input["mail_worker_token"] = mail_worker_token
+            return self._error_result(400, "REGISTER_MAIL_WORKER_TOKEN is required", "input_invalid")
 
-        fixed_email = str(normalized_input.get("fixed_email") or "").strip()
-        normalized_input["fixed_email"] = fixed_email
-        if not fixed_email:
-            mail_domain = str(normalized_input.get("mail_domain") or "").strip().lower()
-            if not mail_domain:
-                return self._error_result(
-                    400,
-                    "mail_domain is required when fixed_email is absent",
-                    "input_invalid",
-                )
-            normalized_input["mail_domain"] = mail_domain
-
-        for field_name, default_value in (
-            ("register_http_timeout", 15),
-            ("mail_poll_seconds", 3),
-            ("mail_poll_max_attempts", 40),
-        ):
-            raw_value = normalized_input.get(field_name, default_value)
-            try:
-                int_value = int(raw_value)
-            except (TypeError, ValueError):
-                return self._error_result(400, f"{field_name} must be a positive integer", "input_invalid")
-
-            if int_value <= 0:
-                return self._error_result(400, f"{field_name} must be > 0", "input_invalid")
-
-            normalized_input[field_name] = int_value
+        normalized_input: Dict[str, Any] = {
+            "mail_domain": mail_domain,
+            "mail_worker_base_url": mail_worker_base_url.rstrip("/"),
+            "mail_worker_token": mail_worker_token,
+            "register_http_timeout": 15,
+            "mail_poll_seconds": 3,
+            "mail_poll_max_attempts": 40,
+            "fixed_email": "",
+            "fixed_password": "",
+        }
 
         runtime_identifier = str(identifier or "").strip() or "default"
 
