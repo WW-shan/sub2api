@@ -34,4 +34,16 @@ describe('CodexRegisterView', () => {
     expect(wrapper.find('[data-testid="codex-card"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="codex-card"]').attributes('data-active')).toBe('true')
   })
+
+  it('uses wide responsive container classes for page layout', () => {
+    const wrapper = mount(CodexRegisterView)
+    const container = wrapper.find('div.mx-auto')
+
+    expect(container.exists()).toBe(true)
+    expect(container.classes()).toContain('max-w-[1400px]')
+    expect(container.classes()).toContain('px-4')
+    expect(container.classes()).toContain('sm:px-6')
+    expect(container.classes()).toContain('lg:px-8')
+    expect(container.classes()).not.toContain('max-w-6xl')
+  })
 })

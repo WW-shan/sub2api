@@ -1201,10 +1201,18 @@ async function fetchLogs() {
   }
 }
 
+function toTimestamp(value: string | null | undefined): number {
+  if (!value) return Number.NEGATIVE_INFINITY;
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
+}
+
 async function fetchAccounts() {
   try {
     const data = await adminAPI.codex.getAccounts();
-    accounts.value = data;
+    accounts.value = [...data].sort(
+      (a, b) => toTimestamp(b.created_at) - toTimestamp(a.created_at),
+    );
     accountsError.value = null;
     error.value = null;
   } catch (errorValue) {
