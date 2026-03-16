@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 )
@@ -147,6 +148,56 @@ func applyCodexOAuthTransform(reqBody map[string]any, isCodexCLI bool, isCompact
 		}
 	}
 
+	// Strip parameters unsupported by codex models via the Responses API.
+	for _, key := range []string{
+		"max_output_tokens",
+		"max_completion_tokens",
+		"temperature",
+		"top_p",
+		"frequency_penalty",
+		"presence_penalty",
+	} {
+		if _, ok := reqBody[key]; ok {
+			delete(reqBody, key)
+			result.Modified = true
+		}
+	}
+
+	// 兼容遗留的 functions 和 function_call，转换为 tools 和 tool_choice
+	if functionsRaw, ok := reqBody["functions"]; ok {
+		if functions, k := functionsRaw.([]any); k {
+			tools := make([]any, 0, len(functions))
+			for _, f := range functions {
+				tools = append(tools, map[string]any{
+					"type":     "function",
+					"function": f,
+				})
+			}
+			reqBody["tools"] = tools
+		}
+		delete(reqBody, "functions")
+		result.Modified = true
+	}
+
+	if fcRaw, ok := reqBody["function_call"]; ok {
+		if fcStr, ok := fcRaw.(string); ok {
+			// e.g. "auto", "none"
+			reqBody["tool_choice"] = fcStr
+		} else if fcObj, ok := fcRaw.(map[string]any); ok {
+			// e.g. {"name": "my_func"}
+			if name, ok := fcObj["name"].(string); ok && strings.TrimSpace(name) != "" {
+				reqBody["tool_choice"] = map[string]any{
+					"type": "function",
+					"function": map[string]any{
+						"name": name,
+					},
+				}
+			}
+		}
+		delete(reqBody, "function_call")
+		result.Modified = true
+	}
+
 	if normalizeCodexTools(reqBody) {
 		result.Modified = true
 	}
@@ -172,6 +223,22 @@ func applyCodexOAuthTransform(reqBody map[string]any, isCodexCLI bool, isCompact
 			reqBody["input"] = filtered
 			result.Modified = true
 		}
+	} else if inputStr, ok := reqBody["input"].(string); ok {
+		// ChatGPT codex endpoint requires input to be a list, not a string.
+		// Convert string input to the expected message array format.
+		trimmed := strings.TrimSpace(inputStr)
+		if trimmed != "" {
+			reqBody["input"] = []any{
+				map[string]any{
+					"type":    "message",
+					"role":    "user",
+					"content": inputStr,
+				},
+			}
+		} else {
+			reqBody["input"] = []any{}
+		}
+		result.Modified = true
 	}
 
 	return result
@@ -235,6 +302,29 @@ func normalizeCodexModel(model string) string {
 	return "gpt-5.1"
 }
 
+func SupportsVerbosity(model string) bool {
+	if !strings.HasPrefix(model, "gpt-") {
+		return true
+	}
+
+	var major, minor int
+	n, _ := fmt.Sscanf(model, "gpt-%d.%d", &major, &minor)
+
+	if major > 5 {
+		return true
+	}
+	if major < 5 {
+		return false
+	}
+
+	// gpt-5
+	if n == 1 {
+		return true
+	}
+
+	return minor >= 3
+}
+
 func getNormalizedCodexModel(modelID string) string {
 	if modelID == "" {
 		return ""
@@ -288,6 +378,19 @@ func filterCodexInput(input []any, preserveReferences bool) []any {
 			continue
 		}
 		typ, _ := m["type"].(string)
+
+		// 仅修正真正的 tool/function call 标识，避免误改普通 message/reasoning id；
+		// 若 item_reference 指向 legacy call_* 标识，则仅修正该引用本身。
+		fixCallIDPrefix := func(id string) string {
+			if id == "" || strings.HasPrefix(id, "fc") {
+				return id
+			}
+			if strings.HasPrefix(id, "call_") {
+				return "fc" + strings.TrimPrefix(id, "call_")
+			}
+			return "fc_" + id
+		}
+
 		if typ == "item_reference" {
 			if !preserveReferences {
 				continue
@@ -295,6 +398,9 @@ func filterCodexInput(input []any, preserveReferences bool) []any {
 			newItem := make(map[string]any, len(m))
 			for key, value := range m {
 				newItem[key] = value
+			}
+			if id, ok := newItem["id"].(string); ok && strings.HasPrefix(id, "call_") {
+				newItem["id"] = fixCallIDPrefix(id)
 			}
 			filtered = append(filtered, newItem)
 			continue
@@ -315,10 +421,20 @@ func filterCodexInput(input []any, preserveReferences bool) []any {
 		}
 
 		if isCodexToolCallItemType(typ) {
-			if callID, ok := m["call_id"].(string); !ok || strings.TrimSpace(callID) == "" {
+			callID, ok := m["call_id"].(string)
+			if !ok || strings.TrimSpace(callID) == "" {
 				if id, ok := m["id"].(string); ok && strings.TrimSpace(id) != "" {
+					callID = id
 					ensureCopy()
-					newItem["call_id"] = id
+					newItem["call_id"] = callID
+				}
+			}
+
+			if callID != "" {
+				fixedCallID := fixCallIDPrefix(callID)
+				if fixedCallID != callID {
+					ensureCopy()
+					newItem["call_id"] = fixedCallID
 				}
 			}
 		}

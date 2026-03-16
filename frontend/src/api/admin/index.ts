@@ -22,6 +22,7 @@ import errorPassthroughAPI from './errorPassthrough'
 import dataManagementAPI from './dataManagement'
 import apiKeysAPI from './apiKeys'
 import scheduledTestsAPI from './scheduledTests'
+import backupAPI from './backup'
 import codexAPI from './codex'
 
 /**
@@ -47,6 +48,7 @@ export const adminAPI = {
   dataManagement: dataManagementAPI,
   apiKeys: apiKeysAPI,
   scheduledTests: scheduledTestsAPI,
+  backup: backupAPI,
   codex: codexAPI
 }
 
@@ -70,6 +72,7 @@ export {
   dataManagementAPI,
   apiKeysAPI,
   scheduledTestsAPI,
+  backupAPI,
   codexAPI
 }
 

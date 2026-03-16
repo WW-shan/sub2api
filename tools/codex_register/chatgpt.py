@@ -1151,6 +1151,21 @@ class ChatGPTService:
 
         return payload
 
+    def _random_profile_name(self) -> str:
+        first_names = [
+            "James", "Emma", "Liam", "Olivia", "Noah", "Ava", "Ethan", "Sophia",
+            "Lucas", "Mia", "Mason", "Isabella", "Logan", "Charlotte", "Alexander",
+            "Amelia", "Benjamin", "Harper", "William", "Evelyn", "Henry", "Abigail",
+            "Sebastian", "Emily", "Jack", "Elizabeth",
+        ]
+        last_names = [
+            "Smith", "Johnson", "Brown", "Davis", "Wilson", "Moore", "Taylor",
+            "Clark", "Hall", "Young", "Anderson", "Thomas", "Jackson", "White",
+            "Harris", "Martin", "Thompson", "Garcia", "Robinson", "Lewis",
+            "Walker", "Allen", "King", "Wright", "Scott", "Green",
+        ]
+        return f"{random.choice(first_names)} {random.choice(last_names)}"
+
     async def register(
         self,
         *,
@@ -1280,7 +1295,7 @@ class ChatGPTService:
             elif "about-you" in final_path:
                 logger.info(f"[{runtime_identifier}] 跳到填写信息阶段")
 
-                name = f"User {random.randint(100000, 999999)}"
+                name = self._random_profile_name()
                 birthdate = f"{random.randint(1990, 2000)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
 
                 await asyncio.sleep(random.uniform(0.5, 1.0))
@@ -1365,7 +1380,7 @@ class ChatGPTService:
                     return otp_result
 
             # 步骤 7: 创建账号
-            name = f"User {random.randint(100000, 999999)}"
+            name = self._random_profile_name()
             birthdate = f"{random.randint(1990, 2000)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
             
             await asyncio.sleep(random.uniform(0.5, 1.5))

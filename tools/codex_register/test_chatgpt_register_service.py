@@ -1,5 +1,6 @@
 import importlib
 import os
+import re
 import sys
 import types
 import unittest
@@ -439,6 +440,64 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         mocked_create_account.assert_awaited_once()
         mocked_execute_callback.assert_awaited_once()
         self.assertEqual(result["data"]["status"], "completed")
+
+    async def test_register_create_account_uses_letters_and_spaces_only_name(self):
+        service = self.ChatGPTService()
+
+        captured = {}
+
+        async def _capture_create_account(name, birthdate, db_session, identifier, proxy=None):
+            captured["name"] = name
+            del birthdate, db_session, identifier, proxy
+            return service._success_result({"callback_url": "https://auth.openai.com/callback?code=ok"})
+
+        with self._register_env(), patch.object(
+            service,
+            "_resolve_register_proxy",
+            new=AsyncMock(return_value=""),
+        ), patch.object(
+            service,
+            "_visit_homepage",
+            new=AsyncMock(return_value=service._success_result({})),
+        ), patch.object(
+            service,
+            "_get_csrf_token",
+            new=AsyncMock(return_value=service._success_result({"csrf_token": "csrf"})),
+        ), patch.object(
+            service,
+            "_prepare_identity",
+            new=lambda ctx: service._success_result(
+                {
+                    **(ctx or {}),
+                    "register_input": {
+                        **dict((ctx or {}).get("register_input") or {}),
+                        "fixed_email": "user@example.com",
+                        "fixed_password": "pw",
+                    },
+                }
+            ),
+        ), patch.object(
+            service,
+            "_signin_with_email",
+            new=AsyncMock(return_value=service._success_result({"authorize_url": "https://auth.openai.com/authorize"})),
+        ), patch.object(
+            service,
+            "_authorize_and_redirect",
+            new=AsyncMock(return_value=service._success_result({"final_url": "https://auth.openai.com/about-you"})),
+        ), patch.object(
+            service,
+            "_create_account_with_info",
+            new=AsyncMock(side_effect=_capture_create_account),
+        ), patch.object(
+            service,
+            "_execute_callback",
+            new=AsyncMock(return_value=service._success_result({})),
+        ):
+            result = await service.register(identifier="acc_123")
+
+        self.assertTrue(result["success"])
+        self.assertIn("name", captured)
+        self.assertRegex(captured["name"], r"^[A-Za-z ]+$")
 
     async def test_register_then_get_members_uses_returned_identifier_without_relogin(self):
         service = self.ChatGPTService()
