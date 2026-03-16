@@ -1113,6 +1113,7 @@ class ChatGPTService:
         db_session: Optional[DBAsyncSession],
         identifier: str,
         proxy: Optional[str] = None,
+        callback_url: str = "",
     ) -> Dict[str, Any]:
         """从注册会话中提取 account/token 字段用于持久化"""
         headers = self._build_browser_base_headers(
@@ -1144,6 +1145,44 @@ class ChatGPTService:
             if isinstance(accounts, dict) and accounts:
                 account_id = str(next(iter(accounts.keys())) or "").strip()
 
+        id_token = ""
+        callback_code = ""
+        if callback_url and "code=" in callback_url:
+            try:
+                callback_code = str(urlparse(callback_url).query or "")
+                callback_code = urllib.parse.parse_qs(callback_code).get("code", [""])[0]
+            except Exception:
+                callback_code = ""
+
+        if callback_code and not refresh_token:
+            token_exchange_result = await self._make_request(
+                "POST",
+                "https://auth.openai.com/oauth/token",
+                {"Content-Type": "application/x-www-form-urlencoded"},
+                db_session=db_session,
+                identifier=identifier,
+                proxy=proxy,
+                form_data={
+                    "grant_type": "authorization_code",
+                    "code": callback_code,
+                    "redirect_uri": "https://chatgpt.com/api/auth/callback/openai",
+                    "client_id": "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh",
+                },
+            )
+            if token_exchange_result.get("success"):
+                token_data = token_exchange_result.get("data") or {}
+                if not refresh_token:
+                    refresh_token = str(token_data.get("refresh_token") or "").strip()
+                id_token = str(token_data.get("id_token") or "").strip()
+
+        if access_token:
+            decoded = self.jwt_parser.decode_token(access_token) or {}
+            auth_payload = decoded.get("https://api.openai.com/auth") if isinstance(decoded, dict) else {}
+            if isinstance(auth_payload, dict):
+                jwt_account_id = str(auth_payload.get("chatgpt_account_id") or auth_payload.get("organization_id") or "").strip()
+                if jwt_account_id:
+                    account_id = jwt_account_id
+
         payload: Dict[str, Any] = {}
         if account_id:
             payload["account_id"] = account_id
@@ -1153,6 +1192,8 @@ class ChatGPTService:
             payload["refresh_token"] = refresh_token
         if session_token:
             payload["session_token"] = session_token
+        if id_token:
+            payload["id_token"] = id_token
         return payload
 
     def _build_register_compat_payload(
@@ -1360,6 +1401,7 @@ class ChatGPTService:
                     db_session,
                     runtime_identifier,
                     resolved_proxy,
+                    callback_url,
                 )
 
                 return self._success_result(
