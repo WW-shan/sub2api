@@ -649,7 +649,7 @@
                       <button
                         type="button"
                         class="btn btn-secondary btn-sm"
-                        @click="copyText(account.access_token)"
+                        @click="copyText(account.access_token ?? '')"
                       >
                         {{ t("admin.codexRegister.actions.copy") }}
                       </button>
@@ -678,7 +678,7 @@
                       <button
                         type="button"
                         class="btn btn-secondary btn-sm"
-                        @click="copyText(account.refresh_token)"
+                        @click="copyText(account.refresh_token ?? '')"
                       >
                         {{ t("admin.codexRegister.actions.copy") }}
                       </button>
