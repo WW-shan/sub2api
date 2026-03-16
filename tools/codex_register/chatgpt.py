@@ -3,16 +3,14 @@ ChatGPT API 服务
 用于调用 ChatGPT 后端 API,实现 Team 成员管理功能
 """
 import asyncio
-import base64
-import hashlib
 import importlib
 import json
 import logging
 import os
 import random
 import urllib.parse
-from urllib.parse import parse_qs, urlparse, parse_qsl, urlencode
-from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
+from typing import Optional, Dict, Any
 from curl_cffi.requests import AsyncSession
 from sqlalchemy.ext.asyncio import AsyncSession as DBAsyncSession
 try:
@@ -245,177 +243,6 @@ class ChatGPTService:
         except Exception:
             return ""
 
-    def _resolve_register_proxy_from_ctx(self, ctx: Dict[str, Any]) -> str:
-        """从上下文中解析注册代理"""
-        register_input = dict((ctx or {}).get("register_input") or {})
-        return self._resolve_register_proxy_from_input(register_input)
-
-    def _build_deterministic_oauth_state(self, ctx: Dict[str, Any]) -> str:
-        """构建确定性的 oauth_state，保证同一输入状态稳定"""
-        source_ctx = ctx if isinstance(ctx, dict) else {}
-        register_input = source_ctx.get("register_input") or {}
-        if not isinstance(register_input, dict):
-            register_input = {}
-
-        seed_parts = [
-            str(source_ctx.get("identifier") or "default").strip() or "default",
-            self._resolve_register_email(register_input),
-            str(register_input.get("mail_domain") or "").strip().lower(),
-            str(register_input.get("token_endpoint") or "").strip(),
-        ]
-        seed = "|".join(seed_parts)
-        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
-        return f"state-{digest[:24]}"
-
-    def _ensure_oauth_bootstrap(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """注册流水线 oauth bootstrap：在缺失时补全并固化 oauth_state"""
-        normalized_ctx = dict(ctx or {})
-        register_input = dict(normalized_ctx.get("register_input") or {})
-
-        oauth_state = str(
-            normalized_ctx.get("oauth_state")
-            or register_input.get("oauth_state")
-            or register_input.get("state")
-            or ""
-        ).strip()
-
-        if not oauth_state:
-            oauth_state = self._build_deterministic_oauth_state(
-                {
-                    "identifier": normalized_ctx.get("identifier", "default"),
-                    "register_input": register_input,
-                }
-            )
-
-        normalized_ctx["oauth_state"] = oauth_state
-        register_input["oauth_state"] = oauth_state
-        normalized_ctx["register_input"] = register_input
-        return normalized_ctx
-
-    def _build_register_oauth_url(
-        self,
-        register_input: Dict[str, Any],
-        oauth_state: str,
-    ) -> str:
-        """构建注册域 OAuth authorize URL，兼容 legacy 语义"""
-        source = register_input if isinstance(register_input, dict) else {}
-        base_url = str(
-            source.get("authorize_endpoint")
-            or source.get("authorization_endpoint")
-            or "https://auth.openai.com/oauth/authorize"
-        ).strip()
-        if not base_url:
-            return ""
-
-        existing_params = dict(parse_qsl(urlparse(base_url).query, keep_blank_values=True))
-        query: Dict[str, str] = dict(existing_params)
-
-        query["response_type"] = str(source.get("response_type") or query.get("response_type") or "code").strip() or "code"
-
-        def _maybe_set(field: str, fallback: str = ""):
-            value = str(source.get(field) or "").strip()
-            if value:
-                query[field] = value
-            elif fallback and fallback not in query:
-                query[fallback] = query.get(fallback, "")
-
-        for field in (
-            "client_id",
-            "redirect_uri",
-            "scope",
-            "audience",
-            "prompt",
-            "code_challenge",
-            "code_challenge_method",
-        ):
-            _maybe_set(field)
-
-        if str(oauth_state or "").strip():
-            query["state"] = str(oauth_state).strip()
-
-        parsed = urlparse(base_url)
-        return parsed._replace(query=urlencode(query, doseq=True)).geturl()
-
-    def _extract_token_claims_without_verification(self, token: str) -> Dict[str, Any]:
-        """无签名校验解析 JWT claims，等价 legacy 非验证读取"""
-        raw_token = str(token or "").strip()
-        if not raw_token:
-            return {}
-
-        parts = raw_token.split(".")
-        if len(parts) < 2:
-            return {}
-
-        payload = parts[1].strip()
-        if not payload:
-            return {}
-
-        padding = "=" * ((4 - len(payload) % 4) % 4)
-        try:
-            decoded = base64.urlsafe_b64decode((payload + padding).encode("utf-8"))
-            parsed = json.loads(decoded.decode("utf-8"))
-        except Exception:
-            return {}
-
-        return parsed if isinstance(parsed, dict) else {}
-
-    def _extract_session_access_token(self, payload: Dict[str, Any]) -> str:
-        """从 session 响应结构中提取 access token"""
-        if not isinstance(payload, dict):
-            return ""
-
-        candidates: List[Any] = [payload]
-        nested_session = payload.get("session")
-        if isinstance(nested_session, dict):
-            candidates.append(nested_session)
-
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            for key in ("access_token", "accessToken", "token", "idp_access_token"):
-                token_value = str(candidate.get(key) or "").strip()
-                if token_value:
-                    return token_value
-
-        return ""
-
-    def _verify_callback_state(
-        self,
-        pipeline_data: Dict[str, Any],
-        register_input: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """校验 callback_url 中 state 与预期 oauth_state 一致性"""
-        merged_source: Dict[str, Any] = {}
-        if isinstance(register_input, dict):
-            merged_source.update(register_input)
-        if isinstance(pipeline_data, dict):
-            merged_source.update(pipeline_data)
-
-        callback_url = str(merged_source.get("callback_url") or "").strip()
-        if not callback_url:
-            return self._success_result({})
-
-        parsed = self._parse_callback_url(callback_url)
-        callback_state = str(parsed.get("state") or "").strip()
-        expected_state = str(
-            merged_source.get("oauth_state")
-            or merged_source.get("state")
-            or ""
-        ).strip()
-
-        if callback_state and expected_state and callback_state != expected_state:
-            return self._error_result(
-                400,
-                f"oauth callback state mismatch: expected {expected_state}, got {callback_state}",
-                "token_finalize_failed",
-            )
-
-        return self._success_result(
-            {
-                "oauth_state": expected_state or callback_state,
-                "callback_state": callback_state,
-            }
-        )
 
     def _map_network_exception(self, exc: Exception) -> str:
         """网络异常映射"""
@@ -570,113 +397,12 @@ class ChatGPTService:
         prepared_ctx["register_input"] = register_input
         return self._success_result(prepared_ctx)
 
-    def _parse_cloudflare_trace_location(self, trace_body: str) -> str:
-        """解析 Cloudflare trace 返回中的 loc 字段"""
-        raw_trace = str(trace_body or "")
-        if not raw_trace:
-            return ""
-
-        for line in raw_trace.splitlines():
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip().lower() == "loc":
-                return str(value or "").strip().upper()
-        return ""
-
-    async def _check_network_and_region(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """注册前网络与区域检查：预检连通性并校验区域策略"""
-        register_input = dict((ctx or {}).get("register_input") or {})
-
-        blocked_regions = {
-            str(region).strip().upper()
-            for region in (register_input.get("blocked_regions") or [])
-            if str(region).strip()
-        }
-        if not blocked_regions:
-            blocked_regions = {"IR", "KP", "SY", "CU"}
-
-        resolved_region = str(register_input.get("region") or "").strip().upper()
-
-        resolved_proxy = self._resolve_register_proxy_from_input(register_input)
-
-        if not resolved_region:
-            try:
-                active_session = await self._get_session(
-                    ctx.get("db_session"),
-                    ctx.get("identifier", "default"),
-                    proxy=resolved_proxy,
-                )
-                trace_response = await active_session.get(
-                    "https://www.cloudflare.com/cdn-cgi/trace",
-                    headers=self._build_browser_base_headers(
-                        {"Accept": "text/plain"},
-                        origin="https://www.cloudflare.com",
-                        referer="https://www.cloudflare.com/",
-                    ),
-                )
-                trace_status = int(getattr(trace_response, "status_code", 0) or 0)
-                if trace_status and trace_status >= 400:
-                    return self._error_result(
-                        trace_status,
-                        f"network precheck failed: http {trace_status}",
-                        "network_error",
-                    )
-
-                resolved_region = self._parse_cloudflare_trace_location(
-                    str(getattr(trace_response, "text", "") or "")
-                )
-            except Exception as exc:
-                mapped_code = self._map_network_exception(exc)
-                return self._error_result(
-                    0,
-                    f"network precheck failed: {exc}",
-                    mapped_code,
-                )
-
-        if resolved_region and resolved_region in blocked_regions:
-            return self._error_result(451, f"region blocked: {resolved_region}", "network_error")
-
-        checked_ctx = dict(ctx or {})
-        checked_ctx["detected_region"] = resolved_region
-        return self._success_result(checked_ctx)
-
-
     def _resolve_step_error_code(self, result: Dict[str, Any], default_error_code: str) -> str:
         """步骤错误码映射：保留网络层错误码，不重写"""
         error_code = str((result or {}).get("error_code") or "").strip()
         if error_code in {"network_timeout", "network_error"}:
             return error_code
         return default_error_code
-
-    def _parse_callback_url(self, callback_url: str) -> Dict[str, str]:
-        """解析 OAuth 回调地址中的 code/state"""
-        raw_url = str(callback_url or "").strip()
-        if not raw_url:
-            return {"auth_code": "", "state": ""}
-
-        parsed = urlparse(raw_url)
-        query_params = parse_qs(parsed.query or "", keep_blank_values=False)
-        fragment_params = parse_qs(parsed.fragment or "", keep_blank_values=False)
-
-        def _pick_first(params: Dict[str, List[str]], key: str) -> str:
-            values = params.get(key) or []
-            if not values:
-                return ""
-            return str(values[0] or "").strip()
-
-        auth_code = (
-            _pick_first(query_params, "code")
-            or _pick_first(query_params, "auth_code")
-            or _pick_first(fragment_params, "code")
-            or _pick_first(fragment_params, "auth_code")
-        )
-        state = _pick_first(query_params, "state") or _pick_first(fragment_params, "state")
-
-        return {
-            "auth_code": auth_code,
-            "state": state,
-        }
 
     def _extract_otp_code_from_payload(self, payload: Dict[str, Any]) -> str:
         """从 mail worker 返回体中提取 OTP"""
@@ -700,7 +426,7 @@ class ChatGPTService:
         return ""
 
     async def _poll_otp_from_mail_worker(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """通过 mail worker 拉取 OTP"""
+        """通过 mail worker 轮询拉取 OTP"""
         register_input = dict((ctx or {}).get("register_input") or {})
         email = self._resolve_register_email(register_input)
         mail_worker_base_url = str(register_input.get("mail_worker_base_url") or "").strip().rstrip("/")
@@ -709,35 +435,64 @@ class ChatGPTService:
         if not mail_worker_base_url or not mail_worker_token:
             return self._error_result(400, "mail worker config missing", "input_invalid")
 
+        poll_seconds_raw = register_input.get("mail_poll_seconds", 3)
+        poll_attempts_raw = register_input.get("mail_poll_max_attempts", 40)
+        try:
+            poll_seconds = float(poll_seconds_raw)
+        except (TypeError, ValueError):
+            poll_seconds = 3.0
+        try:
+            poll_max_attempts = int(poll_attempts_raw)
+        except (TypeError, ValueError):
+            poll_max_attempts = 40
+
+        poll_seconds = max(0.0, poll_seconds)
+        poll_max_attempts = max(1, poll_max_attempts)
+
         request_url = f"{mail_worker_base_url}/v1/code?email={urllib.parse.quote(email)}"
         request_headers = {
             "Authorization": f"Bearer {mail_worker_token}",
             "Accept": "application/json",
         }
 
-        result = await self._make_register_request(
-            "GET",
-            request_url,
-            request_headers,
-            db_session=ctx.get("db_session"),
-            identifier=ctx.get("identifier", "default"),
-            special_session_step=False,
-            session=ctx.get("session"),
-        )
+        last_status_code = 404
+        last_error = "otp code not found"
 
-        status_code = int(result.get("status_code", 0) or 0)
-        if not result.get("success") or status_code >= 300:
-            return self._error_result(
-                status_code,
-                result.get("error", "mail worker otp fetch failed"),
-                self._resolve_step_error_code(result, "otp_validate_failed"),
+        for attempt in range(poll_max_attempts):
+            result = await self._make_register_request(
+                "GET",
+                request_url,
+                request_headers,
+                db_session=ctx.get("db_session"),
+                identifier=ctx.get("identifier", "default"),
+                special_session_step=False,
+                session=ctx.get("session"),
             )
 
-        otp_code = self._extract_otp_code_from_payload(result.get("data", {}))
-        if not otp_code:
-            return self._error_result(404, "otp code not found", "otp_validate_failed")
+            status_code = int(result.get("status_code", 0) or 0)
+            resolved_error_code = self._resolve_step_error_code(result, "otp_validate_failed")
 
-        return self._success_result({"otp_code": otp_code})
+            if not result.get("success") or status_code >= 300:
+                if resolved_error_code in {"network_timeout", "network_error"}:
+                    return self._error_result(
+                        status_code,
+                        result.get("error", "mail worker otp fetch failed"),
+                        resolved_error_code,
+                    )
+
+                last_status_code = status_code or 404
+                last_error = result.get("error", "mail worker otp fetch failed")
+            else:
+                otp_code = self._extract_otp_code_from_payload(result.get("data", {}))
+                if otp_code:
+                    return self._success_result({"otp_code": otp_code})
+                last_status_code = 404
+                last_error = "otp code not found"
+
+            if attempt < poll_max_attempts - 1 and poll_seconds > 0:
+                await asyncio.sleep(poll_seconds)
+
+        return self._error_result(last_status_code, last_error, "otp_validate_failed")
 
     async def _send_signup_fallback_otp(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         """兼容辅助方法：统一使用 email-otp/send，无 passwordless fallback"""
@@ -1199,6 +954,39 @@ class ChatGPTService:
             logger.error(f"[{identifier}] 发送OTP邮件异常: {e}")
             return self._error_result(0, f"send otp email exception: {str(e)}", "send_otp_email_exception")
 
+    async def _poll_and_validate_otp(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """轮询并校验 OTP"""
+        register_input = dict((ctx or {}).get("register_input") or {})
+        email = self._resolve_register_email(register_input)
+
+        otp_code = str((ctx or {}).get("otp_code") or "").strip()
+        if not otp_code:
+            otp_result = await self._poll_otp_from_mail_worker(ctx)
+            if not otp_result.get("success"):
+                otp_error_code = self._resolve_step_error_code(
+                    otp_result,
+                    "otp_validate_failed",
+                )
+                if otp_error_code not in {"network_timeout", "network_error"}:
+                    otp_error_code = "otp_validate_failed"
+                return self._error_result(
+                    int(otp_result.get("status_code", 0) or 0),
+                    otp_result.get("error", "otp validate failed"),
+                    otp_error_code,
+                )
+
+            otp_code = str((otp_result.get("data") or {}).get("otp_code") or "").strip()
+            if not otp_code:
+                return self._error_result(404, "otp code not found", "otp_validate_failed")
+
+        return await self._validate_otp_code(
+            email,
+            otp_code,
+            ctx.get("db_session"),
+            ctx.get("identifier", "default"),
+            proxy=ctx.get("proxy"),
+        )
+
     async def _validate_otp_code(
         self,
         email: str,
@@ -1319,6 +1107,49 @@ class ChatGPTService:
             logger.error(f"[{identifier}] 执行回调异常: {e}")
             # 回调失败不影响主流程
             return self._error_result(0, f"callback exception: {str(e)}", "callback_exception")
+
+    def _build_register_compat_payload(
+        self,
+        *,
+        email: str,
+        identifier: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """构建兼容 codex_register_service / Team API 的注册成功载荷"""
+        payload = {
+            "email": str(email or "").strip(),
+            "identifier": str(identifier or "default").strip() or "default",
+            "account_id": "",
+            "access_token": "",
+            "refresh_token": "",
+            "id_token": "",
+            "session_token": "",
+            "expires_at": "",
+            "plan_type": "",
+            "organization_id": "",
+            "workspace_id": "",
+            "status": "completed",
+        }
+
+        if isinstance(extra, dict):
+            for key in (
+                "account_id",
+                "access_token",
+                "refresh_token",
+                "id_token",
+                "session_token",
+                "expires_at",
+                "plan_type",
+                "organization_id",
+                "workspace_id",
+                "status",
+            ):
+                if key not in extra:
+                    continue
+                value = extra.get(key)
+                payload[key] = str(value or "").strip() if isinstance(value, str) else value
+
+        return payload
 
     async def register(
         self,
@@ -1448,38 +1279,75 @@ class ChatGPTService:
                 
             elif "about-you" in final_path:
                 logger.info(f"[{runtime_identifier}] 跳到填写信息阶段")
-                
+
                 name = f"User {random.randint(100000, 999999)}"
                 birthdate = f"{random.randint(1990, 2000)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
-                
+
                 await asyncio.sleep(random.uniform(0.5, 1.0))
                 create_result = await self._create_account_with_info(
                     name, birthdate, db_session, runtime_identifier, resolved_proxy
                 )
                 if not create_result.get("success"):
                     return create_result
-                
+
                 callback_url = create_result.get("data", {}).get("callback_url", "")
-                
+
                 await asyncio.sleep(random.uniform(0.3, 0.5))
                 await self._execute_callback(callback_url, db_session, runtime_identifier, resolved_proxy)
-                
-                return self._success_result({"email": email, "status": "completed"})
-                
-            elif "callback" in final_path or "chatgpt.com" in final_url:
-                logger.info(f"[{runtime_identifier}] 账号已完成注册")
-                return self._success_result({"email": email, "status": "completed"})
+
+                return self._success_result(
+                    self._build_register_compat_payload(
+                        email=email,
+                        identifier=runtime_identifier,
+                    )
+                )
+
+            elif "callback-complete" in final_path:
+                logger.info(f"[{runtime_identifier}] 回调完成信号已确认，注册短路完成")
+
+                has_token_hints = any(
+                    str(register_input.get(key) or "").strip()
+                    for key in (
+                        "access_token",
+                        "refresh_token",
+                        "id_token",
+                        "session_token",
+                        "token_endpoint",
+                        "callback_url",
+                        "auth_code",
+                        "code",
+                    )
+                )
+
+                if not has_token_hints:
+                    return self._success_result(
+                        self._build_register_compat_payload(
+                            email=email,
+                            identifier=runtime_identifier,
+                        )
+                    )
+
+                return self._success_result(
+                    self._build_register_compat_payload(
+                        email=email,
+                        identifier=runtime_identifier,
+                    )
+                )
             else:
                 logger.warning(f"[{runtime_identifier}] 未知路径: {final_url}，执行完整流程")
-                
+
                 # 执行完整流程
                 await asyncio.sleep(random.uniform(0.5, 1.0))
-                await self._register_user_with_password(
+                register_user_result = await self._register_user_with_password(
                     email, password, db_session, runtime_identifier, resolved_proxy
                 )
-                
+                if not register_user_result.get("success"):
+                    return register_user_result
+
                 await asyncio.sleep(random.uniform(0.3, 0.8))
-                await self._send_otp_email(db_session, runtime_identifier, resolved_proxy)
+                send_otp_result = await self._send_otp_email(db_session, runtime_identifier, resolved_proxy)
+                if not send_otp_result.get("success"):
+                    return send_otp_result
                 need_otp = True
 
             # 步骤 6: 验证 OTP (保留原有邮箱和验证码逻辑)
@@ -1514,7 +1382,12 @@ class ChatGPTService:
             await self._execute_callback(callback_url, db_session, runtime_identifier, resolved_proxy)
 
             logger.info(f"[{runtime_identifier}] 注册流程完成")
-            return self._success_result({"email": email, "status": "completed"})
+            return self._success_result(
+                self._build_register_compat_payload(
+                    email=email,
+                    identifier=runtime_identifier,
+                )
+            )
 
         except Exception as exc:
             logger.exception(f"[{identifier}] 注册流程异常: {exc}")
@@ -1557,601 +1430,6 @@ class ChatGPTService:
                 "register_input": normalized_input,
             }
         )
-
-    async def _start_auth_flow(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """启动注册鉴权前置步骤"""
-        register_input = ctx.get("register_input", {})
-        email = self._resolve_register_email(register_input)
-        oauth_state = str(
-            ctx.get("oauth_state")
-            or register_input.get("oauth_state")
-            or register_input.get("state")
-            or ""
-        ).strip()
-
-        result = await self._make_register_request(
-            "POST",
-            "https://auth.openai.com/api/accounts/check/v4",
-            self._build_auth_headers(),
-            {
-                "username": email,
-                "state": oauth_state or "register",
-            },
-            db_session=ctx.get("db_session"),
-            identifier=ctx.get("identifier", "default"),
-            special_session_step=True,
-            session=ctx.get("session"),
-        )
-
-        status_code = int(result.get("status_code", 0) or 0)
-        if not result.get("success") or status_code >= 300:
-            return self._error_result(
-                status_code,
-                result.get("error", "start auth flow failed"),
-                self._resolve_step_error_code(result, "auth_flow_failed"),
-            )
-
-        response_data = dict(result.get("data", {}))
-        response_data["oauth_state"] = oauth_state or str(response_data.get("oauth_state") or "").strip()
-
-        authorize_url = self._build_register_oauth_url(register_input, response_data.get("oauth_state", ""))
-        if authorize_url:
-            response_data["authorize_url"] = authorize_url
-
-        return self._success_result(response_data)
-
-    async def _submit_signup(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """提交注册信息（必须密码注册）"""
-        register_input = ctx.get("register_input", {})
-        password = str(register_input.get("fixed_password") or "").strip()
-        if not password:
-            return self._error_result(400, "password is required", "signup_failed")
-
-        body = {
-            "username": self._resolve_register_email(register_input),
-            "password": password,
-        }
-
-        result = await self._make_register_request(
-            "POST",
-            "https://auth.openai.com/api/accounts/user/register",
-            self._build_auth_headers(
-                extra_headers={
-                    "Referer": "https://auth.openai.com/create-account/password",
-                    "Origin": "https://auth.openai.com",
-                }
-            ),
-            body,
-            db_session=ctx.get("db_session"),
-            identifier=ctx.get("identifier", "default"),
-            special_session_step=True,
-            session=ctx.get("session"),
-        )
-
-        status_code = int(result.get("status_code", 0) or 0)
-        if not result.get("success") or status_code >= 300:
-            return self._error_result(
-                status_code,
-                result.get("error", "signup failed"),
-                self._resolve_step_error_code(result, "signup_failed"),
-            )
-
-        return self._success_result(result.get("data", {}))
-
-    async def _send_otp_with_fallback(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """发送 OTP（禁用 passwordless，固定使用 email-otp/send）"""
-        result = await self._make_register_request(
-            "GET",
-            "https://auth.openai.com/api/accounts/email-otp/send",
-            self._build_browser_base_headers(
-                {
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                },
-                origin="https://auth.openai.com",
-                referer="https://auth.openai.com/create-account/password",
-            ),
-            db_session=ctx.get("db_session"),
-            identifier=ctx.get("identifier", "default"),
-            special_session_step=True,
-            session=ctx.get("session"),
-        )
-
-        status_code = int(result.get("status_code", 0) or 0)
-        if not result.get("success") or status_code >= 300:
-            return self._error_result(
-                status_code,
-                result.get("error", "send otp failed"),
-                self._resolve_step_error_code(result, "otp_send_failed"),
-            )
-
-        data = dict(result.get("data", {}))
-        data["used_fallback"] = False
-        return self._success_result(data)
-
-    async def _poll_and_validate_otp(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """轮询并校验 OTP"""
-        register_input = ctx.get("register_input", {})
-        email = self._resolve_register_email(register_input)
-
-        otp_code = str(ctx.get("otp_code") or "").strip()
-        if not otp_code:
-            otp_result = await self._poll_otp_from_mail_worker(ctx)
-            if not otp_result.get("success"):
-                otp_error_code = self._resolve_step_error_code(
-                    otp_result,
-                    "otp_validate_failed",
-                )
-                if otp_error_code not in {"network_timeout", "network_error"}:
-                    otp_error_code = "otp_validate_failed"
-                return self._error_result(
-                    int(otp_result.get("status_code", 0) or 0),
-                    otp_result.get("error", "otp validate failed"),
-                    otp_error_code,
-                )
-            otp_code = str((otp_result.get("data") or {}).get("otp_code") or "").strip()
-            if not otp_code:
-                return self._error_result(404, "otp code not found", "otp_validate_failed")
-
-        result = await self._make_register_request(
-            "POST",
-            "https://auth.openai.com/api/otp/validate",
-            self._build_auth_headers(),
-            {
-                "username": email,
-                "otp_code": otp_code,
-            },
-            db_session=ctx.get("db_session"),
-            identifier=ctx.get("identifier", "default"),
-            special_session_step=True,
-            session=ctx.get("session"),
-        )
-
-        status_code = int(result.get("status_code", 0) or 0)
-        if not result.get("success") or status_code >= 300:
-            return self._error_result(
-                status_code,
-                result.get("error", "otp validate failed"),
-                self._resolve_step_error_code(result, "otp_validate_failed"),
-            )
-
-        return self._success_result(result.get("data", {}))
-
-    async def _create_account(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """创建账号"""
-        register_input = ctx.get("register_input", {})
-        email = self._resolve_register_email(register_input)
-
-        result = await self._make_register_request(
-            "POST",
-            "https://auth.openai.com/api/accounts/create",
-            self._build_auth_headers(),
-            {"email": email},
-            db_session=ctx.get("db_session"),
-            identifier=ctx.get("identifier", "default"),
-            special_session_step=True,
-            session=ctx.get("session"),
-        )
-
-        status_code = int(result.get("status_code", 0) or 0)
-        if not result.get("success") or status_code >= 300:
-            return self._error_result(
-                status_code,
-                result.get("error", "create account failed"),
-                self._resolve_step_error_code(result, "create_account_failed"),
-            )
-
-        return self._success_result(result.get("data", {}))
-
-    def _merge_pipeline_artifacts(
-        self,
-        pipeline_data: Dict[str, Any],
-        *artifact_sources: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """将关键鉴权产物从多步输出合并到 pipeline_data"""
-        merged = dict(pipeline_data or {})
-        artifact_keys = {
-            "auth_code",
-            "callback_url",
-            "token_endpoint",
-            "oauth_state",
-            "state",
-            "code",
-            "access_token",
-            "refresh_token",
-            "id_token",
-            "session_token",
-            "expires_at",
-            "account_id",
-            "email",
-        }
-
-        for source in artifact_sources:
-            if not isinstance(source, dict):
-                continue
-
-            candidates = [source]
-            nested_data = source.get("data")
-            if isinstance(nested_data, dict):
-                candidates.append(nested_data)
-
-            for candidate in candidates:
-                for key, value in candidate.items():
-                    if key not in artifact_keys:
-                        continue
-                    if value is None:
-                        continue
-                    normalized = str(value).strip() if isinstance(value, str) else value
-                    if isinstance(normalized, str) and not normalized:
-                        continue
-                    merged[key] = value
-
-        callback_url = str(merged.get("callback_url") or "").strip()
-        if callback_url:
-            parsed_callback = self._parse_callback_url(callback_url)
-            parsed_auth_code = str(parsed_callback.get("auth_code") or "").strip()
-            if parsed_auth_code and not str(merged.get("auth_code") or "").strip():
-                merged["auth_code"] = parsed_auth_code
-            parsed_state = str(parsed_callback.get("state") or "").strip()
-            if parsed_state and not str(merged.get("oauth_state") or "").strip():
-                merged["oauth_state"] = parsed_state
-
-        if not str(merged.get("auth_code") or "").strip():
-            code_alias = str(merged.get("code") or "").strip()
-            if code_alias:
-                merged["auth_code"] = code_alias
-
-        if not str(merged.get("oauth_state") or "").strip():
-            state_alias = str(merged.get("state") or "").strip()
-            if state_alias:
-                merged["oauth_state"] = state_alias
-
-        return merged
-
-    async def _run_register_pipeline(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """执行注册流水线"""
-        bootstrap_ctx = self._ensure_oauth_bootstrap(ctx)
-
-        sentinel_result = await self._make_register_request(
-            "POST",
-            "https://chatgpt.com/backend-api/sentinel/chat-requirements",
-            self._build_sentinel_headers(),
-            {},
-            db_session=bootstrap_ctx.get("db_session"),
-            identifier=bootstrap_ctx.get("identifier", "default"),
-            special_session_step=True,
-            session=bootstrap_ctx.get("session"),
-            proxy=self._resolve_register_proxy_from_ctx(bootstrap_ctx),
-        )
-
-        sentinel_status = int(sentinel_result.get("status_code", 0) or 0)
-        if not sentinel_result.get("success") or sentinel_status >= 300:
-            return self._error_result(
-                sentinel_status,
-                sentinel_result.get("error", "sentinel failed"),
-                self._resolve_step_error_code(sentinel_result, "auth_flow_failed"),
-            )
-
-        step_ctx = dict(bootstrap_ctx)
-        step_ctx["session"] = sentinel_result.get("session", bootstrap_ctx.get("session"))
-        step_ctx["signup_completed"] = False
-
-        pipeline_data = self._merge_pipeline_artifacts(
-            {
-                "identifier": bootstrap_ctx.get("identifier", "default"),
-                "oauth_state": bootstrap_ctx.get("oauth_state"),
-            },
-            bootstrap_ctx,
-            sentinel_result,
-        )
-
-        start_result = await self._start_auth_flow(step_ctx)
-        if not start_result.get("success"):
-            return start_result
-        pipeline_data = self._merge_pipeline_artifacts(pipeline_data, start_result)
-
-        otp_send_result = await self._send_otp_with_fallback(step_ctx)
-        if not otp_send_result.get("success"):
-            return otp_send_result
-        pipeline_data = self._merge_pipeline_artifacts(pipeline_data, otp_send_result)
-
-        if otp_send_result.get("data", {}).get("used_fallback"):
-            step_ctx["signup_completed"] = True
-
-        if not step_ctx.get("signup_completed"):
-            signup_result = await self._submit_signup(step_ctx)
-            if not signup_result.get("success"):
-                return signup_result
-            step_ctx["signup_completed"] = True
-            pipeline_data = self._merge_pipeline_artifacts(pipeline_data, signup_result)
-
-        otp_validate_result = await self._poll_and_validate_otp(step_ctx)
-        if not otp_validate_result.get("success"):
-            return otp_validate_result
-        pipeline_data = self._merge_pipeline_artifacts(pipeline_data, otp_validate_result)
-
-        create_result = await self._create_account(step_ctx)
-        if not create_result.get("success"):
-            return create_result
-
-        pipeline_data = self._merge_pipeline_artifacts(
-            pipeline_data,
-            create_result,
-        )
-
-        return self._success_result(pipeline_data)
-
-    async def _exchange_tokens(
-        self,
-        pipeline_data: Dict[str, Any],
-        register_input: Dict[str, Any],
-        db_session: Optional[DBAsyncSession] = None,
-        identifier: str = "default",
-    ) -> Dict[str, Any]:
-        """最小 token 交换实现：优先 token endpoint，其次复用已有字段"""
-        source: Dict[str, Any] = {}
-        if isinstance(pipeline_data, dict):
-            source.update(pipeline_data)
-
-        source = self._merge_pipeline_artifacts(source)
-        normalized_register_input = register_input if isinstance(register_input, dict) else {}
-
-        auth_code = str(
-            source.get("auth_code")
-            or normalized_register_input.get("auth_code")
-            or ""
-        ).strip()
-
-        if not auth_code:
-            callback_url = str(
-                source.get("callback_url")
-                or normalized_register_input.get("callback_url")
-                or ""
-            ).strip()
-            parsed_callback = self._parse_callback_url(callback_url)
-            auth_code = str(parsed_callback.get("auth_code") or "").strip()
-            callback_state = str(parsed_callback.get("state") or "").strip()
-            if callback_state and not source.get("oauth_state"):
-                source["oauth_state"] = callback_state
-
-        token_endpoint = str(
-            normalized_register_input.get("token_endpoint")
-            or source.get("token_endpoint")
-            or ""
-        ).strip()
-
-        if auth_code and token_endpoint:
-            token_exchange_payload = {
-                "grant_type": str(normalized_register_input.get("grant_type") or "authorization_code"),
-                "code": auth_code,
-            }
-            client_id = str(normalized_register_input.get("client_id") or "").strip()
-            redirect_uri = str(normalized_register_input.get("redirect_uri") or "").strip()
-            code_verifier = str(normalized_register_input.get("code_verifier") or "").strip()
-            if client_id:
-                token_exchange_payload["client_id"] = client_id
-            if redirect_uri:
-                token_exchange_payload["redirect_uri"] = redirect_uri
-            if code_verifier:
-                token_exchange_payload["code_verifier"] = code_verifier
-
-            exchange_result = await self._make_request(
-                "POST",
-                token_endpoint,
-                {"Content-Type": "application/x-www-form-urlencoded"},
-                db_session=db_session,
-                identifier=identifier,
-                form_data=token_exchange_payload,
-            )
-            if exchange_result.get("success"):
-                exchange_data = exchange_result.get("data", {}) if isinstance(exchange_result.get("data"), dict) else {}
-                source.update(exchange_data)
-
-                session_access_token = self._extract_session_access_token(exchange_data)
-                if session_access_token and not str(source.get("access_token") or "").strip():
-                    source["access_token"] = session_access_token
-
-                if not str(source.get("session_token") or "").strip():
-                    for key in ("session_token", "sessionToken"):
-                        maybe_session_token = str(exchange_data.get(key) or "").strip()
-                        if maybe_session_token:
-                            source["session_token"] = maybe_session_token
-                            break
-
-                if not str(source.get("id_token") or "").strip():
-                    for key in ("id_token", "idToken"):
-                        maybe_id_token = str(exchange_data.get(key) or "").strip()
-                        if maybe_id_token:
-                            source["id_token"] = maybe_id_token
-                            break
-            else:
-                return self._error_result(
-                    int(exchange_result.get("status_code", 0) or 0),
-                    exchange_result.get("error", "token exchange failed"),
-                    self._resolve_step_error_code(exchange_result, "token_exchange_failed"),
-                )
-
-        token_payload = normalized_register_input.get("token_payload")
-        if isinstance(token_payload, dict):
-            for key in ("access_token", "refresh_token", "id_token", "session_token", "expires_at"):
-                if key not in token_payload:
-                    continue
-                current_value = str(source.get(key) or "").strip()
-                fallback_value = token_payload.get(key)
-                if not current_value and fallback_value is not None:
-                    source[key] = fallback_value
-
-        if not str(source.get("access_token") or "").strip():
-            session_access_token = self._extract_session_access_token(source)
-            if session_access_token:
-                source["access_token"] = session_access_token
-
-        id_token_claims = self._extract_token_claims_without_verification(str(source.get("id_token") or ""))
-        if id_token_claims:
-            if not str(source.get("email") or "").strip():
-                source["email"] = str(id_token_claims.get("email") or "").strip() or source.get("email")
-            if not str(source.get("account_id") or "").strip():
-                source["account_id"] = (
-                    str(id_token_claims.get("account_id") or "").strip()
-                    or str(id_token_claims.get("sub") or "").strip()
-                    or source.get("account_id")
-                )
-
-        access_token = str(source.get("access_token") or "").strip()
-        refresh_token = str(source.get("refresh_token") or "").strip()
-        id_token = str(source.get("id_token") or "").strip()
-        session_token = str(source.get("session_token") or "").strip()
-        expires_at = str(source.get("expires_at") or "").strip()
-
-        if not any((access_token, refresh_token, id_token, session_token)):
-            return self._error_result(0, "token exchange failed", "token_exchange_failed")
-
-        return self._success_result(
-            {
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "id_token": id_token,
-                "session_token": session_token,
-                "expires_at": expires_at,
-            }
-        )
-
-    async def _enrich_account_context(
-        self,
-        base_payload: Dict[str, Any],
-        db_session: Optional[DBAsyncSession] = None,
-        identifier: str = "default",
-    ) -> Dict[str, Any]:
-        """best-effort 补充 plan/org/workspace 字段"""
-        enriched = {
-            "plan_type": str(base_payload.get("plan_type") or "").strip(),
-            "organization_id": str(base_payload.get("organization_id") or "").strip(),
-            "workspace_id": str(base_payload.get("workspace_id") or "").strip(),
-        }
-
-        if all(enriched.values()):
-            return self._success_result(enriched)
-
-        access_token = str(base_payload.get("access_token") or "").strip()
-        if not access_token:
-            return self._success_result(enriched)
-
-        try:
-            info_result = await self.get_account_info(access_token, db_session, identifier=identifier)
-        except Exception:
-            return self._success_result(enriched)
-
-        accounts = info_result.get("accounts") or []
-        account_id = str(base_payload.get("account_id") or "").strip()
-        selected = None
-        for account in accounts:
-            if str((account or {}).get("account_id") or "").strip() == account_id and account_id:
-                selected = account
-                break
-        if selected is None and accounts:
-            selected = accounts[0]
-
-        if isinstance(selected, dict):
-            if not enriched["plan_type"]:
-                enriched["plan_type"] = str(selected.get("plan_type") or "").strip()
-            if not enriched["organization_id"]:
-                enriched["organization_id"] = str(selected.get("organization_id") or "").strip()
-            if not enriched["workspace_id"]:
-                enriched["workspace_id"] = str(
-                    selected.get("workspace_id")
-                    or selected.get("account_id")
-                    or ""
-                ).strip()
-
-        return self._success_result(enriched)
-
-    async def _finalize_registration_result(
-        self,
-        pipeline_data: Dict[str, Any],
-        register_input: Dict[str, Any],
-        db_session: Optional[DBAsyncSession] = None,
-        identifier: str = "default",
-    ) -> Dict[str, Any]:
-        """聚合注册流水线结果并完成 token 与上下文补充"""
-        payload = dict(pipeline_data or {})
-        payload.setdefault("email", self._resolve_register_email(register_input))
-
-        state_verification_result = self._verify_callback_state(payload, register_input)
-        if not state_verification_result.get("success"):
-            return state_verification_result
-
-        if state_verification_result.get("data"):
-            payload.update(state_verification_result.get("data", {}))
-
-        if any(
-            str(payload.get(field) or "").strip()
-            for field in ("access_token", "refresh_token", "id_token", "session_token")
-        ):
-            token_result = self._success_result(
-                {
-                    "access_token": str(payload.get("access_token") or "").strip(),
-                    "refresh_token": str(payload.get("refresh_token") or "").strip(),
-                    "id_token": str(payload.get("id_token") or "").strip(),
-                    "session_token": str(payload.get("session_token") or "").strip(),
-                    "expires_at": str(payload.get("expires_at") or "").strip(),
-                }
-            )
-        else:
-            token_result = await self._exchange_tokens(
-                payload,
-                register_input,
-                db_session=db_session,
-                identifier=identifier,
-            )
-
-        if not token_result.get("success"):
-            return self._error_result(
-                int(token_result.get("status_code", 0) or 0),
-                token_result.get("error", "token finalize failed"),
-                self._resolve_step_error_code(token_result, "token_finalize_failed"),
-            )
-
-        payload.update(token_result.get("data", {}))
-
-        account_id = str(payload.get("account_id") or "").strip()
-        provided_identifier = str(identifier or "").strip()
-        pipeline_identifier = str(payload.get("identifier") or "").strip()
-        email = str(payload.get("email") or "").strip()
-
-        if provided_identifier and provided_identifier != "default":
-            final_identifier = provided_identifier
-        elif pipeline_identifier:
-            final_identifier = pipeline_identifier
-        elif account_id:
-            final_identifier = f"acc_{account_id}"
-        elif email:
-            final_identifier = email
-        else:
-            final_identifier = "default"
-
-        payload["identifier"] = final_identifier
-
-        enrich_result = await self._enrich_account_context(
-            payload,
-            db_session=db_session,
-            identifier=final_identifier,
-        )
-        if enrich_result.get("success"):
-            payload.update(enrich_result.get("data", {}))
-
-        final_payload = {
-            "email": str(payload.get("email") or "").strip(),
-            "identifier": final_identifier,
-            "account_id": account_id,
-            "access_token": str(payload.get("access_token") or "").strip(),
-            "refresh_token": str(payload.get("refresh_token") or "").strip(),
-            "id_token": str(payload.get("id_token") or "").strip(),
-            "session_token": str(payload.get("session_token") or "").strip(),
-            "expires_at": str(payload.get("expires_at") or "").strip(),
-            "plan_type": str(payload.get("plan_type") or "").strip(),
-            "organization_id": str(payload.get("organization_id") or "").strip(),
-            "workspace_id": str(payload.get("workspace_id") or "").strip(),
-        }
-        return self._success_result(final_payload)
 
     def _success_result(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """构建统一成功响应"""
