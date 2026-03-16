@@ -77,6 +77,9 @@ class InMemoryWorkflowStore:
         tail.append(entry)
         self.state["recent_logs_tail"] = tail[-20:]
 
+    async def clear_registrations(self):
+        self.accounts = []
+
 
 class _MissingCodexRegisterService:
     def __init__(self, *args, **kwargs):
@@ -132,6 +135,13 @@ def _register_success(index):
 
 class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        default_members = [
+            {
+                "email": f"child{i}@example.com",
+                "account_id": f"acc_{i}",
+            }
+            for i in range(1, 7)
+        ]
         self.store = InMemoryWorkflowStore()
         self.chatgpt = SimpleNamespace(
             register=AsyncMock(side_effect=[_register_success(i) for i in range(1, 20)]),
@@ -151,6 +161,8 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
                     "error": None,
                 }
             ),
+            send_invite=AsyncMock(return_value={"success": True, "error": None}),
+            get_members=AsyncMock(return_value={"success": True, "members": default_members, "error": None}),
         )
         service_cls = _load_service_class()
         self.service = service_cls(
@@ -182,6 +194,9 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
         payload = status_result["data"]
         self.assertTrue(payload["enabled"])
         self.assertEqual(payload["job_phase"], "running:create_parent")
+        self.assertIsInstance(payload["last_transition"], dict)
+        self.assertEqual(payload["last_transition"].get("to"), "running:create_parent")
+        self.assertEqual(payload["last_transition"].get("reason"), "enabled")
 
     async def test_create_phase_enters_waiting_manual_parent_upgrade_after_six_successes(self):
         await self._enable_and_create(6)
@@ -246,6 +261,20 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
                                     "plan_type": "team",
                                     "has_active_subscription": True,
                                 }
+                            ],
+                            "error": None,
+                        }
+                    ),
+                    send_invite=AsyncMock(return_value={"success": True, "error": None}),
+                    get_members=AsyncMock(
+                        return_value={
+                            "success": True,
+                            "members": [
+                                {
+                                    "email": f"child{i}@example.com",
+                                    "account_id": f"acc_{i}",
+                                }
+                                for i in range(1, 7)
                             ],
                             "error": None,
                         }
@@ -315,22 +344,16 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
             "expected resume_request_ignored log entry",
         )
 
-    async def test_resume_transitions_to_create_children_and_run_once_creates_next_child(self):
+    async def test_resume_runs_invite_and_verify_then_completes(self):
         await self._enable_and_create(6)
 
         resume_result = await self.service.handle_path("/resume")
         status_after_resume = (await self.service.handle_path("/status"))["data"]
 
         self.assertTrue(resume_result["success"])
-        self.assertEqual(status_after_resume["job_phase"], "running:create_children")
-
-        run_result = await self.service.run_once()
-        status_after_run = (await self.service.handle_path("/status"))["data"]
-
-        self.assertTrue(run_result["success"])
-        self.assertEqual(status_after_run["total_created"], 7)
-        self.assertEqual(status_after_run["job_phase"], "running:create_children")
-        self.assertEqual(status_after_run["waiting_reason"], "")
+        self.assertEqual(status_after_resume["job_phase"], "completed")
+        self.assertTrue(self.chatgpt.send_invite.await_count >= 5)
+        self.chatgpt.get_members.assert_awaited()
 
     async def test_resume_fails_when_refresh_access_token_fails(self):
         await self._enable_and_create(6)
@@ -405,6 +428,103 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_payload["job_phase"], "waiting_manual:parent_upgrade")
         self.assertEqual(status_payload["last_resume_gate_reason"], "parent_upgrade_not_verified")
 
+    async def test_resume_fails_when_member_verification_not_strict_six(self):
+        await self._enable_and_create(6)
+
+        self.chatgpt.get_members = AsyncMock(
+            return_value={
+                "success": True,
+                "members": [
+                    {"email": f"child{i}@example.com", "account_id": f"acc_{i}"}
+                    for i in range(1, 6)
+                ],
+                "error": None,
+            }
+        )
+
+        result = await self.service.handle_path("/resume")
+        status_payload = (await self.service.handle_path("/status"))["data"]
+
+        self.assertFalse(result["success"])
+        self.assertEqual(status_payload["job_phase"], "failed")
+        self.assertEqual(status_payload["last_error"], "strict_six_member_verification_failed")
+
+    async def test_retry_restarts_create_parent_and_clears_resume_gate(self):
+        await self._enable_and_create(6)
+
+        state = await self.service.handle_path("/status")
+        self.assertEqual(state["data"]["job_phase"], "waiting_manual:parent_upgrade")
+        self.assertEqual(len(self.store.accounts), 6)
+
+        result = await self.service.handle_path("/retry")
+        status_payload = (await self.service.handle_path("/status"))["data"]
+
+        self.assertTrue(result["success"])
+        self.assertEqual(status_payload["job_phase"], "running:create_parent")
+        self.assertTrue(status_payload["enabled"])
+        self.assertEqual(status_payload["total_created"], 0)
+        self.assertEqual(status_payload["last_resume_gate_reason"], "")
+        self.assertIsInstance(status_payload["last_transition"], dict)
+        self.assertEqual(status_payload["last_transition"].get("reason"), "retry")
+        self.assertEqual(len(self.store.accounts), 0)
+
+    async def test_enable_starts_auto_worker_when_auto_run_enabled(self):
+        auto_store = InMemoryWorkflowStore()
+        auto_chatgpt = SimpleNamespace(
+            register=AsyncMock(side_effect=[_register_success(i) for i in range(1, 20)]),
+            refresh_access_token_with_session_token=AsyncMock(
+                return_value={"success": True, "access_token": "parent-at"}
+            ),
+            get_account_info=AsyncMock(
+                return_value={
+                    "success": True,
+                    "accounts": [
+                        {
+                            "account_id": "acc_1",
+                            "plan_type": "team",
+                            "has_active_subscription": True,
+                        }
+                    ],
+                    "error": None,
+                }
+            ),
+            send_invite=AsyncMock(return_value={"success": True, "error": None}),
+            get_members=AsyncMock(
+                return_value={
+                    "success": True,
+                    "members": [
+                        {
+                            "email": f"child{i}@example.com",
+                            "account_id": f"acc_{i}",
+                        }
+                        for i in range(1, 7)
+                    ],
+                    "error": None,
+                }
+            ),
+        )
+
+        auto_service = _load_service_class()(
+            state_store=auto_store,
+            chatgpt_service=auto_chatgpt,
+            workflow_id="wf-test-auto",
+            sleep_min=1,
+            sleep_max=1,
+            auto_run=True,
+        )
+
+        await auto_service.handle_path("/enable")
+
+        for _ in range(15):
+            await asyncio.sleep(0.02)
+            current_status = (await auto_service.handle_path("/status"))["data"]
+            if current_status.get("total_created", 0) >= 1:
+                break
+
+        final_status = (await auto_service.handle_path("/status"))["data"]
+        self.assertGreaterEqual(final_status.get("total_created", 0), 1)
+        await auto_service.handle_path("/disable")
+
 
 class _StubWorkflowStore:
     def __init__(self):
@@ -437,6 +557,8 @@ class _StubChatGPTService:
         self.register_calls = []
         self.refresh_calls = []
         self.account_info_calls = []
+        self.invite_calls = []
+        self.members_calls = []
 
     async def register(self, *, db_session=None, identifier="default"):
         self.register_calls.append({"db_session": db_session, "identifier": identifier})
@@ -491,6 +613,36 @@ class _StubChatGPTService:
             "error": None,
         }
 
+    async def send_invite(self, access_token, account_id, email, db_session, identifier="default"):
+        self.invite_calls.append(
+            {
+                "access_token": access_token,
+                "account_id": account_id,
+                "email": email,
+                "db_session": db_session,
+                "identifier": identifier,
+            }
+        )
+        return {"success": True, "error": None}
+
+    async def get_members(self, access_token, account_id, db_session, identifier="default"):
+        self.members_calls.append(
+            {
+                "access_token": access_token,
+                "account_id": account_id,
+                "db_session": db_session,
+                "identifier": identifier,
+            }
+        )
+        return {
+            "success": True,
+            "members": [
+                {"email": f"child{i}@example.com", "account_id": f"acc_{i}"}
+                for i in range(1, 7)
+            ],
+            "error": None,
+        }
+
 
 class CodexRegisterServiceControlTokenTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -524,7 +676,7 @@ class CodexRegisterServiceControlTokenTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_mutating_endpoints_reject_missing_token(self):
-        for path in ("/enable", "/resume", "/disable", "/accounts"):
+        for path in ("/enable", "/resume", "/disable", "/retry", "/accounts"):
             with self.subTest(path=path):
                 result = await self.service.handle_path(path)
                 self.assertFalse(result["success"])

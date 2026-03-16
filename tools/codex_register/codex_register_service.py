@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
+import importlib
+import inspect
 import json
 import logging
 import os
+import random
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict, List, Optional
+
+try:
+    psycopg2 = importlib.import_module("psycopg2")
+    _psycopg2_extras = importlib.import_module("psycopg2.extras")
+    RealDictCursor = getattr(_psycopg2_extras, "RealDictCursor", None)
+except Exception:  # pragma: no cover - optional runtime dependency in local tests
+    psycopg2 = None  # type: ignore[assignment]
+    RealDictCursor = None
 
 
 LOGGER = logging.getLogger("codex_register")
@@ -25,6 +36,7 @@ class CodexRegisterService:
         sleep_max: int,
         db_session: Any = None,
         control_token: Optional[str] = None,
+        auto_run: bool = False,
     ) -> None:
         self.state_store = state_store
         self.chatgpt_service = chatgpt_service
@@ -33,11 +45,13 @@ class CodexRegisterService:
         self.sleep_max = sleep_max
         self.db_session = db_session
         self.control_token = control_token
+        self.auto_run = auto_run
         self._run_once_lock = asyncio.Lock()
+        self._auto_run_task: Optional[asyncio.Task[Any]] = None
 
     async def handle_path(self, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = payload or {}
-        if path in {"/enable", "/resume", "/disable", "/accounts"}:
+        if path in {"/enable", "/resume", "/disable", "/retry", "/accounts"}:
             if not self._is_authorized(payload):
                 return self._result(False, error="unauthorized")
 
@@ -50,21 +64,33 @@ class CodexRegisterService:
             return self._result(True, data=logs)
 
         if path == "/accounts":
-            accounts = await self.state_store.list_registrations()
+            list_persisted = getattr(self.state_store, "list_persisted_registrations", None)
+            if callable(list_persisted):
+                maybe_accounts = list_persisted()
+                accounts = await maybe_accounts if inspect.isawaitable(maybe_accounts) else maybe_accounts
+            else:
+                accounts = await self.state_store.list_registrations()
             return self._result(True, data=accounts)
 
         if path == "/enable":
             state = await self._load_state()
             state["enabled"] = True
+            previous_phase = str(state.get("job_phase") or "")
             state["job_phase"] = "running:create_parent"
             state["waiting_reason"] = ""
             state["can_start"] = False
             state["can_resume"] = False
             state["can_abandon"] = True
             state["last_resume_gate_reason"] = ""
-            state["last_transition"] = self._now_iso()
+            self._set_transition(
+                state,
+                from_phase=previous_phase,
+                to_phase="running:create_parent",
+                reason="enabled",
+            )
             await self._save_state(state)
             await self._append_log("enabled")
+            await self._ensure_auto_worker_running()
             return self._result(True, data=state)
 
         if path == "/resume":
@@ -73,14 +99,51 @@ class CodexRegisterService:
         if path == "/disable":
             state = await self._load_state()
             state["enabled"] = False
+            previous_phase = str(state.get("job_phase") or "")
             state["job_phase"] = "abandoned"
             state["waiting_reason"] = ""
             state["can_start"] = False
             state["can_resume"] = False
             state["can_abandon"] = False
-            state["last_transition"] = self._now_iso()
+            self._set_transition(
+                state,
+                from_phase=previous_phase,
+                to_phase="abandoned",
+                reason="disabled",
+            )
             await self._save_state(state)
             await self._append_log("disabled")
+            await self._stop_auto_worker()
+            return self._result(True, data=state)
+
+        if path == "/retry":
+            state = await self._load_state()
+            previous_phase = str(state.get("job_phase") or "")
+            clear_registrations = getattr(self.state_store, "clear_registrations", None)
+            if callable(clear_registrations):
+                maybe_result = clear_registrations()
+                if inspect.isawaitable(maybe_result):
+                    await maybe_result
+
+            state["enabled"] = True
+            state["job_phase"] = "running:create_parent"
+            state["waiting_reason"] = ""
+            state["can_start"] = False
+            state["can_resume"] = False
+            state["can_abandon"] = True
+            state["total_created"] = 0
+            state["last_success"] = ""
+            state["last_error"] = ""
+            state["last_resume_gate_reason"] = ""
+            self._set_transition(
+                state,
+                from_phase=previous_phase,
+                to_phase="running:create_parent",
+                reason="retry",
+            )
+            await self._save_state(state)
+            await self._append_log("retried")
+            await self._ensure_auto_worker_running()
             return self._result(True, data=state)
 
         return self._result(False, error=f"unsupported_path: {path}")
@@ -118,12 +181,18 @@ class CodexRegisterService:
             state["last_error"] = ""
 
             if current_phase == "running:create_parent" and total_created >= 6:
+                previous_phase = current_phase
                 state["job_phase"] = "waiting_manual:parent_upgrade"
                 state["waiting_reason"] = "parent_upgrade"
                 state["can_start"] = False
                 state["can_resume"] = True
                 state["can_abandon"] = True
-                state["last_transition"] = self._now_iso()
+                self._set_transition(
+                    state,
+                    from_phase=previous_phase,
+                    to_phase="waiting_manual:parent_upgrade",
+                    reason="parent_upgrade_wait",
+                )
                 await self._append_log("entered_waiting_manual_parent_upgrade")
             else:
                 state["job_phase"] = current_phase
@@ -201,17 +270,190 @@ class CodexRegisterService:
             await self._append_log("resume_gate_failed", reason=state["last_resume_gate_reason"])
             return self._result(False, error=state["last_resume_gate_reason"], data=state)
 
-        state["job_phase"] = "running:create_children"
+        previous_phase = str(state.get("job_phase") or "")
+        state["job_phase"] = "running:accept_and_switch"
         state["waiting_reason"] = ""
         state["enabled"] = True
         state["can_start"] = False
         state["can_resume"] = False
         state["can_abandon"] = True
         state["last_resume_gate_reason"] = ""
-        state["last_transition"] = self._now_iso()
+        self._set_transition(
+            state,
+            from_phase=previous_phase,
+            to_phase="running:accept_and_switch",
+            reason="resumed",
+        )
         await self._save_state(state)
         await self._append_log("resumed")
-        return self._result(True, data=state)
+
+        workflow_ok = await self._run_resume_invite_and_verify(
+            state=state,
+            accounts=accounts,
+            parent_account_id=str(parent_account_id or ""),
+            parent_identifier=parent_identifier,
+            refreshed_access_token=refreshed_access_token,
+        )
+        if not workflow_ok:
+            latest = await self._load_state()
+            return self._result(False, error=str(latest.get("last_error") or "resume_verify_failed"), data=latest)
+
+        latest = await self._load_state()
+        return self._result(True, data=latest)
+
+    async def _run_resume_invite_and_verify(
+        self,
+        *,
+        state: Dict[str, Any],
+        accounts: List[Dict[str, Any]],
+        parent_account_id: str,
+        parent_identifier: str,
+        refreshed_access_token: str,
+    ) -> bool:
+        invite_method = getattr(self.chatgpt_service, "send_invite", None)
+        members_method = getattr(self.chatgpt_service, "get_members", None)
+        if not callable(invite_method) or not callable(members_method):
+            await self._fail_workflow_state(state, reason="invite_or_members_api_not_available")
+            return False
+
+        children = [item for item in accounts if item.get("codex_register_role") == "child"]
+        previous_phase = str(state.get("job_phase") or "")
+        state["job_phase"] = "running:invite_children"
+        self._set_transition(
+            state,
+            from_phase=previous_phase,
+            to_phase="running:invite_children",
+            reason="begin_invite",
+        )
+        await self._save_state(state)
+
+        for child in children:
+            child_email = str(child.get("email") or "").strip()
+            if not child_email:
+                await self._fail_workflow_state(state, reason="child_email_missing")
+                return False
+
+            invite_call = invite_method(
+                refreshed_access_token,
+                parent_account_id,
+                child_email,
+                self.db_session,
+                identifier=parent_identifier,
+            )
+            invite_result_raw = await invite_call if inspect.isawaitable(invite_call) else invite_call
+            invite_result = invite_result_raw if isinstance(invite_result_raw, dict) else {}
+            if not invite_result.get("success"):
+                error_message = str(invite_result.get("error") or "send_invite_failed")
+                await self._fail_workflow_state(state, reason=error_message)
+                return False
+
+            await self._append_log("child_invited", email=child_email)
+
+        previous_phase = str(state.get("job_phase") or "")
+        state["job_phase"] = "running:verify_and_bind"
+        self._set_transition(
+            state,
+            from_phase=previous_phase,
+            to_phase="running:verify_and_bind",
+            reason="begin_verify",
+        )
+        await self._save_state(state)
+
+        members_call = members_method(
+            refreshed_access_token,
+            parent_account_id,
+            self.db_session,
+            identifier=parent_identifier,
+        )
+        members_result_raw = await members_call if inspect.isawaitable(members_call) else members_call
+        members_result = members_result_raw if isinstance(members_result_raw, dict) else {}
+        if not members_result.get("success"):
+            error_message = str(members_result.get("error") or "get_members_failed")
+            await self._fail_workflow_state(state, reason=error_message)
+            return False
+
+        expected_tokens = self._build_expected_member_tokens(accounts)
+        observed_tokens = self._build_observed_member_tokens(list(members_result.get("members") or []))
+        missing_tokens = sorted(expected_tokens - observed_tokens)
+        if missing_tokens:
+            await self._fail_workflow_state(
+                state,
+                reason="strict_six_member_verification_failed",
+                details={"missing": missing_tokens},
+            )
+            return False
+
+        previous_phase = str(state.get("job_phase") or "")
+        state["job_phase"] = "completed"
+        state["enabled"] = False
+        state["waiting_reason"] = ""
+        state["can_start"] = True
+        state["can_resume"] = False
+        state["can_abandon"] = False
+        state["last_error"] = ""
+        state["last_success"] = self._now_iso()
+        self._set_transition(
+            state,
+            from_phase=previous_phase,
+            to_phase="completed",
+            reason="verify_completed",
+        )
+        await self._save_state(state)
+        await self._append_log("workflow_completed")
+        return True
+
+    async def _fail_workflow_state(self, state: Dict[str, Any], *, reason: str, details: Optional[Dict[str, Any]] = None) -> None:
+        previous_phase = str(state.get("job_phase") or "")
+        state["job_phase"] = "failed"
+        state["enabled"] = False
+        state["can_start"] = False
+        state["can_resume"] = True
+        state["can_abandon"] = True
+        state["last_error"] = reason
+        self._set_transition(
+            state,
+            from_phase=previous_phase,
+            to_phase="failed",
+            reason=reason,
+        )
+        await self._save_state(state)
+        payload = {"reason": reason}
+        if details:
+            payload.update(details)
+        await self._append_log("workflow_failed", **payload)
+
+    def _build_expected_member_tokens(self, accounts: List[Dict[str, Any]]) -> set[str]:
+        tokens: set[str] = set()
+        for account in accounts:
+            email = str(account.get("email") or "").strip().lower()
+            account_id = str(account.get("account_id") or "").strip()
+            if account_id:
+                tokens.add(f"account_id:{account_id}")
+            elif email:
+                tokens.add(f"email:{email}")
+        return tokens
+
+    def _build_observed_member_tokens(self, members: List[Dict[str, Any]]) -> set[str]:
+        tokens: set[str] = set()
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+
+            direct_email = str(member.get("email") or "").strip().lower()
+            direct_account_id = str(member.get("account_id") or "").strip()
+            nested_user = member.get("user") if isinstance(member.get("user"), dict) else {}
+            nested_email = str((nested_user or {}).get("email") or "").strip().lower()
+            nested_account_id = str((nested_user or {}).get("account_id") or "").strip()
+
+            for email in (direct_email, nested_email):
+                if email:
+                    tokens.add(f"email:{email}")
+
+            for account_id in (direct_account_id, nested_account_id):
+                if account_id:
+                    tokens.add(f"account_id:{account_id}")
+
+        return tokens
 
     async def _load_state(self) -> Dict[str, Any]:
         existing = await self.state_store.load_state()
@@ -229,16 +471,87 @@ class CodexRegisterService:
 
     async def _append_log(self, message: str, **fields: Any) -> None:
         append = getattr(self.state_store, "append_log", None)
+        log_time = self._now_iso()
+        log_level = str(fields.get("level") or "info")
+        payload_fields = {"time": log_time, "level": log_level, **fields}
         if callable(append):
-            await append(message, **fields)
+            maybe_result = append(message, **payload_fields)
+            if inspect.isawaitable(maybe_result):
+                await maybe_result
 
-        log_payload = {"event": message, **fields}
+        log_payload = {"event": message, **payload_fields}
         LOGGER.info(json.dumps(log_payload, ensure_ascii=False, default=str))
+
+    async def _ensure_auto_worker_running(self) -> None:
+        if not self.auto_run:
+            return
+
+        if self._auto_run_task and not self._auto_run_task.done():
+            return
+
+        self._auto_run_task = asyncio.create_task(self._auto_worker_loop())
+        await self._append_log("auto_worker_started")
+
+    async def _stop_auto_worker(self) -> None:
+        task = self._auto_run_task
+        if task is None:
+            return
+
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        self._auto_run_task = None
+        await self._append_log("auto_worker_stopped")
+
+    async def _auto_worker_loop(self) -> None:
+        try:
+            while True:
+                state = await self._load_state()
+                if not state.get("enabled"):
+                    break
+
+                current_phase = str(state.get("job_phase") or "")
+                if current_phase not in {"running:create_parent", "running:create_children"}:
+                    break
+
+                await self._append_log("auto_worker_tick", phase=current_phase)
+                await self.run_once()
+
+                state_after = await self._load_state()
+                if not state_after.get("enabled"):
+                    break
+
+                phase_after = str(state_after.get("job_phase") or "")
+                if phase_after not in {"running:create_parent", "running:create_children"}:
+                    break
+
+                min_delay = max(1, int(state_after.get("sleep_min") or self.sleep_min or 1))
+                max_delay = max(min_delay, int(state_after.get("sleep_max") or self.sleep_max or min_delay))
+                delay_seconds = random.randint(min_delay, max_delay)
+                await asyncio.sleep(delay_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._append_log("auto_worker_crashed", error=str(exc))
+        finally:
+            self._auto_run_task = None
 
     async def _list_logs(self) -> List[Dict[str, Any]]:
         list_logs = getattr(self.state_store, "list_logs", None)
         if callable(list_logs):
-            return await list_logs()
+            maybe_result = list_logs()
+            if inspect.isawaitable(maybe_result):
+                resolved = await maybe_result
+            else:
+                resolved = maybe_result
+
+            if isinstance(resolved, list):
+                return [dict(item) if isinstance(item, dict) else {"message": str(item)} for item in resolved]
+            return []
 
         logs = getattr(self.state_store, "logs", None)
         if isinstance(logs, list):
@@ -265,9 +578,17 @@ class CodexRegisterService:
             "can_start": True,
             "can_resume": False,
             "can_abandon": False,
-            "last_transition": "",
+            "last_transition": None,
             "last_resume_gate_reason": "",
             "recent_logs_tail": [],
+        }
+
+    def _set_transition(self, state: Dict[str, Any], *, from_phase: str, to_phase: str, reason: str) -> None:
+        state["last_transition"] = {
+            "time": self._now_iso(),
+            "from": from_phase,
+            "to": to_phase,
+            "reason": reason,
         }
 
     def _is_authorized(self, payload: Dict[str, Any]) -> bool:
@@ -326,6 +647,209 @@ class InMemoryStateStore:
         state_tail.append(entry)
         self._state["recent_logs_tail"] = state_tail[-20:]
 
+    async def clear_registrations(self) -> None:
+        self._accounts = []
+
+
+class PostgresBackedStateStore:
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        dbname: str,
+    ) -> None:
+        self._state: Dict[str, Any] = {}
+        self._accounts: List[Dict[str, Any]] = []
+        self.logs: List[Dict[str, Any]] = []
+        self._dsn = {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "dbname": dbname,
+        }
+
+    async def load_state(self) -> Dict[str, Any]:
+        return dict(self._state)
+
+    async def save_state(self, state: Dict[str, Any]) -> None:
+        self._state = dict(state)
+
+    async def persist_registration(self, payload: Dict[str, Any]) -> None:
+        row = dict(payload)
+        source = str(row.get("source") or "codex-register")
+        row["source"] = source
+
+        await asyncio.to_thread(self._upsert_account_row, row)
+        self._upsert_memory_account(row)
+
+    async def list_registrations(self) -> List[Dict[str, Any]]:
+        return [dict(item) for item in self._accounts]
+
+    async def list_persisted_registrations(self) -> List[Dict[str, Any]]:
+        rows = await asyncio.to_thread(self._fetch_account_rows)
+        return [dict(item) for item in rows]
+
+    async def append_log(self, message: str, **fields: Any) -> None:
+        entry = {"message": message, **fields}
+        self.logs.append(entry)
+        state_tail = list(self._state.get("recent_logs_tail") or [])
+        state_tail.append(entry)
+        self._state["recent_logs_tail"] = state_tail[-20:]
+
+    async def clear_registrations(self) -> None:
+        self._accounts = []
+
+    def _connect(self):
+        if psycopg2 is None:
+            raise RuntimeError("psycopg2_not_available")
+        return psycopg2.connect(**self._dsn)
+
+    def _upsert_account_row(self, payload: Dict[str, Any]) -> None:
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO codex_register_accounts (
+                        email,
+                        refresh_token,
+                        access_token,
+                        account_id,
+                        source,
+                        plan_type,
+                        organization_id,
+                        workspace_id,
+                        codex_register_role,
+                        updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (email, source)
+                    DO UPDATE SET
+                        refresh_token = EXCLUDED.refresh_token,
+                        access_token = EXCLUDED.access_token,
+                        account_id = EXCLUDED.account_id,
+                        plan_type = EXCLUDED.plan_type,
+                        organization_id = EXCLUDED.organization_id,
+                        workspace_id = EXCLUDED.workspace_id,
+                        codex_register_role = EXCLUDED.codex_register_role,
+                        updated_at = NOW()
+                    """,
+                    (
+                        str(payload.get("email") or "").strip(),
+                        str(payload.get("refresh_token") or "").strip(),
+                        str(payload.get("access_token") or "").strip(),
+                        str(payload.get("account_id") or "").strip() or None,
+                        str(payload.get("source") or "codex-register").strip(),
+                        str(payload.get("plan_type") or "").strip() or None,
+                        str(payload.get("organization_id") or "").strip() or None,
+                        str(payload.get("workspace_id") or "").strip() or None,
+                        str(payload.get("codex_register_role") or "").strip() or None,
+                    ),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _fetch_account_rows(self) -> List[Dict[str, Any]]:
+        connection = self._connect()
+        try:
+            cursor_factory = RealDictCursor if RealDictCursor is not None else None
+            with connection.cursor(cursor_factory=cursor_factory) as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        email,
+                        refresh_token,
+                        access_token,
+                        account_id,
+                        source,
+                        created_at,
+                        updated_at,
+                        plan_type,
+                        organization_id,
+                        workspace_id,
+                        codex_register_role
+                    FROM codex_register_accounts
+                    WHERE source = 'codex-register'
+                    ORDER BY created_at ASC
+                    """
+                )
+                rows = cursor.fetchall()
+        finally:
+            connection.close()
+
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, dict):
+                record = dict(row)
+            else:
+                continue
+
+            created_at = record.get("created_at")
+            updated_at = record.get("updated_at")
+            created_at_formatter = getattr(created_at, "isoformat", None)
+            updated_at_formatter = getattr(updated_at, "isoformat", None)
+
+            record["created_at"] = created_at_formatter() if callable(created_at_formatter) else str(created_at or "")
+            record["updated_at"] = updated_at_formatter() if callable(updated_at_formatter) else str(updated_at or "")
+            result.append(record)
+
+        return result
+
+    def _upsert_memory_account(self, payload: Dict[str, Any]) -> None:
+        email = str(payload.get("email") or "").strip()
+        source = str(payload.get("source") or "codex-register").strip()
+        if not email:
+            return
+
+        index = next(
+            (
+                idx
+                for idx, item in enumerate(self._accounts)
+                if str(item.get("email") or "").strip() == email
+                and str(item.get("source") or "codex-register").strip() == source
+            ),
+            -1,
+        )
+
+        if index >= 0:
+            merged = dict(self._accounts[index])
+            merged.update(payload)
+            self._accounts[index] = merged
+            return
+
+        self._accounts.append(dict(payload))
+
+def _build_state_store_from_env() -> Any:
+    postgres_host = str(os.getenv("POSTGRES_HOST") or "").strip()
+    postgres_user = str(os.getenv("POSTGRES_USER") or "").strip()
+    postgres_password = str(os.getenv("POSTGRES_PASSWORD") or "").strip()
+    postgres_db = str(os.getenv("POSTGRES_DB") or "").strip()
+    postgres_port_raw = str(os.getenv("POSTGRES_PORT") or "5432").strip()
+
+    if not postgres_host or not postgres_user or not postgres_db:
+        return InMemoryStateStore()
+
+    try:
+        postgres_port = int(postgres_port_raw)
+    except ValueError:
+        postgres_port = 5432
+
+    if psycopg2 is None:
+        return InMemoryStateStore()
+
+    return PostgresBackedStateStore(
+        host=postgres_host,
+        port=postgres_port,
+        user=postgres_user,
+        password=postgres_password,
+        dbname=postgres_db,
+    )
+
 
 async def run_http(service: CodexRegisterService, *, host: str, port: int) -> None:
     handler = build_http_handler(service)
@@ -361,9 +885,12 @@ def build_http_handler(service: CodexRegisterService):
 
             future = None
             try:
+                service_loop = getattr(self.server, "_service_loop", None)
+                if service_loop is None:
+                    raise RuntimeError("service_loop_not_initialized")
                 future = asyncio.run_coroutine_threadsafe(
                     service.handle_path(self.path, payload=payload),
-                    self.server._service_loop,
+                    service_loop,
                 )
                 response = future.result(timeout=30)
 
@@ -439,13 +966,14 @@ def main() -> None:
     )
 
     service = CodexRegisterService(
-        state_store=InMemoryStateStore(),
+        state_store=_build_state_store_from_env(),
         chatgpt_service=ChatGPTService(),
         workflow_id=workflow_id,
         sleep_min=sleep_min,
         sleep_max=sleep_max,
         db_session=None,
         control_token=control_token,
+        auto_run=True,
     )
 
     asyncio.run(run_http(service, host=host, port=port))

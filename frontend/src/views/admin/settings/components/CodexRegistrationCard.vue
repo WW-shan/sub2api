@@ -77,6 +77,15 @@
       </p>
 
       <section
+        v-if="workflowFailureDetail"
+        class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 dark:border-red-900/60 dark:bg-red-900/20"
+        data-testid="codex-workflow-failure-detail"
+      >
+        <h3 class="text-sm font-semibold text-red-700 dark:text-red-300">Workflow Failed</h3>
+        <p class="mt-2 whitespace-pre-wrap break-words text-xs leading-6 text-red-700 dark:text-red-200">{{ workflowFailureDetail }}</p>
+      </section>
+
+      <section
         v-if="isWaitingManual"
         class="rounded-2xl border border-amber-200 bg-amber-50/70 p-5 dark:border-amber-900/60 dark:bg-amber-900/10"
       >
@@ -623,6 +632,22 @@ const visibleLogs = computed(() => {
     const msg = String(item.message || '')
     return msg.includes('resume_') || msg.includes('resume_gate_') || msg.includes('http_post_received:path=/resume')
   })
+})
+
+const workflowFailureDetail = computed(() => {
+  if (status.value?.job_phase !== 'failed') {
+    return ''
+  }
+
+  const latestFailureLog = [...logs.value]
+    .reverse()
+    .find((item) => String(item.message || '').includes('workflow_failed'))
+
+  if (latestFailureLog?.message) {
+    return latestFailureLog.message
+  }
+
+  return status.value?.last_error || ''
 })
 
 const isWaitingManual = computed(() => Boolean(status.value?.job_phase?.startsWith('waiting_manual:')))

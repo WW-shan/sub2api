@@ -77,10 +77,76 @@ function normalizeLogEntry(entry: unknown): CodexLogEntry {
   }
 
   const record = entry as Record<string, unknown>;
+  const baseMessage = String(record.message ?? "");
+  const detailKeys = Object.keys(record).filter(
+    (key) => !["time", "level", "message"].includes(key),
+  );
+
+  const detailText = detailKeys
+    .map((key) => {
+      const value = record[key];
+      if (value === null || value === undefined || value === "") {
+        return "";
+      }
+
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        return `${key}=${String(value)}`;
+      }
+
+      try {
+        return `${key}=${JSON.stringify(value)}`;
+      } catch {
+        return `${key}=${String(value)}`;
+      }
+    })
+    .filter(Boolean)
+    .join(" | ");
+
+  const message = detailText
+    ? (baseMessage ? `${baseMessage} | ${detailText}` : detailText)
+    : baseMessage;
+
   return {
     time: String(record.time ?? ""),
     level: String(record.level ?? "info"),
-    message: String(record.message ?? ""),
+    message,
+  };
+}
+
+function normalizeTransition(value: unknown): CodexTransition | null {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return {
+      time: value,
+      from: "",
+      to: "",
+      reason: "",
+    };
+  }
+
+  if (typeof value !== "object") {
+    return null;
+  }
+
+  const transition = value as Record<string, unknown>;
+  return {
+    time: String(transition.time ?? ""),
+    from: String(transition.from ?? ""),
+    to: String(transition.to ?? ""),
+    reason: String(transition.reason ?? ""),
+  };
+}
+
+function normalizeStatus(status: CodexStatus): CodexStatus {
+  return {
+    ...status,
+    last_transition: normalizeTransition(status.last_transition),
+    recent_logs_tail: Array.isArray(status.recent_logs_tail)
+      ? status.recent_logs_tail.map(normalizeLogEntry)
+      : [],
   };
 }
 
@@ -88,7 +154,8 @@ export async function getStatus(): Promise<CodexStatus> {
   const res = await apiClient.get<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/status",
   );
-  return unwrapCodexPayload<CodexStatus>(res.data, {
+  return normalizeStatus(
+    unwrapCodexPayload<CodexStatus>(res.data, {
     enabled: false,
     sleep_min: 0,
     sleep_max: 0,
@@ -105,7 +172,8 @@ export async function getStatus(): Promise<CodexStatus> {
     last_transition: null,
     last_resume_gate_reason: null,
     recent_logs_tail: [],
-  });
+    }),
+  );
 }
 
 export async function getLogs(
@@ -143,7 +211,7 @@ export async function enable(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/enable",
   );
-  return unwrapCodexPayload<CodexStatus>(res.data, {
+  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, {
     enabled: false,
     sleep_min: 0,
     sleep_max: 0,
@@ -160,14 +228,14 @@ export async function enable(): Promise<CodexStatus> {
     last_transition: null,
     last_resume_gate_reason: null,
     recent_logs_tail: [],
-  });
+  }));
 }
 
 export async function disable(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/disable",
   );
-  return unwrapCodexPayload<CodexStatus>(res.data, {
+  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, {
     enabled: false,
     sleep_min: 0,
     sleep_max: 0,
@@ -184,14 +252,14 @@ export async function disable(): Promise<CodexStatus> {
     last_transition: null,
     last_resume_gate_reason: null,
     recent_logs_tail: [],
-  });
+  }));
 }
 
 export async function resume(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/resume",
   );
-  return unwrapCodexPayload<CodexStatus>(res.data, {
+  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, {
     enabled: false,
     sleep_min: 0,
     sleep_max: 0,
@@ -208,14 +276,14 @@ export async function resume(): Promise<CodexStatus> {
     last_transition: null,
     last_resume_gate_reason: null,
     recent_logs_tail: [],
-  });
+  }));
 }
 
 export async function retry(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/retry",
   );
-  return unwrapCodexPayload<CodexStatus>(res.data, {
+  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, {
     enabled: false,
     sleep_min: 0,
     sleep_max: 0,
@@ -232,7 +300,7 @@ export async function retry(): Promise<CodexStatus> {
     last_transition: null,
     last_resume_gate_reason: null,
     recent_logs_tail: [],
-  });
+  }));
 }
 
 export default {

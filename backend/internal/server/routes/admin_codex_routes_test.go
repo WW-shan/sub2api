@@ -61,3 +61,36 @@ func TestRegisterCodexRoutesRejectsDeprecatedRunOnceEndpoint(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, w.Code)
 }
+
+func TestRegisterCodexRoutesIncludesRetryEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/retry" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"job_phase":"running:create_parent"},"error":null}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{
+			Codex: adminhandler.NewCodexHandler(),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/codex/retry", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.NotEqual(t, http.StatusNotFound, w.Code)
+	require.Equal(t, http.StatusOK, w.Code)
+}

@@ -291,6 +291,7 @@ func registerCodexRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		codex.POST("/enable", h.Admin.Codex.Enable)
 		codex.POST("/disable", h.Admin.Codex.Disable)
 		codex.POST("/resume", h.Admin.Codex.Resume)
+		codex.POST("/retry", h.Admin.Codex.Retry)
 	}
 }
 

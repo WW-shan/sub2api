@@ -96,3 +96,7 @@ func (h *CodexHandler) Disable(c *gin.Context) {
 func (h *CodexHandler) Resume(c *gin.Context) {
 	h.proxyPost(c, "/resume")
 }
+
+func (h *CodexHandler) Retry(c *gin.Context) {
+	h.proxyPost(c, "/retry")
+}
