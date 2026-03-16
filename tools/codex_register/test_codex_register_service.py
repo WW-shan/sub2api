@@ -498,6 +498,7 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
         status_payload = (await self.service.handle_path("/status"))["data"]
         self.assertFalse(status_payload["enabled"])
         self.assertEqual(status_payload["job_phase"], "abandoned")
+        self.assertTrue(status_payload["can_start"])
 
     async def test_enable_starts_auto_worker_when_auto_run_enabled(self):
         auto_store = InMemoryWorkflowStore()

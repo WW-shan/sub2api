@@ -354,7 +354,7 @@ describe('CodexRegistrationCard', () => {
     expect(wrapper.text()).toContain('正在创建母号')
   })
 
-  it('switches stop button to retry button in cancelled waiting state', async () => {
+  it('keeps secondary action as stop in cancelled waiting state', async () => {
     codexApiMocks.getStatus.mockResolvedValueOnce({
       enabled: false,
       sleep_min: 12,
@@ -368,51 +368,6 @@ describe('CodexRegistrationCard', () => {
       waiting_reason: 'cancelled',
       can_start: false,
       can_resume: true,
-      can_abandon: false
-    })
-
-    const wrapper = mount(CodexRegistrationCard, {
-      props: { active: true },
-      global: { stubs: { StatCard: StatCardStub } }
-    })
-
-    await flushPromises()
-
-    const controlbar = wrapper.find('[data-testid="codex-controlbar-secondary"]')
-    expect(controlbar.text()).toContain('重试')
-    expect(controlbar.text()).not.toContain('停止')
-  })
-
-  it('calls retry endpoint when cancelled retry button is clicked', async () => {
-    codexApiMocks.getStatus.mockResolvedValueOnce({
-      enabled: false,
-      sleep_min: 12,
-      sleep_max: 34,
-      total_created: 19,
-      last_success: '2026-03-06 10:05:00',
-      last_error: null,
-      proxy: true,
-      job_phase: 'waiting_manual:cancelled',
-      workflow_id: 'wf-2',
-      waiting_reason: 'cancelled',
-      can_start: false,
-      can_resume: true,
-      can_abandon: false
-    })
-
-    codexApiMocks.retry.mockResolvedValueOnce({
-      enabled: true,
-      sleep_min: 12,
-      sleep_max: 34,
-      total_created: 19,
-      last_success: '2026-03-06 10:05:00',
-      last_error: null,
-      proxy: true,
-      job_phase: 'running:create_parent',
-      workflow_id: 'wf-3',
-      waiting_reason: null,
-      can_start: false,
-      can_resume: false,
       can_abandon: true
     })
 
@@ -423,18 +378,12 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
-    const retryButton = wrapper.findAll('button').find((btn) => btn.text() === '重试')
-    expect(retryButton).toBeDefined()
-
-    await retryButton!.trigger('click')
-    await flushPromises()
-
-    expect(codexApiMocks.retry).toHaveBeenCalledTimes(1)
-    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
-    expect(wrapper.text()).toContain('正在创建母号')
+    const controlbar = wrapper.find('[data-testid="codex-controlbar-secondary"]')
+    expect(controlbar.text()).toContain('停止')
+    expect(controlbar.text()).not.toContain('重试')
   })
 
-  it('uses retry as primary action in cancelled waiting state', async () => {
+  it('calls disable endpoint when secondary stop button is clicked in cancelled waiting state', async () => {
     codexApiMocks.getStatus.mockResolvedValueOnce({
       enabled: false,
       sleep_min: 12,
@@ -448,10 +397,60 @@ describe('CodexRegistrationCard', () => {
       waiting_reason: 'cancelled',
       can_start: false,
       can_resume: true,
+      can_abandon: true
+    })
+
+    codexApiMocks.disable.mockResolvedValueOnce({
+      enabled: false,
+      sleep_min: 12,
+      sleep_max: 34,
+      total_created: 19,
+      last_success: '2026-03-06 10:05:00',
+      last_error: null,
+      proxy: true,
+      job_phase: 'abandoned',
+      workflow_id: 'wf-3',
+      waiting_reason: null,
+      can_start: true,
+      can_resume: false,
       can_abandon: false
     })
 
-    codexApiMocks.retry.mockResolvedValueOnce({
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const stopButton = wrapper.findAll('button').find((btn) => btn.text() === '停止')
+    expect(stopButton).toBeDefined()
+
+    await stopButton!.trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.disable).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.retry).not.toHaveBeenCalled()
+  })
+
+  it('keeps resume as primary action in cancelled waiting state', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce({
+      enabled: false,
+      sleep_min: 12,
+      sleep_max: 34,
+      total_created: 19,
+      last_success: '2026-03-06 10:05:00',
+      last_error: null,
+      proxy: true,
+      job_phase: 'waiting_manual:cancelled',
+      workflow_id: 'wf-2',
+      waiting_reason: 'cancelled',
+      can_start: false,
+      can_resume: true,
+      can_abandon: true
+    })
+
+    codexApiMocks.resume.mockResolvedValueOnce({
       enabled: true,
       sleep_min: 12,
       sleep_max: 34,
@@ -475,13 +474,13 @@ describe('CodexRegistrationCard', () => {
     await flushPromises()
 
     const primaryButton = wrapper.find('[data-testid="codex-controlbar-primary"] button')
-    expect(primaryButton.text()).toBe('重试')
+    expect(primaryButton.text()).toBe('继续')
 
     await primaryButton.trigger('click')
     await flushPromises()
 
-    expect(codexApiMocks.retry).toHaveBeenCalledTimes(1)
-    expect(codexApiMocks.resume).not.toHaveBeenCalled()
+    expect(codexApiMocks.resume).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.retry).not.toHaveBeenCalled()
   })
 
   it('passes selected level and limit to getLogs', async () => {

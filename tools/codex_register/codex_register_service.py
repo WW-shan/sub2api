@@ -102,7 +102,7 @@ class CodexRegisterService:
             previous_phase = str(state.get("job_phase") or "")
             state["job_phase"] = "abandoned"
             state["waiting_reason"] = ""
-            state["can_start"] = False
+            state["can_start"] = True
             state["can_resume"] = False
             state["can_abandon"] = False
             self._set_transition(

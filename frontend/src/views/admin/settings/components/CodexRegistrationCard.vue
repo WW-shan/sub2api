@@ -1010,18 +1010,12 @@ const waitingTodoSteps = computed(() => {
 const canStart = computed(() => Boolean(status.value?.can_start));
 const canResume = computed(() => Boolean(status.value?.can_resume));
 const canAbandon = computed(() => Boolean(status.value?.can_abandon));
-const isCancelledWaiting = computed(
-  () => status.value?.job_phase === "waiting_manual:cancelled",
-);
-
 const secondaryActionLabel = computed(() => {
-  return isCancelledWaiting.value
-    ? t("admin.codexRegister.actions.retry")
-    : t("admin.codexRegister.actions.stop");
+  return t("admin.codexRegister.actions.stop");
 });
 
 const secondaryActionEnabled = computed(() => {
-  return isCancelledWaiting.value ? canResume.value : canAbandon.value;
+  return canAbandon.value;
 });
 
 const primaryAction = computed<PrimaryAction>(() => {
@@ -1034,7 +1028,6 @@ const primaryActionLabel = computed(() => {
   if (primaryAction.value === "start")
     return t("admin.codexRegister.actions.start");
   if (primaryAction.value === "resume") {
-    if (isCancelledWaiting.value) return t("admin.codexRegister.actions.retry");
     return t("admin.codexRegister.actions.resume");
   }
   return t("admin.codexRegister.actions.inProgress");
@@ -1282,19 +1275,11 @@ async function triggerPrimaryAction() {
     return;
   }
   if (primaryAction.value === "resume") {
-    if (isCancelledWaiting.value) {
-      await retryWorkflow();
-      return;
-    }
     await resumeWorkflow();
   }
 }
 
 async function triggerSecondaryAction() {
-  if (isCancelledWaiting.value) {
-    await retryWorkflow();
-    return;
-  }
   await toggleEnabled(false);
 }
 
