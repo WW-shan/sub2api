@@ -197,6 +197,25 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         generated_password = str(result["data"]["register_input"].get("fixed_password") or "")
         self.assertGreaterEqual(len(generated_password), 12)
 
+    async def test_validate_otp_code_uses_email_otp_validate_endpoint(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(return_value=service._success_result({})),
+        ) as mocked_make_register_request:
+            result = await service._validate_otp_code(
+                "user@example.com",
+                "123456",
+                db_session=None,
+                identifier="acc_123",
+            )
+
+        self.assertTrue(result["success"])
+        called_url = mocked_make_register_request.await_args.args[1]
+        self.assertEqual(called_url, "https://auth.openai.com/api/accounts/email-otp/validate")
+
     async def test_register_unknown_path_returns_register_user_failure_immediately(self):
         service = self.ChatGPTService()
 

@@ -996,7 +996,7 @@ class ChatGPTService:
         proxy: Optional[str] = None,
     ) -> Dict[str, Any]:
         """验证 OTP 代码（保留原有的邮箱验证逻辑）"""
-        url = "https://auth.openai.com/api/otp/validate"
+        url = "https://auth.openai.com/api/accounts/email-otp/validate"
         
         headers = self._build_auth_headers()
         
