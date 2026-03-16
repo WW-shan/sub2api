@@ -499,10 +499,6 @@ class CodexRegisterService:
 
         if not task.done():
             task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
 
         self._auto_run_task = None
         await self._append_log("auto_worker_stopped")

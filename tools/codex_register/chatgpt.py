@@ -389,7 +389,7 @@ class ChatGPTService:
 
         fixed_password = str(register_input.get("fixed_password") or "")
         if not fixed_password:
-            register_input["fixed_password"] = f"Cg#{random.randint(100000, 999999)}Aa"
+            register_input["fixed_password"] = f"Cg#{random.randint(1000000, 9999999)}Aa"
 
         register_input["resolved_email"] = resolved_email
 

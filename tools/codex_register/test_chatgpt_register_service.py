@@ -180,6 +180,23 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["email"], "user@example.com")
         self.assertEqual(result["data"]["status"], "completed")
 
+    async def test_prepare_identity_generates_password_with_minimum_length(self):
+        service = self.ChatGPTService()
+        with self._register_env(
+            REGISTER_MAIL_DOMAIN="wwcloud.me",
+            REGISTER_MAIL_WORKER_BASE_URL="https://worker.example.com",
+            REGISTER_MAIL_WORKER_TOKEN="token",
+        ):
+            runtime_context_result = service._build_runtime_context("acc_123")
+
+        self.assertTrue(runtime_context_result["success"])
+        runtime_register_input = runtime_context_result["data"]["register_input"]
+        result = service._prepare_identity({"register_input": runtime_register_input})
+
+        self.assertTrue(result["success"])
+        generated_password = str(result["data"]["register_input"].get("fixed_password") or "")
+        self.assertGreaterEqual(len(generated_password), 12)
+
     async def test_register_unknown_path_returns_register_user_failure_immediately(self):
         service = self.ChatGPTService()
 

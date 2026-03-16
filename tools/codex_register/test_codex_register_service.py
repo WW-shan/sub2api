@@ -468,6 +468,37 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_payload["last_transition"].get("reason"), "retry")
         self.assertEqual(len(self.store.accounts), 0)
 
+    async def test_disable_does_not_block_when_auto_worker_cancellation_hangs(self):
+        await self.service.handle_path("/enable")
+
+        unresolved = asyncio.Future()
+
+        class _HangingTask:
+            def done(self):
+                return False
+
+            def cancel(self):
+                return None
+
+            def __await__(self):
+                return unresolved.__await__()
+
+        with patch.object(
+            self.service,
+            "_auto_run_task",
+            _HangingTask(),
+        ), patch.object(
+            self.service,
+            "_append_log",
+            new=AsyncMock(),
+        ):
+            result = await self.service.handle_path("/disable")
+
+        self.assertTrue(result["success"])
+        status_payload = (await self.service.handle_path("/status"))["data"]
+        self.assertFalse(status_payload["enabled"])
+        self.assertEqual(status_payload["job_phase"], "abandoned")
+
     async def test_enable_starts_auto_worker_when_auto_run_enabled(self):
         auto_store = InMemoryWorkflowStore()
         auto_chatgpt = SimpleNamespace(
