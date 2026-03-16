@@ -89,7 +89,11 @@ function normalizeLogEntry(entry: unknown): CodexLogEntry {
         return "";
       }
 
-      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+      ) {
         return `${key}=${String(value)}`;
       }
 
@@ -103,7 +107,9 @@ function normalizeLogEntry(entry: unknown): CodexLogEntry {
     .join(" | ");
 
   const message = detailText
-    ? (baseMessage ? `${baseMessage} | ${detailText}` : detailText)
+    ? baseMessage
+      ? `${baseMessage} | ${detailText}`
+      : detailText
     : baseMessage;
 
   return {
@@ -156,22 +162,22 @@ export async function getStatus(): Promise<CodexStatus> {
   );
   return normalizeStatus(
     unwrapCodexPayload<CodexStatus>(res.data, {
-    enabled: false,
-    sleep_min: 0,
-    sleep_max: 0,
-    total_created: 0,
-    last_success: null,
-    last_error: null,
-    proxy: false,
-    job_phase: "idle",
-    workflow_id: null,
-    waiting_reason: null,
-    can_start: false,
-    can_resume: false,
-    can_abandon: false,
-    last_transition: null,
-    last_resume_gate_reason: null,
-    recent_logs_tail: [],
+      enabled: false,
+      sleep_min: 0,
+      sleep_max: 0,
+      total_created: 0,
+      last_success: null,
+      last_error: null,
+      proxy: false,
+      job_phase: "idle",
+      workflow_id: null,
+      waiting_reason: null,
+      can_start: false,
+      can_resume: false,
+      can_abandon: false,
+      last_transition: null,
+      last_resume_gate_reason: null,
+      recent_logs_tail: [],
     }),
   );
 }
@@ -211,96 +217,104 @@ export async function enable(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/enable",
   );
-  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, {
-    enabled: false,
-    sleep_min: 0,
-    sleep_max: 0,
-    total_created: 0,
-    last_success: null,
-    last_error: null,
-    proxy: false,
-    job_phase: "idle",
-    workflow_id: null,
-    waiting_reason: null,
-    can_start: false,
-    can_resume: false,
-    can_abandon: false,
-    last_transition: null,
-    last_resume_gate_reason: null,
-    recent_logs_tail: [],
-  }));
+  return normalizeStatus(
+    unwrapCodexPayload<CodexStatus>(res.data, {
+      enabled: false,
+      sleep_min: 0,
+      sleep_max: 0,
+      total_created: 0,
+      last_success: null,
+      last_error: null,
+      proxy: false,
+      job_phase: "idle",
+      workflow_id: null,
+      waiting_reason: null,
+      can_start: false,
+      can_resume: false,
+      can_abandon: false,
+      last_transition: null,
+      last_resume_gate_reason: null,
+      recent_logs_tail: [],
+    }),
+  );
 }
 
 export async function disable(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/disable",
   );
-  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, {
-    enabled: false,
-    sleep_min: 0,
-    sleep_max: 0,
-    total_created: 0,
-    last_success: null,
-    last_error: null,
-    proxy: false,
-    job_phase: "idle",
-    workflow_id: null,
-    waiting_reason: null,
-    can_start: false,
-    can_resume: false,
-    can_abandon: false,
-    last_transition: null,
-    last_resume_gate_reason: null,
-    recent_logs_tail: [],
-  }));
+  return normalizeStatus(
+    unwrapCodexPayload<CodexStatus>(res.data, {
+      enabled: false,
+      sleep_min: 0,
+      sleep_max: 0,
+      total_created: 0,
+      last_success: null,
+      last_error: null,
+      proxy: false,
+      job_phase: "idle",
+      workflow_id: null,
+      waiting_reason: null,
+      can_start: false,
+      can_resume: false,
+      can_abandon: false,
+      last_transition: null,
+      last_resume_gate_reason: null,
+      recent_logs_tail: [],
+    }),
+  );
 }
 
 export async function resume(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/resume",
   );
-  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, {
-    enabled: false,
-    sleep_min: 0,
-    sleep_max: 0,
-    total_created: 0,
-    last_success: null,
-    last_error: null,
-    proxy: false,
-    job_phase: "idle",
-    workflow_id: null,
-    waiting_reason: null,
-    can_start: false,
-    can_resume: false,
-    can_abandon: false,
-    last_transition: null,
-    last_resume_gate_reason: null,
-    recent_logs_tail: [],
-  }));
+  return normalizeStatus(
+    unwrapCodexPayload<CodexStatus>(res.data, {
+      enabled: false,
+      sleep_min: 0,
+      sleep_max: 0,
+      total_created: 0,
+      last_success: null,
+      last_error: null,
+      proxy: false,
+      job_phase: "idle",
+      workflow_id: null,
+      waiting_reason: null,
+      can_start: false,
+      can_resume: false,
+      can_abandon: false,
+      last_transition: null,
+      last_resume_gate_reason: null,
+      recent_logs_tail: [],
+    }),
+  );
 }
 
 export async function retry(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/retry",
   );
-  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, {
-    enabled: false,
-    sleep_min: 0,
-    sleep_max: 0,
-    total_created: 0,
-    last_success: null,
-    last_error: null,
-    proxy: false,
-    job_phase: "idle",
-    workflow_id: null,
-    waiting_reason: null,
-    can_start: false,
-    can_resume: false,
-    can_abandon: false,
-    last_transition: null,
-    last_resume_gate_reason: null,
-    recent_logs_tail: [],
-  }));
+  return normalizeStatus(
+    unwrapCodexPayload<CodexStatus>(res.data, {
+      enabled: false,
+      sleep_min: 0,
+      sleep_max: 0,
+      total_created: 0,
+      last_success: null,
+      last_error: null,
+      proxy: false,
+      job_phase: "idle",
+      workflow_id: null,
+      waiting_reason: null,
+      can_start: false,
+      can_resume: false,
+      can_abandon: false,
+      last_transition: null,
+      last_resume_gate_reason: null,
+      recent_logs_tail: [],
+    }),
+  );
 }
 
 export default {
