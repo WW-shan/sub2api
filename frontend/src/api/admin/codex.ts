@@ -46,10 +46,14 @@ export interface CodexLogQuery {
 export interface CodexRegisterAccount {
   id: number;
   email: string;
-  refresh_token: string;
-  access_token: string;
+  refresh_token?: string;
+  access_token?: string;
   account_id: string | null;
   source: string;
+  codex_register_role?: "parent" | "child";
+  plan_type?: string;
+  organization_id?: string | null;
+  workspace_id?: string | null;
   created_at: string | null;
   updated_at: string | null;
 }

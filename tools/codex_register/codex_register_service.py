@@ -640,6 +640,10 @@ class InMemoryStateStore:
     async def list_registrations(self) -> List[Dict[str, Any]]:
         return [dict(item) for item in self._accounts]
 
+    async def list_persisted_registrations(self) -> List[Dict[str, Any]]:
+        """Return all registered accounts (for consistency with PostgresBackedStateStore)"""
+        return [dict(item) for item in self._accounts]
+
     async def append_log(self, message: str, **fields: Any) -> None:
         entry = {"message": message, **fields}
         self.logs.append(entry)

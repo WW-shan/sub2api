@@ -582,6 +582,11 @@
                   <th
                     class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300"
                   >
+                    Role
+                  </th>
+                  <th
+                    class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300"
+                  >
                     {{ t("admin.codexRegister.accounts.columns.accessToken") }}
                   </th>
                   <th
@@ -605,6 +610,23 @@
                 <tr v-for="account in accounts" :key="account.id">
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     {{ account.email }}
+                  </td>
+                  <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
+                    <span
+                      :class="[
+                        'inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold',
+                        (account.codex_register_role || account.source) ===
+                        'parent'
+                          ? 'border border-purple-200 bg-purple-100 text-purple-800 dark:border-purple-900/60 dark:bg-purple-900/30 dark:text-purple-300'
+                          : 'border border-blue-200 bg-blue-100 text-blue-800 dark:border-blue-900/60 dark:bg-blue-900/30 dark:text-blue-300',
+                      ]"
+                    >
+                      {{
+                        account.codex_register_role ||
+                        account.source ||
+                        "unknown"
+                      }}
+                    </span>
                   </td>
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     <div class="flex items-center gap-2">
