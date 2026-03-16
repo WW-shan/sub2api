@@ -138,7 +138,13 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
             get_account_info=AsyncMock(
                 return_value={
                     "success": True,
-                    "accounts": [{"account_id": "parent", "has_active_subscription": True}],
+                    "accounts": [
+                        {
+                            "account_id": "acc_1",
+                            "plan_type": "team",
+                            "has_active_subscription": True,
+                        }
+                    ],
                     "error": None,
                 }
             ),
@@ -198,7 +204,13 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
             call_order.append("get_account_info")
             return {
                 "success": True,
-                "accounts": [{"account_id": "parent", "has_active_subscription": True}],
+                "accounts": [
+                    {
+                        "account_id": "acc_1",
+                        "plan_type": "team",
+                        "has_active_subscription": True,
+                    }
+                ],
                 "error": None,
             }
 
@@ -225,7 +237,13 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
                     get_account_info=AsyncMock(
                         return_value={
                             "success": True,
-                            "accounts": [{"account_id": "parent", "has_active_subscription": True}],
+                            "accounts": [
+                                {
+                                    "account_id": "acc_1",
+                                    "plan_type": "team",
+                                    "has_active_subscription": True,
+                                }
+                            ],
                             "error": None,
                         }
                     ),
@@ -344,7 +362,8 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_once_is_serialized_by_async_lock(self):
         await self._enable_and_create(5)
 
-        async def _slow_register():
+        async def _slow_register(*args, **kwargs):
+            del args, kwargs
             await asyncio.sleep(0.01)
             return _register_success(6)
 
@@ -356,6 +375,162 @@ class CodexRegisterServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.chatgpt.register.await_count, 1)
         self.assertEqual(status_payload["total_created"], 6)
         self.assertEqual(status_payload["job_phase"], "waiting_manual:parent_upgrade")
+
+
+
+    async def test_resume_fails_when_parent_not_upgraded_to_active_team(self):
+        await self._enable_and_create(6)
+
+        self.chatgpt.get_account_info = AsyncMock(
+            return_value={
+                "success": True,
+                "accounts": [
+                    {
+                        "account_id": "acc_1",
+                        "plan_type": "team",
+                        "has_active_subscription": False,
+                    }
+                ],
+                "error": None,
+            }
+        )
+
+        result = await self.service.handle_path("/resume")
+        status_payload = (await self.service.handle_path("/status"))["data"]
+
+        self.assertFalse(result["success"])
+        self.assertEqual(status_payload["job_phase"], "waiting_manual:parent_upgrade")
+        self.assertEqual(status_payload["last_resume_gate_reason"], "parent_upgrade_not_verified")
+
+
+class _StubWorkflowStore:
+    def __init__(self):
+        self._state = {}
+        self._accounts = []
+        self.logs = []
+
+    async def load_state(self):
+        return dict(self._state)
+
+    async def save_state(self, state):
+        self._state = dict(state)
+
+    async def persist_registration(self, payload):
+        self._accounts.append(dict(payload))
+
+    async def list_registrations(self):
+        return [dict(item) for item in self._accounts]
+
+    async def append_log(self, message, **fields):
+        self.logs.append({"message": message, **fields})
+
+
+class _StubDBSession:
+    pass
+
+
+class _StubChatGPTService:
+    def __init__(self):
+        self.register_calls = []
+        self.refresh_calls = []
+        self.account_info_calls = []
+
+    async def register(self, *, db_session=None, identifier="default"):
+        self.register_calls.append({"db_session": db_session, "identifier": identifier})
+        return {
+            "success": True,
+            "data": {
+                "email": "parent@example.com",
+                "account_id": "acc_1",
+                "access_token": "at_1",
+                "refresh_token": "rt_1",
+                "session_token": "st_1",
+                "identifier": "ident_1",
+            },
+            "error": None,
+            "error_code": None,
+        }
+
+    async def refresh_access_token_with_session_token(
+        self,
+        session_token,
+        db_session,
+        account_id=None,
+        identifier="default",
+    ):
+        self.refresh_calls.append(
+            {
+                "session_token": session_token,
+                "db_session": db_session,
+                "account_id": account_id,
+                "identifier": identifier,
+            }
+        )
+        return {"success": True, "access_token": "refreshed-at"}
+
+    async def get_account_info(self, access_token, db_session, identifier="default"):
+        self.account_info_calls.append(
+            {
+                "access_token": access_token,
+                "db_session": db_session,
+                "identifier": identifier,
+            }
+        )
+        return {
+            "success": True,
+            "accounts": [
+                {
+                    "account_id": "acc_1",
+                    "plan_type": "team",
+                    "has_active_subscription": True,
+                }
+            ],
+            "error": None,
+        }
+
+
+class CodexRegisterServiceRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resume_calls_chatgpt_service_with_required_arguments(self):
+        store = _StubWorkflowStore()
+        chatgpt = _StubChatGPTService()
+        service = _load_service_class()(
+            state_store=store,
+            chatgpt_service=chatgpt,
+            workflow_id="wf-runtime",
+            sleep_min=1,
+            sleep_max=1,
+            db_session=_StubDBSession(),
+        )
+
+        await service.handle_path("/enable")
+        for _ in range(6):
+            await service.run_once()
+
+        resume_result = await service.handle_path("/resume")
+        self.assertTrue(resume_result["success"])
+        self.assertEqual(len(chatgpt.refresh_calls), 1)
+        self.assertEqual(len(chatgpt.account_info_calls), 1)
+
+        refresh_call = chatgpt.refresh_calls[0]
+        self.assertEqual(refresh_call["session_token"], "st_1")
+        self.assertEqual(refresh_call["account_id"], "acc_1")
+
+        account_info_call = chatgpt.account_info_calls[0]
+        self.assertEqual(account_info_call["access_token"], "refreshed-at")
+
+
+
+
+class CodexRegisterServiceEntrypointContractTests(unittest.TestCase):
+    def test_service_module_exports_build_http_handler(self):
+        module_name = "tools.codex_register.codex_register_service"
+        module = importlib.import_module(module_name)
+        self.assertTrue(hasattr(module, "build_http_handler"))
+
+    def test_service_module_exports_main(self):
+        module_name = "tools.codex_register.codex_register_service"
+        module = importlib.import_module(module_name)
+        self.assertTrue(hasattr(module, "main"))
 
 
 if __name__ == "__main__":
