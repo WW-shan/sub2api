@@ -4740,4 +4740,3 @@ func optionalTrimmedStringPtr(raw string) *string {
 	}
 	return &trimmed
 }
-
