@@ -782,6 +782,79 @@ describe('CodexRegistrationCard', () => {
     clearIntervalSpy.mockRestore()
   })
 
+  it('sorts accounts by created_at descending and keeps invalid/null timestamps last', async () => {
+    codexApiMocks.getAccounts.mockResolvedValueOnce([
+      {
+        id: 1,
+        email: 'oldest@example.com',
+        access_token: 'at-old',
+        refresh_token: 'rt-old',
+        account_id: 'acct-old',
+        source: 'codex-register',
+        created_at: '2026-03-05T10:00:01Z',
+        updated_at: '2026-03-05T10:00:01Z'
+      },
+      {
+        id: 2,
+        email: 'invalid@example.com',
+        access_token: 'at-invalid',
+        refresh_token: 'rt-invalid',
+        account_id: 'acct-invalid',
+        source: 'codex-register',
+        created_at: 'not-a-date',
+        updated_at: '2026-03-06T10:00:01Z'
+      },
+      {
+        id: 3,
+        email: 'newest@example.com',
+        access_token: 'at-new',
+        refresh_token: 'rt-new',
+        account_id: 'acct-new',
+        source: 'codex-register',
+        created_at: '2026-03-07T10:00:01Z',
+        updated_at: '2026-03-07T10:00:01Z'
+      },
+      {
+        id: 4,
+        email: 'null@example.com',
+        access_token: 'at-null',
+        refresh_token: 'rt-null',
+        account_id: 'acct-null',
+        source: 'codex-register',
+        created_at: null,
+        updated_at: '2026-03-06T10:00:01Z'
+      },
+      {
+        id: 5,
+        email: 'middle@example.com',
+        access_token: 'at-middle',
+        refresh_token: 'rt-middle',
+        account_id: 'acct-middle',
+        source: 'codex-register',
+        created_at: '2026-03-06T10:00:01Z',
+        updated_at: '2026-03-06T10:00:01Z'
+      }
+    ])
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const rows = wrapper.findAll('tbody tr')
+    const renderedEmails = rows.map((row) => row.find('td').text())
+
+    expect(renderedEmails).toEqual([
+      'newest@example.com',
+      'middle@example.com',
+      'oldest@example.com',
+      'invalid@example.com',
+      'null@example.com'
+    ])
+  })
+
   it('copies account secrets with copy action', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })

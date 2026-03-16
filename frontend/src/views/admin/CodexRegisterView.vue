@@ -1,6 +1,6 @@
 <template>
   <AppLayout>
-    <div class="mx-auto max-w-6xl space-y-6">
+    <div class="mx-auto max-w-[1400px] space-y-6 px-4 sm:px-6 lg:px-8">
       <section class="space-y-2">
         <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">
           {{ t('admin.codexRegister.title') }}
