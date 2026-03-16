@@ -1000,7 +1000,7 @@ class ChatGPTService:
         
         headers = self._build_auth_headers()
         
-        json_data = {"username": email, "otp_code": otp_code}
+        json_data = {"code": otp_code}
         
         try:
             result = await self._make_register_request(

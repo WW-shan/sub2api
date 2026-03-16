@@ -214,7 +214,9 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["success"])
         called_url = mocked_make_register_request.await_args.args[1]
+        called_json = mocked_make_register_request.await_args.args[3]
         self.assertEqual(called_url, "https://auth.openai.com/api/accounts/email-otp/validate")
+        self.assertEqual(called_json, {"code": "123456"})
 
     async def test_register_unknown_path_returns_register_user_failure_immediately(self):
         service = self.ChatGPTService()
