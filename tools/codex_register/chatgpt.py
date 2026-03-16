@@ -1086,19 +1086,19 @@ class ChatGPTService:
         if not callback_url:
             logger.debug(f"[{identifier}] 无回调 URL，跳过")
             return self._success_result({})
-        
+
         headers = self._build_browser_base_headers(
             {
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Upgrade-Insecure-Requests": "1",
             }
         )
-        
+
         try:
             result = await self._make_request(
                 "GET", callback_url, headers, db_session=db_session, identifier=identifier, proxy=proxy
             )
-            
+
             status_code = int(result.get("status_code", 0) or 0)
             # 即使状态码不是200，回调仍可能成功
             logger.info(f"[{identifier}] 回调已执行 (状态: {status_code})")
@@ -1107,6 +1107,53 @@ class ChatGPTService:
             logger.error(f"[{identifier}] 执行回调异常: {e}")
             # 回调失败不影响主流程
             return self._error_result(0, f"callback exception: {str(e)}", "callback_exception")
+
+    async def _collect_register_session_tokens(
+        self,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """从注册会话中提取 account/token 字段用于持久化"""
+        headers = self._build_browser_base_headers(
+            {
+                "Accept": "application/json",
+                "Referer": "https://chatgpt.com/",
+            }
+        )
+
+        result = await self._make_request(
+            "GET",
+            "https://chatgpt.com/api/auth/session",
+            headers,
+            db_session=db_session,
+            identifier=identifier,
+            proxy=proxy,
+        )
+        if not result.get("success"):
+            return {}
+
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        access_token = str(data.get("accessToken") or "").strip()
+        refresh_token = str(data.get("refreshToken") or "").strip()
+        session_token = str(data.get("sessionToken") or "").strip()
+
+        account_id = str(data.get("currentAccountId") or "").strip()
+        if not account_id:
+            accounts = data.get("accounts")
+            if isinstance(accounts, dict) and accounts:
+                account_id = str(next(iter(accounts.keys())) or "").strip()
+
+        payload: Dict[str, Any] = {}
+        if account_id:
+            payload["account_id"] = account_id
+        if access_token:
+            payload["access_token"] = access_token
+        if refresh_token:
+            payload["refresh_token"] = refresh_token
+        if session_token:
+            payload["session_token"] = session_token
+        return payload
 
     def _build_register_compat_payload(
         self,
@@ -1309,11 +1356,17 @@ class ChatGPTService:
 
                 await asyncio.sleep(random.uniform(0.3, 0.5))
                 await self._execute_callback(callback_url, db_session, runtime_identifier, resolved_proxy)
+                session_tokens = await self._collect_register_session_tokens(
+                    db_session,
+                    runtime_identifier,
+                    resolved_proxy,
+                )
 
                 return self._success_result(
                     self._build_register_compat_payload(
                         email=email,
                         identifier=runtime_identifier,
+                        extra=session_tokens,
                     )
                 )
 
@@ -1395,12 +1448,18 @@ class ChatGPTService:
             # 步骤 8: 执行回调
             await asyncio.sleep(random.uniform(0.2, 0.5))
             await self._execute_callback(callback_url, db_session, runtime_identifier, resolved_proxy)
+            session_tokens = await self._collect_register_session_tokens(
+                db_session,
+                runtime_identifier,
+                resolved_proxy,
+            )
 
             logger.info(f"[{runtime_identifier}] 注册流程完成")
             return self._success_result(
                 self._build_register_compat_payload(
                     email=email,
                     identifier=runtime_identifier,
+                    extra=session_tokens,
                 )
             )
 
