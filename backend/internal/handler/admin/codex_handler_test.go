@@ -70,6 +70,35 @@ func TestCodexHandlerGetAccountsHandlesInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestCodexHandlerGetAccountsForwardsControlTokenHeader(t *testing.T) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Codex-Token"); got != "token-accounts" {
+			t.Fatalf("expected X-Codex-Token header token-accounts, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accounts":[]}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+	t.Setenv("CODEX_REGISTER_CONTROL_TOKEN", "token-accounts")
+
+	h := NewCodexHandler()
+	r := gin.New()
+	r.GET("/accounts", h.GetAccounts)
+
+	req := httptest.NewRequest(http.MethodGet, "/accounts", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
 func TestCodexHandlerResumeProxiesResponse(t *testing.T) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -114,6 +143,12 @@ func TestCodexHandlerResumeHandlesInvalidJSON(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/resume" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"job_phase":`))
 	}))
@@ -131,5 +166,34 @@ func TestCodexHandlerResumeHandlesInvalidJSON(t *testing.T) {
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected status %d, got %d", http.StatusBadGateway, w.Code)
+	}
+}
+
+func TestCodexHandlerResumeForwardsControlTokenHeader(t *testing.T) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Codex-Token"); got != "token-123" {
+			t.Fatalf("expected X-Codex-Token header token-123, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+	t.Setenv("CODEX_REGISTER_CONTROL_TOKEN", "token-123")
+
+	h := NewCodexHandler()
+	r := gin.New()
+	r.POST("/resume", h.Resume)
+
+	req := httptest.NewRequest(http.MethodPost, "/resume", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 }

@@ -1,10 +1,13 @@
 import asyncio
 import importlib
+import io
+import json
+import os
 import pathlib
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -489,7 +492,53 @@ class _StubChatGPTService:
         }
 
 
-class CodexRegisterServiceRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
+class CodexRegisterServiceControlTokenTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.store = InMemoryWorkflowStore()
+        self.chatgpt = SimpleNamespace(
+            register=AsyncMock(side_effect=[_register_success(i) for i in range(1, 20)]),
+            refresh_access_token_with_session_token=AsyncMock(
+                return_value={"success": True, "access_token": "parent-at"}
+            ),
+            get_account_info=AsyncMock(
+                return_value={
+                    "success": True,
+                    "accounts": [
+                        {
+                            "account_id": "acc_1",
+                            "plan_type": "team",
+                            "has_active_subscription": True,
+                        }
+                    ],
+                    "error": None,
+                }
+            ),
+        )
+        self.service = _load_service_class()(
+            state_store=self.store,
+            chatgpt_service=self.chatgpt,
+            workflow_id="wf-test",
+            sleep_min=1,
+            sleep_max=1,
+            control_token="secret-token",
+        )
+
+    async def test_mutating_endpoints_reject_missing_token(self):
+        for path in ("/enable", "/resume", "/disable", "/accounts"):
+            with self.subTest(path=path):
+                result = await self.service.handle_path(path)
+                self.assertFalse(result["success"])
+                self.assertEqual(result["error"], "unauthorized")
+
+    async def test_mutating_endpoints_allow_case_insensitive_token_header(self):
+        payload = {"headers": {"X-CODEX-TOKEN": "secret-token"}}
+
+        enable_result = await self.service.handle_path("/enable", payload=payload)
+        self.assertTrue(enable_result["success"])
+
+        accounts_result = await self.service.handle_path("/accounts", payload=payload)
+        self.assertTrue(accounts_result["success"])
+
     async def test_resume_calls_chatgpt_service_with_required_arguments(self):
         store = _StubWorkflowStore()
         chatgpt = _StubChatGPTService()
@@ -518,10 +567,6 @@ class CodexRegisterServiceRuntimeContractTests(unittest.IsolatedAsyncioTestCase)
         account_info_call = chatgpt.account_info_calls[0]
         self.assertEqual(account_info_call["access_token"], "refreshed-at")
 
-
-
-
-class CodexRegisterServiceEntrypointContractTests(unittest.TestCase):
     def test_service_module_exports_build_http_handler(self):
         module_name = "tools.codex_register.codex_register_service"
         module = importlib.import_module(module_name)
@@ -531,6 +576,117 @@ class CodexRegisterServiceEntrypointContractTests(unittest.TestCase):
         module_name = "tools.codex_register.codex_register_service"
         module = importlib.import_module(module_name)
         self.assertTrue(hasattr(module, "main"))
+
+    def test_main_defaults_host_to_all_interfaces(self):
+        module_name = "tools.codex_register.codex_register_service"
+        module = importlib.import_module(module_name)
+
+        class _DummyChatGPTService:
+            pass
+
+        run_http_mock = AsyncMock(return_value=None)
+        with patch.object(module, "run_http", run_http_mock):
+            with patch.dict(sys.modules, {"chatgpt": SimpleNamespace(ChatGPTService=_DummyChatGPTService)}):
+                with patch.dict(os.environ, {}, clear=True):
+                    module.main()
+
+        self.assertEqual(run_http_mock.await_count, 1)
+        call_kwargs = run_http_mock.await_args.kwargs
+        self.assertEqual(call_kwargs.get("host"), "0.0.0.0")
+
+    def test_main_uses_codex_sleep_env_aliases(self):
+        module_name = "tools.codex_register.codex_register_service"
+        module = importlib.import_module(module_name)
+
+        class _DummyChatGPTService:
+            pass
+
+        run_http_mock = AsyncMock(return_value=None)
+        with patch.object(module, "run_http", run_http_mock):
+            with patch.dict(sys.modules, {"chatgpt": SimpleNamespace(ChatGPTService=_DummyChatGPTService)}):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_SLEEP_MIN": "7",
+                        "CODEX_SLEEP_MAX": "9",
+                    },
+                    clear=True,
+                ):
+                    module.main()
+
+        self.assertEqual(run_http_mock.await_count, 1)
+        service = run_http_mock.await_args.args[0]
+        self.assertEqual(getattr(service, "sleep_min", None), 7)
+        self.assertEqual(getattr(service, "sleep_max", None), 9)
+
+
+class CodexRegisterServiceDockerContractTests(unittest.TestCase):
+    def test_dockerfile_installs_runtime_import_dependencies(self):
+        dockerfile_path = pathlib.Path(__file__).resolve().parent / "Dockerfile"
+        dockerfile = dockerfile_path.read_text(encoding="utf-8").lower()
+
+        self.assertIn("sqlalchemy", dockerfile)
+        self.assertIn("pyjwt", dockerfile)
+
+    def test_runtime_imports_support_script_and_package_modes(self):
+        base_dir = pathlib.Path(__file__).resolve().parent
+
+        chatgpt_source = (base_dir / "chatgpt.py").read_text(encoding="utf-8")
+        self.assertIn("from .utils.jwt_parser import JWTParser", chatgpt_source)
+        self.assertIn("from utils.jwt_parser import JWTParser", chatgpt_source)
+
+        jwt_parser_source = (base_dir / "utils" / "jwt_parser.py").read_text(encoding="utf-8")
+        self.assertIn("from .time_utils import get_now", jwt_parser_source)
+        self.assertIn("from utils.time_utils import get_now", jwt_parser_source)
+
+
+class CodexRegisterServiceHTTPTimeoutContractTests(unittest.TestCase):
+    def test_timeout_response_cancels_inflight_future(self):
+        module = importlib.import_module("tools.codex_register.codex_register_service")
+
+        class _FakeFuture:
+            def __init__(self):
+                self.cancel_called = False
+
+            def result(self, timeout=None):
+                raise module.FutureTimeout()
+
+            def cancel(self):
+                self.cancel_called = True
+                return True
+
+        class _StubService:
+            async def handle_path(self, path, payload=None):
+                del path, payload
+                return {"success": True, "data": {"ok": True}, "error": None}
+
+        fake_future = _FakeFuture()
+
+        def _run_coroutine_threadsafe(coro, loop):
+            del loop
+            coro.close()
+            return fake_future
+
+        with patch.object(module.asyncio, "run_coroutine_threadsafe", side_effect=_run_coroutine_threadsafe):
+            handler_cls = module.build_http_handler(_StubService())
+            handler = object.__new__(handler_cls)
+            handler.path = "/resume"
+            handler.headers = {}
+            handler.server = SimpleNamespace(_service_loop=object())
+            handler.wfile = io.BytesIO()
+            handler.command = "POST"
+            handler.request_version = "HTTP/1.1"
+
+            status_codes = []
+            sent_headers = []
+            handler.send_response = lambda status: status_codes.append(status)
+            handler.send_header = lambda key, value: sent_headers.append((key, value))
+            handler.end_headers = lambda: None
+
+            handler._handle("POST")
+
+        self.assertTrue(fake_future.cancel_called)
+        self.assertEqual(status_codes, [504])
 
 
 if __name__ == "__main__":

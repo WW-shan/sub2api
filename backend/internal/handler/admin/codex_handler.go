@@ -32,6 +32,9 @@ func (h *CodexHandler) proxyGet(c *gin.Context, path string) {
 		response.Error(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if token := os.Getenv("CODEX_REGISTER_CONTROL_TOKEN"); token != "" {
+		req.Header.Set("X-Codex-Token", token)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		response.Error(c, http.StatusBadGateway, err.Error())
@@ -52,6 +55,9 @@ func (h *CodexHandler) proxyPost(c *gin.Context, path string) {
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if token := os.Getenv("CODEX_REGISTER_CONTROL_TOKEN"); token != "" {
+		req.Header.Set("X-Codex-Token", token)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

@@ -6,7 +6,10 @@ import jwt
 from typing import Optional, Dict, Any
 from datetime import datetime
 import logging
-from app.utils.time_utils import get_now
+try:
+    from .time_utils import get_now
+except ImportError:  # pragma: no cover - script mode fallback
+    from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 

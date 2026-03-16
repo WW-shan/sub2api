@@ -1,4 +1,5 @@
 import base64
+import importlib
 import json
 import os
 import sys
@@ -53,9 +54,25 @@ def _build_chatgpt_import_stubs() -> dict:
     sqlalchemy_ext_module.asyncio = sqlalchemy_ext_asyncio_module
     sqlalchemy_module.ext = sqlalchemy_ext_module
 
+    jwt_module = types.ModuleType("jwt")
+
+    class InvalidTokenError(Exception):  # pragma: no cover - import stub
+        pass
+
+    def decode(token, options=None):  # pragma: no cover - import stub
+        del token, options
+        return {}
+
+    jwt_module.InvalidTokenError = InvalidTokenError
+    jwt_module.decode = decode
+
     app_module = types.ModuleType("app")
     app_utils_module = types.ModuleType("app.utils")
     app_jwt_parser_module = types.ModuleType("app.utils.jwt_parser")
+
+    utils_module = types.ModuleType("utils")
+    utils_jwt_parser_module = types.ModuleType("utils.jwt_parser")
+    utils_time_utils_module = types.ModuleType("utils.time_utils")
 
     class JWTParser:  # pragma: no cover - import stub
         def extract_email(self, token: str):
@@ -65,19 +82,40 @@ def _build_chatgpt_import_stubs() -> dict:
     app_utils_module.jwt_parser = app_jwt_parser_module
     app_module.utils = app_utils_module
 
+    utils_jwt_parser_module.JWTParser = JWTParser
+    utils_time_utils_module.get_now = lambda: None
+    utils_module.jwt_parser = utils_jwt_parser_module
+    utils_module.time_utils = utils_time_utils_module
+
     return {
         "curl_cffi": curl_cffi_module,
         "curl_cffi.requests": curl_cffi_requests_module,
         "sqlalchemy": sqlalchemy_module,
         "sqlalchemy.ext": sqlalchemy_ext_module,
         "sqlalchemy.ext.asyncio": sqlalchemy_ext_asyncio_module,
+        "jwt": jwt_module,
         "app": app_module,
         "app.utils": app_utils_module,
         "app.utils.jwt_parser": app_jwt_parser_module,
+        "utils": utils_module,
+        "utils.jwt_parser": utils_jwt_parser_module,
+        "utils.time_utils": utils_time_utils_module,
     }
 
 
-class CodexRegisterServiceModuleTests(unittest.TestCase):
+def _load_chatgpt_service_class():
+    module_name = "chatgpt"
+    if module_name in sys.modules:
+        del sys.modules[module_name]
+
+    module = importlib.import_module(module_name)
+    service_cls = getattr(module, "ChatGPTService", None)
+    if service_cls is None:
+        raise AssertionError("Expected ChatGPTService in chatgpt module")
+    return service_cls
+
+
+class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     def test_codex_register_service_file_exists_for_workflow_runtime(self):
         service_module_filename = "_".join(("codex", "register", "service.py"))
         service_path = Path(__file__).resolve().parent / service_module_filename
@@ -86,8 +124,6 @@ class CodexRegisterServiceModuleTests(unittest.TestCase):
             f"Expected codex register workflow service file to exist: {service_path}",
         )
 
-
-class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self._module_patch = patch.dict(sys.modules, _build_chatgpt_import_stubs())
         self._module_patch.start()

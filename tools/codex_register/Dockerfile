@@ -11,7 +11,7 @@ RUN apt-get update \
 COPY sub2api/tools/codex_register /app/codex-auto-register-main
 
 RUN pip install --upgrade pip \
-    && pip install curl_cffi psycopg2-binary
+    && pip install curl_cffi psycopg2-binary sqlalchemy pyjwt
 
 WORKDIR /app/codex-auto-register-main
 

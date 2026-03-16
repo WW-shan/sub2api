@@ -15,7 +15,10 @@ from urllib.parse import parse_qs, urlparse, parse_qsl, urlencode
 from typing import Optional, Dict, Any, List
 from curl_cffi.requests import AsyncSession
 from sqlalchemy.ext.asyncio import AsyncSession as DBAsyncSession
-from app.utils.jwt_parser import JWTParser
+try:
+    from .utils.jwt_parser import JWTParser
+except ImportError:  # pragma: no cover - script mode fallback
+    from utils.jwt_parser import JWTParser
 
 logger = logging.getLogger(__name__)
 

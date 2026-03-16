@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeout
 import json
 import os
+import threading
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict, List, Optional
 
 
@@ -18,6 +20,7 @@ class CodexRegisterService:
         sleep_min: int,
         sleep_max: int,
         db_session: Any = None,
+        control_token: Optional[str] = None,
     ) -> None:
         self.state_store = state_store
         self.chatgpt_service = chatgpt_service
@@ -25,10 +28,15 @@ class CodexRegisterService:
         self.sleep_min = sleep_min
         self.sleep_max = sleep_max
         self.db_session = db_session
+        self.control_token = control_token
         self._run_once_lock = asyncio.Lock()
 
     async def handle_path(self, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        del payload
+        payload = payload or {}
+        if path in {"/enable", "/resume", "/disable", "/accounts"}:
+            if not self._is_authorized(payload):
+                return self._result(False, error="unauthorized")
+
         if path == "/status":
             state = await self._load_state()
             return self._result(True, data=state)
@@ -255,6 +263,15 @@ class CodexRegisterService:
             "recent_logs_tail": [],
         }
 
+    def _is_authorized(self, payload: Dict[str, Any]) -> bool:
+        if not self.control_token:
+            return True
+
+        headers = payload.get("headers") or {}
+        normalized_headers = {str(k).lower(): v for k, v in headers.items()}
+        token = str(normalized_headers.get("x-codex-token") or "")
+        return token == self.control_token
+
     def _has_active_team_subscription(self, account_info_result: Dict[str, Any], parent_account_id: Optional[str]) -> bool:
         accounts = account_info_result.get("accounts") or []
         for account in accounts:
@@ -305,9 +322,22 @@ class InMemoryStateStore:
 
 async def run_http(service: CodexRegisterService, *, host: str, port: int) -> None:
     handler = build_http_handler(service)
-    server = ThreadingHTTPServer((host, port), handler)
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, server.serve_forever)
+    server = HTTPServer((host, port), handler)
+
+    service_loop = asyncio.new_event_loop()
+    setattr(server, "_service_loop", service_loop)
+
+    loop_thread = threading.Thread(target=service_loop.run_forever, daemon=True)
+    loop_thread.start()
+
+    main_loop = asyncio.get_running_loop()
+    try:
+        await main_loop.run_in_executor(None, server.serve_forever)
+    finally:
+        server.shutdown()
+        service_loop.call_soon_threadsafe(service_loop.stop)
+        loop_thread.join(timeout=2)
+        service_loop.close()
 
 
 def build_http_handler(service: CodexRegisterService):
@@ -319,20 +349,37 @@ def build_http_handler(service: CodexRegisterService):
             self._handle("POST")
 
         def _handle(self, method: str) -> None:
-            del method
-            loop = asyncio.new_event_loop()
-            try:
-                response = loop.run_until_complete(service.handle_path(self.path))
-            finally:
-                loop.close()
+            headers = {k: v for k, v in self.headers.items()}
+            payload = {"headers": headers, "method": method}
 
-            status_code = 200 if response.get("success") else 400
+            future = None
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    service.handle_path(self.path, payload=payload),
+                    self.server._service_loop,
+                )
+                response = future.result(timeout=30)
+
+                if response.get("error") == "unauthorized":
+                    status_code = 401
+                else:
+                    status_code = 200 if response.get("success") else 400
+            except FutureTimeout:
+                if future is not None:
+                    future.cancel()
+                response = {"success": False, "data": None, "error": "request_timeout"}
+                status_code = 504
+            except Exception as exc:
+                response = {"success": False, "data": None, "error": str(exc)}
+                status_code = 500
+
             body = json.dumps(response).encode("utf-8")
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
 
         def log_message(self, format: str, *args: Any) -> None:  # pragma: no cover
             del format, args
@@ -344,10 +391,11 @@ def main() -> None:
     from chatgpt import ChatGPTService
 
     workflow_id = os.getenv("CODEX_REGISTER_WORKFLOW_ID", "wf-runtime")
-    sleep_min = int(os.getenv("CODEX_REGISTER_SLEEP_MIN", "1"))
-    sleep_max = int(os.getenv("CODEX_REGISTER_SLEEP_MAX", "1"))
+    sleep_min = int((os.getenv("CODEX_SLEEP_MIN") or os.getenv("CODEX_REGISTER_SLEEP_MIN") or "1"))
+    sleep_max = int((os.getenv("CODEX_SLEEP_MAX") or os.getenv("CODEX_REGISTER_SLEEP_MAX") or "1"))
     host = os.getenv("CODEX_REGISTER_HOST", "0.0.0.0")
     port = int(os.getenv("CODEX_REGISTER_PORT", "5000"))
+    control_token = str(os.getenv("CODEX_REGISTER_CONTROL_TOKEN") or "").strip() or None
 
     service = CodexRegisterService(
         state_store=InMemoryStateStore(),
@@ -356,6 +404,7 @@ def main() -> None:
         sleep_min=sleep_min,
         sleep_max=sleep_max,
         db_session=None,
+        control_token=control_token,
     )
 
     asyncio.run(run_http(service, host=host, port=port))
