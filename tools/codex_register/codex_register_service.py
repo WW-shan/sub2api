@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
 import json
+import logging
 import os
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict, List, Optional
+
+
+LOGGER = logging.getLogger("codex_register")
 
 
 class CodexRegisterService:
@@ -228,6 +232,9 @@ class CodexRegisterService:
         if callable(append):
             await append(message, **fields)
 
+        log_payload = {"event": message, **fields}
+        LOGGER.info(json.dumps(log_payload, ensure_ascii=False, default=str))
+
     async def _list_logs(self) -> List[Dict[str, Any]]:
         list_logs = getattr(self.state_store, "list_logs", None)
         if callable(list_logs):
@@ -373,6 +380,20 @@ def build_http_handler(service: CodexRegisterService):
                 response = {"success": False, "data": None, "error": str(exc)}
                 status_code = 500
 
+            LOGGER.info(
+                json.dumps(
+                    {
+                        "http_method": method,
+                        "path": self.path,
+                        "status_code": status_code,
+                        "success": bool(response.get("success")),
+                        "error": response.get("error") or "",
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
+
             body = json.dumps(response).encode("utf-8")
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json")
@@ -390,12 +411,32 @@ def build_http_handler(service: CodexRegisterService):
 def main() -> None:
     from chatgpt import ChatGPTService
 
+    logging.basicConfig(
+        level=os.getenv("CODEX_REGISTER_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
     workflow_id = os.getenv("CODEX_REGISTER_WORKFLOW_ID", "wf-runtime")
     sleep_min = int((os.getenv("CODEX_SLEEP_MIN") or os.getenv("CODEX_REGISTER_SLEEP_MIN") or "1"))
     sleep_max = int((os.getenv("CODEX_SLEEP_MAX") or os.getenv("CODEX_REGISTER_SLEEP_MAX") or "1"))
     host = os.getenv("CODEX_REGISTER_HOST", "0.0.0.0")
     port = int(os.getenv("CODEX_REGISTER_PORT", "5000"))
     control_token = str(os.getenv("CODEX_REGISTER_CONTROL_TOKEN") or "").strip() or None
+
+    LOGGER.info(
+        json.dumps(
+            {
+                "event": "service_start",
+                "workflow_id": workflow_id,
+                "host": host,
+                "port": port,
+                "sleep_min": sleep_min,
+                "sleep_max": sleep_max,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    )
 
     service = CodexRegisterService(
         state_store=InMemoryStateStore(),
