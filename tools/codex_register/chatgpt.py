@@ -926,70 +926,603 @@ class ChatGPTService:
         enriched.setdefault("session", active_session)
         return enriched
 
+    async def _visit_homepage(
+        self,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """访问主页并获取初始 cookies"""
+        url = "https://chatgpt.com/"
+        headers = self._build_browser_base_headers(
+            {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        )
+        
+        try:
+            result = await self._make_request(
+                "GET", url, headers, db_session=db_session, identifier=identifier, proxy=proxy
+            )
+            
+            status_code = int(result.get("status_code", 0) or 0)
+            if not result.get("success"):
+                error_msg = result.get("error", "unable to fetch homepage")
+                logger.warning(f"[{identifier}] 主页访问失败 ({status_code}): {error_msg}")
+                return self._error_result(status_code, error_msg, "homepage_visit_failed")
+            
+            logger.info(f"[{identifier}] 主页访问成功")
+            return self._success_result({})
+        except Exception as e:
+            logger.error(f"[{identifier}] 主页访问异常: {e}")
+            return self._error_result(0, f"homepage visit exception: {str(e)}", "homepage_visit_exception")
+
+    async def _get_csrf_token(
+        self,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """获取 CSRF token"""
+        url = "https://chatgpt.com/api/auth/csrf"
+        headers = self._build_browser_base_headers(
+            {"Accept": "application/json", "Referer": "https://chatgpt.com/"}
+        )
+        
+        try:
+            result = await self._make_request(
+                "GET", url, headers, db_session=db_session, identifier=identifier, proxy=proxy
+            )
+            
+            status_code = int(result.get("status_code", 0) or 0)
+            if not result.get("success"):
+                error_msg = result.get("error", "csrf token fetch failed")
+                logger.warning(f"[{identifier}] CSRF token 获取失败 ({status_code}): {error_msg}")
+                return self._error_result(status_code, error_msg, "csrf_token_failed")
+            
+            data = result.get("data", {})
+            if not isinstance(data, dict):
+                logger.warning(f"[{identifier}] CSRF响应数据格式异常: {type(data)}")
+                return self._error_result(400, "csrf response format invalid", "csrf_token_format_invalid")
+            
+            # 容错处理：尝试多种可能的字段名
+            csrf_token = str(data.get("csrfToken") or data.get("csrf_token") or "").strip()
+            if not csrf_token:
+                logger.warning(f"[{identifier}] CSRF token 在响应中未找到")
+                return self._error_result(400, "csrf token not found in response", "csrf_token_not_found")
+            
+            logger.info(f"[{identifier}] CSRF token 已获取")
+            return self._success_result({"csrf_token": csrf_token})
+        except Exception as e:
+            logger.error(f"[{identifier}] CSRF token 获取异常: {e}")
+            return self._error_result(0, f"csrf token exception: {str(e)}", "csrf_token_exception")
+
+    async def _signin_with_email(
+        self,
+        email: str,
+        csrf_token: str,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """登录/签名，获取授权 URL"""
+        url = "https://chatgpt.com/api/auth/signin/openai"
+        # 按照参考文件的方式生成更大的随机数
+        device_id = str(random.randint(10**15, 10**16 - 1))
+        auth_session_logging_id = str(random.randint(10**15, 10**16 - 1))
+        
+        params = {
+            "prompt": "login",
+            "ext-oai-did": device_id,
+            "auth_session_logging_id": auth_session_logging_id,
+            "screen_hint": "login_or_signup",
+            "login_hint": email,
+        }
+        
+        form_data = {
+            "callbackUrl": "https://chatgpt.com/",
+            "csrfToken": csrf_token,
+            "json": "true",
+        }
+        
+        headers = self._build_browser_base_headers(
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "Referer": "https://chatgpt.com/",
+                "Origin": "https://chatgpt.com",
+            }
+        )
+        
+        try:
+            result = await self._make_request(
+                "POST",
+                url + "?" + urllib.parse.urlencode(params),
+                headers,
+                db_session=db_session,
+                identifier=identifier,
+                proxy=proxy,
+                form_data=form_data,
+            )
+            
+            status_code = int(result.get("status_code", 0) or 0)
+            if not result.get("success"):
+                error_msg = result.get("error", "signin failed")
+                logger.warning(f"[{identifier}] 登录失败 ({status_code}): {error_msg}")
+                return self._error_result(status_code, error_msg, "signin_failed")
+            
+            data = result.get("data", {})
+            if not isinstance(data, dict):
+                logger.warning(f"[{identifier}] 登录响应格式异常: {type(data)}")
+                return self._error_result(400, "signin response format invalid", "signin_format_invalid")
+            
+            # 容错处理：尝试多种可能的字段名
+            authorize_url = str(data.get("url") or data.get("authorize_url") or data.get("auth_url") or "").strip()
+            if not authorize_url:
+                logger.warning(f"[{identifier}] 授权URL未在登录响应中找到")
+                return self._error_result(400, "authorize url not found in signin response", "authorize_url_not_found")
+            
+            logger.info(f"[{identifier}] 登录成功，已获取授权 URL")
+            return self._success_result({"authorize_url": authorize_url, "device_id": device_id})
+        except Exception as e:
+            logger.error(f"[{identifier}] 登录异常: {e}")
+            return self._error_result(0, f"signin exception: {str(e)}", "signin_exception")
+
+    async def _authorize_and_redirect(
+        self,
+        authorize_url: str,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """执行授权并跟踪重定向"""
+        headers = self._build_browser_base_headers(
+            {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://chatgpt.com/",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        )
+        
+        try:
+            result = await self._make_request(
+                "GET", authorize_url, headers, db_session=db_session, identifier=identifier, proxy=proxy
+            )
+            
+            status_code = int(result.get("status_code", 0) or 0)
+            if not result.get("success"):
+                error_msg = result.get("error", "authorize failed")
+                logger.warning(f"[{identifier}] 授权失败 ({status_code}): {error_msg}")
+                return self._error_result(status_code, error_msg, "authorize_failed")
+            
+            # 容错处理：尝试从响应中提取最终URL
+            final_url = authorize_url
+            data = result.get("data", {})
+            if isinstance(data, dict):
+                final_url = str(data.get("final_url") or data.get("url") or authorize_url).strip()
+            
+            final_path = urlparse(final_url).path if final_url else "/"
+            logger.info(f"[{identifier}] 授权完成，最终URL: {final_url}, 路径: {final_path}")
+            return self._success_result({"final_url": final_url})
+        except Exception as e:
+            logger.error(f"[{identifier}] 授权异常: {e}")
+            return self._error_result(0, f"authorize exception: {str(e)}", "authorize_exception")
+
+    async def _register_user_with_password(
+        self,
+        email: str,
+        password: str,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """使用邮箱和密码进行用户注册"""
+        url = "https://auth.openai.com/api/accounts/user/register"
+        
+        headers = self._build_auth_headers(
+            extra_headers={
+                "Referer": "https://auth.openai.com/create-account/password",
+                "Origin": "https://auth.openai.com",
+            }
+        )
+        
+        json_data = {"username": email, "password": password}
+        
+        try:
+            result = await self._make_register_request(
+                "POST",
+                url,
+                headers,
+                json_data,
+                db_session=db_session,
+                identifier=identifier,
+                special_session_step=True,
+                proxy=proxy,
+            )
+            
+            status_code = int(result.get("status_code", 0) or 0)
+            if status_code >= 400:
+                error_msg = result.get("error", "register user failed")
+                error_code = self._resolve_step_error_code(result, "register_user_failed")
+                logger.warning(f"[{identifier}] 用户注册失败 ({status_code}): {error_msg}")
+                return self._error_result(status_code, error_msg, error_code)
+            elif status_code >= 300:
+                logger.debug(f"[{identifier}] 用户注册返回: {status_code}")
+            
+            logger.info(f"[{identifier}] 用户注册成功")
+            return self._success_result({})
+        except Exception as e:
+            logger.error(f"[{identifier}] 用户注册异常: {e}")
+            return self._error_result(0, f"register user exception: {str(e)}", "register_user_exception")
+
+    async def _send_otp_email(
+        self,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """发送 OTP 邮件"""
+        url = "https://auth.openai.com/api/accounts/email-otp/send"
+        
+        headers = self._build_browser_base_headers(
+            {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://auth.openai.com/create-account/password",
+                "Upgrade-Insecure-Requests": "1",
+            },
+            origin="https://auth.openai.com",
+            referer="https://auth.openai.com/create-account/password",
+        )
+        
+        try:
+            result = await self._make_register_request(
+                "GET",
+                url,
+                headers,
+                db_session=db_session,
+                identifier=identifier,
+                special_session_step=True,
+                proxy=proxy,
+            )
+            
+            status_code = int(result.get("status_code", 0) or 0)
+            if status_code >= 300:
+                error_msg = result.get("error", "send otp email failed")
+                error_code = self._resolve_step_error_code(result, "otp_send_failed")
+                logger.warning(f"[{identifier}] 发送OTP邮件失败 ({status_code}): {error_msg}")
+                return self._error_result(status_code, error_msg, error_code)
+            
+            logger.info(f"[{identifier}] OTP 邮件已发送")
+            return self._success_result({})
+        except Exception as e:
+            logger.error(f"[{identifier}] 发送OTP邮件异常: {e}")
+            return self._error_result(0, f"send otp email exception: {str(e)}", "send_otp_email_exception")
+
+    async def _validate_otp_code(
+        self,
+        email: str,
+        otp_code: str,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """验证 OTP 代码（保留原有的邮箱验证逻辑）"""
+        url = "https://auth.openai.com/api/otp/validate"
+        
+        headers = self._build_auth_headers()
+        
+        json_data = {"username": email, "otp_code": otp_code}
+        
+        try:
+            result = await self._make_register_request(
+                "POST",
+                url,
+                headers,
+                json_data,
+                db_session=db_session,
+                identifier=identifier,
+                special_session_step=True,
+                proxy=proxy,
+            )
+            
+            status_code = int(result.get("status_code", 0) or 0)
+            if status_code >= 300:
+                error_msg = result.get("error", "validate otp failed")
+                error_code = self._resolve_step_error_code(result, "otp_validate_failed")
+                logger.warning(f"[{identifier}] OTP 验证失败 ({status_code}): {error_msg}")
+                return self._error_result(status_code, error_msg, error_code)
+            
+            logger.info(f"[{identifier}] OTP 验证成功")
+            return self._success_result({})
+        except Exception as e:
+            logger.error(f"[{identifier}] OTP 验证异常: {e}")
+            return self._error_result(0, f"validate otp exception: {str(e)}", "otp_validate_exception")
+
+    async def _create_account_with_info(
+        self,
+        name: str,
+        birthdate: str,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """创建账号并填写个人信息"""
+        url = "https://auth.openai.com/api/accounts/create_account"
+        
+        headers = self._build_auth_headers(
+            extra_headers={
+                "Referer": "https://auth.openai.com/about-you",
+                "Origin": "https://auth.openai.com",
+            }
+        )
+        
+        json_data = {"name": name, "birthdate": birthdate}
+        
+        try:
+            result = await self._make_register_request(
+                "POST",
+                url,
+                headers,
+                json_data,
+                db_session=db_session,
+                identifier=identifier,
+                special_session_step=True,
+                proxy=proxy,
+            )
+            
+            status_code = int(result.get("status_code", 0) or 0)
+            if status_code >= 300:
+                error_msg = result.get("error", "create account failed")
+                error_code = self._resolve_step_error_code(result, "create_account_failed")
+                logger.warning(f"[{identifier}] 账号创建失败 ({status_code}): {error_msg}")
+                return self._error_result(status_code, error_msg, error_code)
+            
+            data = result.get("data", {})
+            callback_url = str(data.get("continue_url") or data.get("url") or data.get("redirect_url") or "").strip()
+            
+            logger.info(f"[{identifier}] 账号创建成功，回调URL: {callback_url}")
+            return self._success_result({"callback_url": callback_url})
+        except Exception as e:
+            logger.error(f"[{identifier}] 创建账号异常: {e}")
+            return self._error_result(0, f"create account exception: {str(e)}", "create_account_exception")
+
+    async def _execute_callback(
+        self,
+        callback_url: str,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """执行回调 URL"""
+        if not callback_url:
+            logger.debug(f"[{identifier}] 无回调 URL，跳过")
+            return self._success_result({})
+        
+        headers = self._build_browser_base_headers(
+            {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        )
+        
+        try:
+            result = await self._make_request(
+                "GET", callback_url, headers, db_session=db_session, identifier=identifier, proxy=proxy
+            )
+            
+            status_code = int(result.get("status_code", 0) or 0)
+            # 即使状态码不是200，回调仍可能成功
+            logger.info(f"[{identifier}] 回调已执行 (状态: {status_code})")
+            return self._success_result({})
+        except Exception as e:
+            logger.error(f"[{identifier}] 执行回调异常: {e}")
+            # 回调失败不影响主流程
+            return self._error_result(0, f"callback exception: {str(e)}", "callback_exception")
+
     async def register(
         self,
         *,
         db_session: Optional[DBAsyncSession] = None,
         identifier: str = "default"
     ) -> Dict[str, Any]:
-        """注册新账号"""
-        runtime_context_result = self._build_runtime_context(identifier)
-        if not runtime_context_result.get("success"):
-            return runtime_context_result
+        """
+        完整注册流程 - 采用参考文件逻辑，保留邮箱和验证码原有处理
+        
+        步骤:
+        1. 初始化运行时上下文
+        2. 访问主页
+        3. 获取 CSRF token
+        4. 登录/签名
+        5. 授权和重定向
+        6. 根据最终URL路径确定流程分支
+        7. 执行对应的注册分支
+        8. 验证并完成注册
+        """
+        try:
+            # 步骤 0: 初始化运行时上下文 (验证必填配置、解析邮箱和验证码配置)
+            runtime_context_result = self._build_runtime_context(identifier)
+            if not runtime_context_result.get("success"):
+                logger.warning(f"[{identifier}] 上下文初始化失败: {runtime_context_result.get('error')}")
+                return runtime_context_result
 
-        runtime_context = runtime_context_result.get("data", {})
-        runtime_identifier = runtime_context.get("identifier", identifier)
-        runtime_register_input = dict(runtime_context.get("register_input", {}))
+            runtime_context = runtime_context_result.get("data", {})
+            runtime_identifier = runtime_context.get("identifier", identifier)
+            register_input = runtime_context.get("register_input", {})
+            
+            logger.info(f"[{runtime_identifier}] 注册流程启动")
 
-        resolved_proxy = await self._resolve_register_proxy(runtime_register_input, db_session)
-        if resolved_proxy:
-            runtime_register_input["resolved_proxy"] = resolved_proxy
-            runtime_context["register_input"] = runtime_register_input
+            # 解析代理
+            resolved_proxy = await self._resolve_register_proxy(register_input, db_session)
+            if resolved_proxy:
+                register_input["resolved_proxy"] = resolved_proxy
+                logger.debug(f"[{runtime_identifier}] 代理已配置")
 
-        network_check_result = await self._check_network_and_region(
-            {
-                "register_input": runtime_context.get("register_input", {}),
-                "db_session": db_session,
-                "identifier": runtime_identifier,
-            }
-        )
-        if not network_check_result.get("success"):
-            return network_check_result
+            # 步骤 1: 访问主页
+            visit_result = await self._visit_homepage(db_session, runtime_identifier, resolved_proxy)
+            if not visit_result.get("success"):
+                return visit_result
 
-        identity_context_result = self._prepare_identity(
-            {
-                "register_input": runtime_context.get("register_input", {}),
-                "db_session": db_session,
-                "identifier": runtime_identifier,
-            }
-        )
-        if not identity_context_result.get("success"):
-            return identity_context_result
+            await asyncio.sleep(random.uniform(0.3, 0.8))
 
-        pipeline_ctx = identity_context_result.get("data", {})
+            # 步骤 2: 获取 CSRF token
+            csrf_result = await self._get_csrf_token(db_session, runtime_identifier, resolved_proxy)
+            if not csrf_result.get("success"):
+                return csrf_result
 
-        pipeline_result = await self._run_register_pipeline(
-            {
-                "register_input": pipeline_ctx.get("register_input", {}),
-                "runtime_context": runtime_context,
-                "db_session": db_session,
-                "identifier": runtime_identifier,
-            }
-        )
+            csrf_token = csrf_result.get("data", {}).get("csrf_token", "")
+            
+            await asyncio.sleep(random.uniform(0.2, 0.5))
 
-        if not pipeline_result.get("success"):
-            return self._error_result(
-                pipeline_result.get("status_code", 0),
-                pipeline_result.get("error", "not implemented"),
-                pipeline_result.get("error_code", "unknown_error"),
+            # 准备邮箱和密码 (保留原有逻辑)
+            identity_result = self._prepare_identity(
+                {
+                    "register_input": register_input,
+                    "db_session": db_session,
+                    "identifier": runtime_identifier,
+                }
             )
+            if not identity_result.get("success"):
+                return identity_result
 
-        return await self._finalize_registration_result(
-            pipeline_result.get("data", {}),
-            register_input=pipeline_ctx.get("register_input", {}),
-            db_session=db_session,
-            identifier=runtime_identifier,
-        )
+            identity_ctx = identity_result.get("data", {})
+            register_input = identity_ctx.get("register_input", register_input)
+            email = self._resolve_register_email(register_input)
+            password = str(register_input.get("fixed_password") or "").strip()
+
+            logger.info(f"[{runtime_identifier}] 邮箱已准备: {email}")
+
+            # 步骤 3: 登录/签名
+            signin_result = await self._signin_with_email(
+                email, csrf_token, db_session, runtime_identifier, resolved_proxy
+            )
+            if not signin_result.get("success"):
+                return signin_result
+
+            authorize_url = signin_result.get("data", {}).get("authorize_url", "")
+            
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+
+            # 步骤 4: 授权和重定向
+            authorize_result = await self._authorize_and_redirect(
+                authorize_url, db_session, runtime_identifier, resolved_proxy
+            )
+            if not authorize_result.get("success"):
+                return authorize_result
+
+            final_url = authorize_result.get("data", {}).get("final_url", "")
+            final_path = urlparse(final_url).path
+            
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+
+            logger.info(f"[{runtime_identifier}] 授权完成，路径: {final_path}")
+
+            # 步骤 5: 根据最终URL路径确定流程分支
+            need_otp = False
+            
+            if "create-account/password" in final_path:
+                logger.info(f"[{runtime_identifier}] 全新注册流程")
+                
+                # 执行用户注册
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+                register_user_result = await self._register_user_with_password(
+                    email, password, db_session, runtime_identifier, resolved_proxy
+                )
+                if not register_user_result.get("success"):
+                    return register_user_result
+                
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+                
+                # 发送 OTP
+                send_otp_result = await self._send_otp_email(
+                    db_session, runtime_identifier, resolved_proxy
+                )
+                if not send_otp_result.get("success"):
+                    return send_otp_result
+                
+                need_otp = True
+                
+            elif "email-verification" in final_path or "email-otp" in final_path:
+                logger.info(f"[{runtime_identifier}] 跳到 OTP 验证阶段")
+                need_otp = True
+                
+            elif "about-you" in final_path:
+                logger.info(f"[{runtime_identifier}] 跳到填写信息阶段")
+                
+                name = f"User {random.randint(100000, 999999)}"
+                birthdate = f"{random.randint(1990, 2000)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
+                
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+                create_result = await self._create_account_with_info(
+                    name, birthdate, db_session, runtime_identifier, resolved_proxy
+                )
+                if not create_result.get("success"):
+                    return create_result
+                
+                callback_url = create_result.get("data", {}).get("callback_url", "")
+                
+                await asyncio.sleep(random.uniform(0.3, 0.5))
+                await self._execute_callback(callback_url, db_session, runtime_identifier, resolved_proxy)
+                
+                return self._success_result({"email": email, "status": "completed"})
+                
+            elif "callback" in final_path or "chatgpt.com" in final_url:
+                logger.info(f"[{runtime_identifier}] 账号已完成注册")
+                return self._success_result({"email": email, "status": "completed"})
+            else:
+                logger.warning(f"[{runtime_identifier}] 未知路径: {final_url}，执行完整流程")
+                
+                # 执行完整流程
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+                await self._register_user_with_password(
+                    email, password, db_session, runtime_identifier, resolved_proxy
+                )
+                
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+                await self._send_otp_email(db_session, runtime_identifier, resolved_proxy)
+                need_otp = True
+
+            # 步骤 6: 验证 OTP (保留原有邮箱和验证码逻辑)
+            if need_otp:
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+                
+                otp_result = await self._poll_and_validate_otp(
+                    {
+                        "register_input": register_input,
+                        "db_session": db_session,
+                        "identifier": runtime_identifier,
+                    }
+                )
+                if not otp_result.get("success"):
+                    return otp_result
+
+            # 步骤 7: 创建账号
+            name = f"User {random.randint(100000, 999999)}"
+            birthdate = f"{random.randint(1990, 2000)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
+            
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            create_result = await self._create_account_with_info(
+                name, birthdate, db_session, runtime_identifier, resolved_proxy
+            )
+            if not create_result.get("success"):
+                return create_result
+            
+            callback_url = create_result.get("data", {}).get("callback_url", "")
+
+            # 步骤 8: 执行回调
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+            await self._execute_callback(callback_url, db_session, runtime_identifier, resolved_proxy)
+
+            logger.info(f"[{runtime_identifier}] 注册流程完成")
+            return self._success_result({"email": email, "status": "completed"})
+
+        except Exception as exc:
+            logger.exception(f"[{identifier}] 注册流程异常: {exc}")
+            return self._error_result(
+                500,
+                f"registration exception: {str(exc)}",
+                "registration_exception",
+            )
 
     def _build_runtime_context(self, identifier: str) -> Dict[str, Any]:
         """构建注册运行时上下文并执行输入校验"""
