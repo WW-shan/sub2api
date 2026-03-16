@@ -134,5 +134,6 @@ aicodex
 output/
 .sisyphus/
 tools/codex_register/.worktrees/
+.worktrees/
 __pycache__/
 *.pyc
