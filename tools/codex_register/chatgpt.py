@@ -1819,22 +1819,7 @@ class ChatGPTService:
             proxy=proxy,
         )
         if not continue_result.get("success"):
-            if sentinel_continue:
-                continue_headers_without_sentinel = dict(continue_headers)
-                continue_headers_without_sentinel.pop("openai-sentinel-token", None)
-                continue_result = await self._make_register_request(
-                    "POST",
-                    f"{self.OPENAI_AUTH_BASE}/api/accounts/authorize/continue",
-                    continue_headers_without_sentinel,
-                    json_data={"username": {"kind": "email", "value": str(email or "").strip()}},
-                    db_session=db_session,
-                    identifier=identifier,
-                    special_session_step=True,
-                    session=session,
-                    proxy=proxy,
-                )
-            if not continue_result.get("success"):
-                return {}
+            return {}
 
         auth_session_payload = self._decode_oai_client_auth_session_cookie(session)
         resolved_code_verifier = str(code_verifier or "").strip()
