@@ -1657,7 +1657,7 @@ def save_invite_tracker(tracker):
 def get_available_team(tracker):
     for team in TEAMS:
         invited = tracker["teams"].get(team["email"], [])
-        if len(invited) < team.get("max_invites", 3):
+        if len(invited) < team.get("max_invites", 5):
             return team
     return None
 
@@ -1741,7 +1741,7 @@ def auto_invite_to_team(email):
             save_invite_tracker(tracker)
     else:
         invited_count = len(tracker["teams"].get(team_key, []))
-        logger.info("车头状态: %s %d/%d", team.get("name"), invited_count, team.get("max_invites", 3))
+        logger.info("车头状态: %s %d/%d", team.get("name"), invited_count, team.get("max_invites", 5))
     return ok
 
 
