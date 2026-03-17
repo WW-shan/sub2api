@@ -1213,9 +1213,9 @@ class ChatGPTService:
             )
             if token_exchange_result.get("success"):
                 token_data = token_exchange_result.get("data") or {}
-                oauth_access_token = str(token_data.get("access_token") or "").strip()
-                oauth_refresh_token = str(token_data.get("refresh_token") or "").strip()
-                oauth_id_token = str(token_data.get("id_token") or "").strip()
+                oauth_access_token = str(token_data.get("access_token") or token_data.get("accessToken") or "").strip()
+                oauth_refresh_token = str(token_data.get("refresh_token") or token_data.get("refreshToken") or "").strip()
+                oauth_id_token = str(token_data.get("id_token") or token_data.get("idToken") or "").strip()
                 if oauth_access_token:
                     access_token = oauth_access_token
                 if oauth_refresh_token:

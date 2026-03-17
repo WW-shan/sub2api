@@ -740,8 +740,8 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(
                 return_value=service._success_result(
                     {
-                        "refresh_token": "rt_oauth",
-                        "id_token": "id_oauth",
+                        "refreshToken": "rt_oauth",
+                        "idToken": "id_oauth",
                     }
                 )
             ),
