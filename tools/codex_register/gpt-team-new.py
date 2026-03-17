@@ -6,7 +6,7 @@ gpt-team-new.py
 全新纯 HTTP 协议版本（无 Selenium / 无浏览器）
 - 注册：使用 ProtocolRegistrar 五步 HTTP 流程 + Sentinel Token
 - 母号登录：HTTP OAuth + PKCE，自动拉取 account_id / auth_token
-- Codex 授权：HTTP 交换 code → token → 上传到 CPA
+- Codex 授权：HTTP 交换 code → token → 本地保存
 - 子号邀请：注册成功后自动发送团队邀请
 配置方式: 文件内固定常量（无 config.yaml）
 """
@@ -132,7 +132,7 @@ def create_session(proxy: str = "") -> requests.Session:
     return s
 
 
-# 全局 HTTP Session（供临时邮箱 / CPA API 等非 OpenAI 请求使用）
+# 全局 HTTP Session（供非 OpenAI 请求使用）
 http_session = create_session()
 
 # ============================================================
@@ -1093,45 +1093,6 @@ def decode_jwt_payload(token: str) -> Dict[str, Any]:
         return {}
 
 
-# ============================================================
-# ⑬ CPA 管理 API：上传 token 文件 / 构建请求头
-# ============================================================
-
-def _cpa_headers() -> Dict[str, str]:
-    key = (CLI_PROXY_PASSWORD or "").strip()
-    h = {"Content-Type": "application/json"}
-    if key:
-        h["Authorization"] = f"Bearer {key}"
-        h["X-Management-Key"] = key
-    return h
-
-
-def upload_token_to_cpa(email: str, token_data: Dict[str, Any]) -> bool:
-    """
-    将 token JSON 文件上传到 CPA 管理 API。
-    接口：POST /v0/management/auth-files（multipart/form-data）
-    """
-    upload_url = f"{CLI_PROXY_API_BASE}/v0/management/auth-files"
-    filename = f"{email}.json"
-    content = json.dumps(token_data, ensure_ascii=False).encode("utf-8")
-    try:
-        resp = http_session.post(
-            upload_url,
-            files={"file": (filename, content, "application/json")},
-            headers={"Authorization": f"Bearer {CLI_PROXY_PASSWORD}", "X-Management-Key": CLI_PROXY_PASSWORD},
-            timeout=30,
-            verify=False,
-        )
-        if resp.status_code == 200:
-            logger.info("✅ token 上传 CPA 成功: %s", email)
-            return True
-        logger.warning("token 上传 CPA 失败: HTTP %s | %s", resp.status_code, resp.text[:200])
-        return False
-    except Exception as e:
-        logger.warning("token 上传 CPA 异常: %s", e)
-        return False
-
-
 def build_token_dict(email: str, tokens: Dict[str, Any]) -> Dict[str, Any]:
     """构造标准 token JSON（与 gptzidong 格式兼容）"""
     access_token = str(tokens.get("access_token") or "")
@@ -1810,7 +1771,7 @@ def register_one_account(proxy=""):
     2. HTTP 五步注册（ProtocolRegistrar）
     3. 发送团队邀请（如有车头）
     4. HTTP OAuth 登录获取 Codex token
-    5. 上传 token 到 CPA + 保存本地
+    5. 保存 token 到本地
     """
     # 1. 生成统一 Worker 邮箱
     email = _generate_worker_email()
@@ -1865,12 +1826,8 @@ def register_one_account(proxy=""):
         logger.warning("❌ Codex 登录失败（注册已成功）| email=%s", email)
         return email, password, True
 
-    # 5. 上传到 CPA（按 upload_enabled 开关）+ 保存本地
+    # 5. 保存 token 到本地
     token_dict = build_token_dict(email, tokens)
-    if CPA_UPLOAD_ENABLED:
-        upload_token_to_cpa(email, token_dict)
-    else:
-        logger.info("⏭️ 跳过 CPA 上传（upload_enabled=false）| email=%s", email)
 
     local_dir = "output_tokens"
     os.makedirs(local_dir, exist_ok=True)
