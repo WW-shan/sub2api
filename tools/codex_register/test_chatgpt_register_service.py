@@ -880,6 +880,110 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.get("id_token"), "id_ws")
 
 
+    async def test_make_special_session_request_treats_302_with_location_as_success(self):
+        service = self.ChatGPTService()
+
+        class _Response:
+            status_code = 302
+            text = ""
+            headers = {
+                "Location": "https://chatgpt.com/api/auth/callback/openai?code=loc_code_123"
+            }
+
+            def json(self):
+                return {}
+
+        with patch.object(
+            service,
+            "_dispatch_http_call",
+            new=AsyncMock(return_value=_Response()),
+        ):
+            result = await service._make_special_session_request(
+                "POST",
+                "https://auth.openai.com/api/accounts/workspace/select",
+                {},
+                None,
+                SimpleNamespace(),
+                "acc_123",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status_code"], 302)
+        self.assertEqual(
+            result["data"].get("redirect_url"),
+            "https://chatgpt.com/api/auth/callback/openai?code=loc_code_123",
+        )
+
+    async def test_collect_register_session_tokens_extracts_code_from_workspace_select_redirect_url(self):
+        service = self.ChatGPTService()
+
+        class _Cookie:
+            name = "oai-client-auth-session"
+            value = ""
+
+        cookie_payload = {
+            "workspaces": [
+                {
+                    "id": "ws_123",
+                    "code_verifier": "pkce-ws-verifier-456",
+                }
+            ]
+        }
+        encoded_payload = base64.urlsafe_b64encode(json.dumps(cookie_payload).encode("utf-8")).decode("ascii").rstrip("=")
+        _Cookie.value = encoded_payload
+
+        async def _make_register_request(method, url, headers, *args, **kwargs):
+            del headers, args
+            if method == "POST" and str(url) == "https://auth.openai.com/api/accounts/workspace/select":
+                self.assertEqual(kwargs.get("json_data"), {"workspace_id": "ws_123"})
+                return service._success_result(
+                    {
+                        "redirect_url": "https://chatgpt.com/api/auth/callback/openai?code=loc_code_789",
+                    }
+                )
+            if method == "POST" and str(url) == "https://auth.openai.com/oauth/token":
+                form_data = kwargs.get("form_data") or {}
+                self.assertEqual(form_data.get("code"), "loc_code_789")
+                self.assertEqual(form_data.get("code_verifier"), "pkce-ws-verifier-456")
+                return service._success_result(
+                    {
+                        "refresh_token": "rt_loc",
+                        "id_token": "id_loc",
+                    }
+                )
+            return service._error_result(404, "unexpected request", "unexpected_request")
+
+        with patch.object(
+            service,
+            "_get_session",
+            new=AsyncMock(return_value=SimpleNamespace(cookies=[_Cookie()])),
+        ), patch.object(
+            service,
+            "_make_request",
+            new=AsyncMock(
+                return_value=service._success_result(
+                    {
+                        "accessToken": "at_token",
+                        "sessionToken": "st_token",
+                        "currentAccountId": "acc_session",
+                    }
+                )
+            ),
+        ), patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(side_effect=_make_register_request),
+        ):
+            payload = await service._collect_register_session_tokens(
+                db_session=None,
+                identifier="acc_123",
+                proxy="",
+                callback_url="https://chatgpt.com/a/callback-complete",
+            )
+
+        self.assertEqual(payload.get("refresh_token"), "rt_loc")
+        self.assertEqual(payload.get("id_token"), "id_loc")
+
     async def test_oauth_independent_flow_recovers_code_from_workspace_and_org_continue_url(self):
         service = self.ChatGPTService()
 

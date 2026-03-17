@@ -327,6 +327,21 @@ class ChatGPTService:
                         "error_code": None,
                     }
 
+                if 300 <= status_code < 400:
+                    location = str((getattr(response, "headers", {}) or {}).get("Location") or "").strip()
+                    if location:
+                        return {
+                            "success": True,
+                            "status_code": status_code,
+                            "data": {
+                                "redirect_url": location,
+                                "continue_url": location,
+                                "url": location,
+                            },
+                            "error": None,
+                            "error_code": None,
+                        }
+
                 if 400 <= status_code < 500:
                     error_msg = response.text
                     error_code = None
@@ -1220,7 +1235,12 @@ class ChatGPTService:
                     workspace_data = workspace_select_result.get("data")
                     if isinstance(workspace_data, dict):
                         callback_code = _extract_code_from_url(
-                            str(workspace_data.get("continue_url") or workspace_data.get("url") or "")
+                            str(
+                                workspace_data.get("continue_url")
+                                or workspace_data.get("redirect_url")
+                                or workspace_data.get("url")
+                                or ""
+                            )
                         )
 
                         if not callback_code:
@@ -1256,7 +1276,12 @@ class ChatGPTService:
                                     organization_data = organization_select_result.get("data")
                                     if isinstance(organization_data, dict):
                                         callback_code = _extract_code_from_url(
-                                            str(organization_data.get("continue_url") or organization_data.get("url") or "")
+                                            str(
+                                                organization_data.get("continue_url")
+                                                or organization_data.get("redirect_url")
+                                                or organization_data.get("url")
+                                                or ""
+                                            )
                                         )
 
         if callback_code:
