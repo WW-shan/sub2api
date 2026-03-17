@@ -1238,6 +1238,7 @@ class ChatGPTService:
                             str(
                                 workspace_data.get("continue_url")
                                 or workspace_data.get("redirect_url")
+                                or workspace_data.get("final_url")
                                 or workspace_data.get("url")
                                 or ""
                             )
@@ -1279,6 +1280,7 @@ class ChatGPTService:
                                             str(
                                                 organization_data.get("continue_url")
                                                 or organization_data.get("redirect_url")
+                                                or organization_data.get("final_url")
                                                 or organization_data.get("url")
                                                 or ""
                                             )
