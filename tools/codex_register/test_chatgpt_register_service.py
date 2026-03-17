@@ -1,10 +1,13 @@
+import base64
 import importlib
+import json
 import os
 import re
 import sys
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
@@ -585,24 +588,31 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             service,
+            "_get_session",
+            new=AsyncMock(return_value=SimpleNamespace(cookies=[])),
+        ), patch.object(
+            service,
             "_make_request",
             new=AsyncMock(
-                side_effect=[
-                    service._success_result(
-                        {
-                            "accessToken": "at_token",
-                            "sessionToken": "st_token",
-                            "accounts": {"acc_fallback": {}},
-                            "currentAccountId": "acc_fallback",
-                        }
-                    ),
-                    service._success_result(
-                        {
-                            "refresh_token": "rt_from_oauth",
-                            "id_token": "id_token_value",
-                        }
-                    ),
-                ]
+                return_value=service._success_result(
+                    {
+                        "accessToken": "at_token",
+                        "sessionToken": "st_token",
+                        "accounts": {"acc_fallback": {}},
+                        "currentAccountId": "acc_fallback",
+                    }
+                )
+            ),
+        ), patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value=service._success_result(
+                    {
+                        "refresh_token": "rt_from_oauth",
+                        "id_token": "id_token_value",
+                    }
+                )
             ),
         ), patch.object(
             service.jwt_parser,
@@ -693,28 +703,49 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_collect_register_session_tokens_prefers_oauth_refresh_token_when_present(self):
         service = self.ChatGPTService()
 
+        class _Cookie:
+            name = "oai-client-auth-session"
+            value = ""
+
+        cookie_payload = {
+            "workspaces": [
+                {
+                    "code_verifier": "pkce-verifier-123",
+                }
+            ]
+        }
+        encoded_payload = base64.urlsafe_b64encode(json.dumps(cookie_payload).encode("utf-8")).decode("ascii").rstrip("=")
+        _Cookie.value = encoded_payload
+
         with patch.object(
+            service,
+            "_get_session",
+            new=AsyncMock(return_value=SimpleNamespace(cookies=[_Cookie()])),
+        ), patch.object(
             service,
             "_make_request",
             new=AsyncMock(
-                side_effect=[
-                    service._success_result(
-                        {
-                            "accessToken": "at_token",
-                            "refreshToken": "rt_session",
-                            "sessionToken": "st_token",
-                            "currentAccountId": "acc_session",
-                        }
-                    ),
-                    service._success_result(
-                        {
-                            "refresh_token": "rt_oauth",
-                            "id_token": "id_oauth",
-                        }
-                    ),
-                ]
+                return_value=service._success_result(
+                    {
+                        "accessToken": "at_token",
+                        "refreshToken": "rt_session",
+                        "sessionToken": "st_token",
+                        "currentAccountId": "acc_session",
+                    }
+                )
             ),
-        ):
+        ), patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(
+                return_value=service._success_result(
+                    {
+                        "refresh_token": "rt_oauth",
+                        "id_token": "id_oauth",
+                    }
+                )
+            ),
+        ) as mocked_exchange:
             payload = await service._collect_register_session_tokens(
                 db_session=None,
                 identifier="acc_123",
@@ -724,6 +755,8 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["refresh_token"], "rt_oauth")
         self.assertEqual(payload["id_token"], "id_oauth")
+        exchange_form_data = mocked_exchange.await_args.kwargs.get("form_data")
+        self.assertEqual(exchange_form_data.get("code_verifier"), "pkce-verifier-123")
 
     async def test_register_then_get_members_uses_returned_identifier_without_relogin(self):
         service = self.ChatGPTService()

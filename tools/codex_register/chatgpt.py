@@ -3,6 +3,7 @@ ChatGPT API 服务
 用于调用 ChatGPT 后端 API,实现 Team 成员管理功能
 """
 import asyncio
+import base64
 import importlib
 import json
 import logging
@@ -1108,6 +1109,35 @@ class ChatGPTService:
             # 回调失败不影响主流程
             return self._error_result(0, f"callback exception: {str(e)}", "callback_exception")
 
+    def _decode_oai_client_auth_session_cookie(self, session: AsyncSession) -> Dict[str, Any]:
+        cookies = getattr(session, "cookies", None)
+        if cookies is None:
+            return {}
+
+        for cookie in cookies:
+            if getattr(cookie, "name", "") != "oai-client-auth-session":
+                continue
+
+            raw_value = str(getattr(cookie, "value", "") or "")
+            if not raw_value:
+                continue
+
+            first_part = raw_value.split(".")[0] if "." in raw_value else raw_value
+            padding = 4 - (len(first_part) % 4)
+            if padding != 4:
+                first_part += "=" * padding
+
+            try:
+                decoded = base64.urlsafe_b64decode(first_part)
+                parsed = json.loads(decoded.decode("utf-8"))
+            except Exception:
+                continue
+
+            if isinstance(parsed, dict):
+                return parsed
+
+        return {}
+
     async def _collect_register_session_tokens(
         self,
         db_session: Optional[DBAsyncSession],
@@ -1155,19 +1185,31 @@ class ChatGPTService:
                 callback_code = ""
 
         if callback_code:
-            token_exchange_result = await self._make_request(
+            session = await self._get_session(db_session, identifier, proxy=proxy)
+            auth_session_payload = self._decode_oai_client_auth_session_cookie(session)
+            workspaces = auth_session_payload.get("workspaces") if isinstance(auth_session_payload, dict) else []
+            workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else {}
+            code_verifier = str((workspace or {}).get("code_verifier") or "").strip()
+
+            token_form_data: Dict[str, Any] = {
+                "grant_type": "authorization_code",
+                "code": callback_code,
+                "redirect_uri": "https://chatgpt.com/api/auth/callback/openai",
+                "client_id": "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh",
+            }
+            if code_verifier:
+                token_form_data["code_verifier"] = code_verifier
+
+            token_exchange_result = await self._make_register_request(
                 "POST",
                 "https://auth.openai.com/oauth/token",
                 {"Content-Type": "application/x-www-form-urlencoded"},
                 db_session=db_session,
                 identifier=identifier,
+                special_session_step=True,
+                session=session,
                 proxy=proxy,
-                form_data={
-                    "grant_type": "authorization_code",
-                    "code": callback_code,
-                    "redirect_uri": "https://chatgpt.com/api/auth/callback/openai",
-                    "client_id": "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh",
-                },
+                form_data=token_form_data,
             )
             if token_exchange_result.get("success"):
                 token_data = token_exchange_result.get("data") or {}
