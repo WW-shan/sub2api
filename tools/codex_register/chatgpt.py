@@ -1819,7 +1819,66 @@ class ChatGPTService:
             proxy=proxy,
         )
         if not continue_result.get("success"):
-            return {}
+            if sentinel_continue:
+                continue_headers_without_sentinel = dict(continue_headers)
+                continue_headers_without_sentinel.pop("openai-sentinel-token", None)
+                continue_result = await self._make_register_request(
+                    "POST",
+                    f"{self.OPENAI_AUTH_BASE}/api/accounts/authorize/continue",
+                    continue_headers_without_sentinel,
+                    json_data={"username": {"kind": "email", "value": str(email or "").strip()}},
+                    db_session=db_session,
+                    identifier=identifier,
+                    special_session_step=True,
+                    session=session,
+                    proxy=proxy,
+                )
+            if not continue_result.get("success"):
+                return {}
+
+        auth_session_payload = self._decode_oai_client_auth_session_cookie(session)
+        resolved_code_verifier = str(code_verifier or "").strip()
+        if isinstance(auth_session_payload, dict):
+            cookie_code_verifier = str(auth_session_payload.get("code_verifier") or "").strip()
+            if cookie_code_verifier:
+                resolved_code_verifier = cookie_code_verifier
+            if not resolved_code_verifier:
+                workspaces = auth_session_payload.get("workspaces")
+                workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else {}
+                if isinstance(workspace, dict):
+                    workspace_verifier = str(workspace.get("code_verifier") or "").strip()
+                    if workspace_verifier:
+                        resolved_code_verifier = workspace_verifier
+
+        continue_data = continue_result.get("data") if isinstance(continue_result.get("data"), dict) else {}
+        continue_url_from_continue = str(
+            continue_data.get("continue_url")
+            or continue_data.get("redirect_url")
+            or continue_data.get("final_url")
+            or continue_data.get("url")
+            or ""
+        ).strip()
+        if continue_url_from_continue:
+            continue_auth_code = self._oauth_extract_code_from_url(continue_url_from_continue)
+            if not continue_auth_code:
+                continue_auth_code = await self._oauth_follow_and_extract_code(
+                    session=session,
+                    url=continue_url_from_continue,
+                    db_session=db_session,
+                    identifier=identifier,
+                    proxy=proxy,
+                )
+            if continue_auth_code:
+                return await self._oauth_exchange_code_for_tokens(
+                    session=session,
+                    code=continue_auth_code,
+                    code_verifier=resolved_code_verifier,
+                    oauth_client_id=oauth_client_id,
+                    oauth_redirect_uri=oauth_redirect_uri,
+                    db_session=db_session,
+                    identifier=identifier,
+                    proxy=proxy,
+                )
 
         password_headers = self._build_auth_headers(
             extra_headers={

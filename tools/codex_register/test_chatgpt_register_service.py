@@ -1178,6 +1178,69 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.get("refresh_token"), "rt_independent")
         self.assertEqual(payload.get("id_token"), "id_independent")
 
+
+    async def test_fetch_independent_oauth_tokens_retries_continue_without_sentinel(self):
+        service = self.ChatGPTService()
+        continue_attempts = {"count": 0}
+
+        async def _make_register_request(method, url, headers, *args, **kwargs):
+            del args
+            if method == "GET" and str(url).startswith("https://auth.openai.com/oauth/authorize?"):
+                return service._success_result({})
+
+            if method == "POST" and str(url) == "https://auth.openai.com/api/accounts/authorize/continue":
+                continue_attempts["count"] += 1
+                if continue_attempts["count"] == 1:
+                    self.assertIn("openai-sentinel-token", headers)
+                    return service._error_result(403, "sentinel blocked", "forbidden")
+                self.assertNotIn("openai-sentinel-token", headers)
+                return service._success_result(
+                    {
+                        "continue_url": "https://chatgpt.com/api/auth/callback/openai?code=cb_retry_123",
+                    }
+                )
+
+            if method == "POST" and str(url) == "https://auth.openai.com/oauth/token":
+                form_data = kwargs.get("form_data") or {}
+                self.assertEqual(form_data.get("code"), "cb_retry_123")
+                self.assertEqual(form_data.get("code_verifier"), "pkce-cookie-verifier")
+                return service._success_result(
+                    {
+                        "refresh_token": "rt_independent_retry",
+                    }
+                )
+
+            return service._error_result(404, "unexpected request", "unexpected_request")
+
+        with patch.object(
+            service,
+            "_get_session",
+            new=AsyncMock(return_value=SimpleNamespace(cookies=[])),
+        ), patch.object(
+            service,
+            "_decode_oai_client_auth_session_cookie",
+            return_value={"code_verifier": "pkce-cookie-verifier"},
+        ), patch.object(
+            service,
+            "_request_sentinel_token",
+            new=AsyncMock(return_value="sentinel-token-value"),
+        ), patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(side_effect=_make_register_request),
+        ):
+            payload = await service._fetch_independent_oauth_tokens_after_register(
+                db_session=None,
+                identifier="acc_123",
+                proxy="",
+                email="user@example.com",
+                password="pw",
+                authorize_client_id="app_X8zY6vW2pQ9tR3dE7nK1jL5gH",
+            )
+
+        self.assertEqual(payload.get("refresh_token"), "rt_independent_retry")
+        self.assertEqual(continue_attempts["count"], 2)
+
     async def test_register_prefers_independent_oauth_refresh_token(self):
         service = self.ChatGPTService()
 
