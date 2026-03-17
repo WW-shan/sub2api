@@ -1193,13 +1193,13 @@ class ChatGPTService:
         session: Optional[AsyncSession] = None
         auth_session_payload: Dict[str, Any] = {}
 
-        if callback_code or not refresh_token:
+        if callback_code or not refresh_token or not callback_url:
             session = await self._get_session(db_session, identifier, proxy=proxy)
             decoded_payload = self._decode_oai_client_auth_session_cookie(session)
             if isinstance(decoded_payload, dict):
                 auth_session_payload = decoded_payload
 
-        if not callback_code and not refresh_token and session is not None:
+        if not callback_code and session is not None:
             workspaces = auth_session_payload.get("workspaces") if isinstance(auth_session_payload, dict) else []
             workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else {}
             workspace_id = str((workspace or {}).get("id") or "").strip() if isinstance(workspace, dict) else ""
@@ -1222,6 +1222,42 @@ class ChatGPTService:
                         callback_code = _extract_code_from_url(
                             str(workspace_data.get("continue_url") or workspace_data.get("url") or "")
                         )
+
+                        if not callback_code:
+                            data_payload = workspace_data.get("data") if isinstance(workspace_data.get("data"), dict) else {}
+                            orgs = data_payload.get("orgs") if isinstance(data_payload, dict) else []
+                            org_id = ""
+                            project_id = ""
+                            if isinstance(orgs, list) and orgs:
+                                first_org = orgs[0] if isinstance(orgs[0], dict) else {}
+                                org_id = str(first_org.get("id") or "").strip()
+                                projects = first_org.get("projects")
+                                if isinstance(projects, list) and projects:
+                                    first_project = projects[0] if isinstance(projects[0], dict) else {}
+                                    project_id = str(first_project.get("id") or "").strip()
+
+                            if org_id:
+                                org_payload: Dict[str, Any] = {"org_id": org_id}
+                                if project_id:
+                                    org_payload["project_id"] = project_id
+
+                                organization_select_result = await self._make_register_request(
+                                    "POST",
+                                    "https://auth.openai.com/api/accounts/organization/select",
+                                    self._build_auth_headers(),
+                                    json_data=org_payload,
+                                    db_session=db_session,
+                                    identifier=identifier,
+                                    special_session_step=True,
+                                    session=session,
+                                    proxy=proxy,
+                                )
+                                if organization_select_result.get("success"):
+                                    organization_data = organization_select_result.get("data")
+                                    if isinstance(organization_data, dict):
+                                        callback_code = _extract_code_from_url(
+                                            str(organization_data.get("continue_url") or organization_data.get("url") or "")
+                                        )
 
         if callback_code:
             if session is None:
@@ -1508,12 +1544,21 @@ class ChatGPTService:
                     callback_url,
                     authorize_client_id,
                 )
+                independent_oauth_tokens = await self._collect_register_session_tokens(
+                    db_session,
+                    runtime_identifier,
+                    resolved_proxy,
+                    "",
+                    authorize_client_id,
+                )
+                merged_tokens = dict(session_tokens)
+                merged_tokens.update({k: v for k, v in independent_oauth_tokens.items() if v})
 
                 return self._success_result(
                     self._build_register_compat_payload(
                         email=email,
                         identifier=runtime_identifier,
-                        extra=session_tokens,
+                        extra=merged_tokens,
                     )
                 )
 
@@ -1528,12 +1573,21 @@ class ChatGPTService:
                     callback_url,
                     authorize_client_id,
                 )
+                independent_oauth_tokens = await self._collect_register_session_tokens(
+                    db_session,
+                    runtime_identifier,
+                    resolved_proxy,
+                    "",
+                    authorize_client_id,
+                )
+                merged_tokens = dict(session_tokens)
+                merged_tokens.update({k: v for k, v in independent_oauth_tokens.items() if v})
 
                 return self._success_result(
                     self._build_register_compat_payload(
                         email=email,
                         identifier=runtime_identifier,
-                        extra=session_tokens,
+                        extra=merged_tokens,
                     )
                 )
             else:
@@ -1590,13 +1644,22 @@ class ChatGPTService:
                 callback_url,
                 authorize_client_id,
             )
+            independent_oauth_tokens = await self._collect_register_session_tokens(
+                db_session,
+                runtime_identifier,
+                resolved_proxy,
+                "",
+                authorize_client_id,
+            )
+            merged_tokens = dict(session_tokens)
+            merged_tokens.update({k: v for k, v in independent_oauth_tokens.items() if v})
 
             logger.info(f"[{runtime_identifier}] 注册流程完成")
             return self._success_result(
                 self._build_register_compat_payload(
                     email=email,
                     identifier=runtime_identifier,
-                    extra=session_tokens,
+                    extra=merged_tokens,
                 )
             )
 

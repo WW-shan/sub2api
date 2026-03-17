@@ -879,6 +879,200 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.get("refresh_token"), "rt_ws")
         self.assertEqual(payload.get("id_token"), "id_ws")
 
+
+    async def test_oauth_independent_flow_recovers_code_from_workspace_and_org_continue_url(self):
+        service = self.ChatGPTService()
+
+        class _Cookie:
+            name = "oai-client-auth-session"
+            value = ""
+
+        cookie_payload = {
+            "workspaces": [
+                {
+                    "id": "ws_123",
+                    "code_verifier": "pkce-ws-verifier-456",
+                }
+            ]
+        }
+        encoded_payload = base64.urlsafe_b64encode(json.dumps(cookie_payload).encode("utf-8")).decode("ascii").rstrip("=")
+        _Cookie.value = encoded_payload
+
+        async def _make_register_request(method, url, headers, *args, **kwargs):
+            del headers, args
+            if method == "POST" and str(url) == "https://auth.openai.com/api/accounts/workspace/select":
+                self.assertEqual(kwargs.get("json_data"), {"workspace_id": "ws_123"})
+                return service._success_result(
+                    {
+                        "continue_url": "https://auth.openai.com/organization-selector",
+                        "data": {
+                            "orgs": [
+                                {
+                                    "id": "org_456",
+                                    "projects": [{"id": "proj_789"}],
+                                }
+                            ]
+                        },
+                    }
+                )
+            if method == "POST" and str(url) == "https://auth.openai.com/api/accounts/organization/select":
+                self.assertEqual(kwargs.get("json_data"), {"org_id": "org_456", "project_id": "proj_789"})
+                return service._success_result(
+                    {
+                        "continue_url": "https://chatgpt.com/api/auth/callback/openai?code=org_code_456",
+                    }
+                )
+            if method == "POST" and str(url) == "https://auth.openai.com/oauth/token":
+                form_data = kwargs.get("form_data") or {}
+                self.assertEqual(form_data.get("code"), "org_code_456")
+                self.assertEqual(form_data.get("code_verifier"), "pkce-ws-verifier-456")
+                return service._success_result(
+                    {
+                        "refresh_token": "rt_independent",
+                        "id_token": "id_independent",
+                    }
+                )
+            return service._error_result(404, "unexpected request", "unexpected_request")
+
+        with patch.object(
+            service,
+            "_get_session",
+            new=AsyncMock(return_value=SimpleNamespace(cookies=[_Cookie()])),
+        ), patch.object(
+            service,
+            "_make_request",
+            new=AsyncMock(
+                return_value=service._success_result(
+                    {
+                        "accessToken": "at_token",
+                        "sessionToken": "st_token",
+                        "currentAccountId": "acc_session",
+                    }
+                )
+            ),
+        ), patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(side_effect=_make_register_request),
+        ):
+            payload = await service._collect_register_session_tokens(
+                db_session=None,
+                identifier="acc_123",
+                proxy="",
+                callback_url="https://chatgpt.com/a/callback-complete",
+            )
+
+        self.assertEqual(payload.get("refresh_token"), "rt_independent")
+        self.assertEqual(payload.get("id_token"), "id_independent")
+
+    async def test_register_prefers_independent_oauth_refresh_token(self):
+        service = self.ChatGPTService()
+
+        with self._register_env(), patch.object(
+            service,
+            "_resolve_register_proxy",
+            new=AsyncMock(return_value=""),
+        ), patch.object(
+            service,
+            "_visit_homepage",
+            new=AsyncMock(return_value=service._success_result({})),
+        ), patch.object(
+            service,
+            "_get_csrf_token",
+            new=AsyncMock(return_value=service._success_result({"csrf_token": "csrf"})),
+        ), patch.object(
+            service,
+            "_prepare_identity",
+            new=lambda ctx: service._success_result(
+                {
+                    **(ctx or {}),
+                    "register_input": {
+                        **dict((ctx or {}).get("register_input") or {}),
+                        "fixed_email": "user@example.com",
+                        "fixed_password": "pw",
+                    },
+                }
+            ),
+        ), patch.object(
+            service,
+            "_signin_with_email",
+            new=AsyncMock(
+                return_value=service._success_result(
+                    {
+                        "authorize_url": "https://auth.openai.com/api/accounts/authorize?client_id=app_X8zY6vW2pQ9tR3dE7nK1jL5gH"
+                    }
+                )
+            ),
+        ), patch.object(
+            service,
+            "_authorize_and_redirect",
+            new=AsyncMock(return_value=service._success_result({"final_url": "https://chatgpt.com/a/callback-complete"})),
+        ), patch.object(
+            service,
+            "_execute_callback",
+            new=AsyncMock(return_value=service._success_result({})),
+        ), patch.object(
+            service,
+            "_collect_register_session_tokens",
+            new=AsyncMock(
+                side_effect=[
+                    {
+                        "access_token": "at_session",
+                        "refresh_token": "",
+                        "session_token": "st_session",
+                        "account_id": "acc_session",
+                    },
+                    {
+                        "access_token": "at_independent",
+                        "refresh_token": "rt_independent",
+                        "id_token": "id_independent",
+                    },
+                ]
+            ),
+        ):
+            result = await service.register(identifier="acc_123")
+
+        self.assertTrue(result["success"])
+        payload = result["data"]
+        self.assertEqual(payload["refresh_token"], "rt_independent")
+        self.assertEqual(payload["access_token"], "at_independent")
+        self.assertEqual(payload["id_token"], "id_independent")
+
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_request",
+            new=AsyncMock(
+                return_value=service._success_result(
+                    {
+                        "accessToken": "at_session",
+                        "sessionToken": "st_session",
+                        "currentAccountId": "acc_session",
+                    }
+                )
+            ),
+        ), patch.object(
+            service,
+            "_get_session",
+            new=AsyncMock(return_value=SimpleNamespace(cookies=[])),
+        ), patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(return_value=service._success_result({"refresh_token": "rt_oauth"})),
+        ) as mocked_exchange:
+            payload = await service._collect_register_session_tokens(
+                db_session=None,
+                identifier="acc_123",
+                proxy="",
+                callback_url="https://chatgpt.com/api/auth/callback/openai?code=cbcode123",
+                oauth_client_id="app_X8zY6vW2pQ9tR3dE7nK1jL5gH",
+            )
+
+        self.assertEqual(payload["refresh_token"], "rt_oauth")
+        exchange_form_data = mocked_exchange.await_args.kwargs.get("form_data")
+        self.assertEqual(exchange_form_data.get("client_id"), "app_X8zY6vW2pQ9tR3dE7nK1jL5gH")
+
     async def test_collect_register_session_tokens_uses_dynamic_client_id_from_signin_authorize_url(self):
         service = self.ChatGPTService()
 
@@ -914,6 +1108,7 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["refresh_token"], "rt_oauth")
         exchange_form_data = mocked_exchange.await_args.kwargs.get("form_data")
         self.assertEqual(exchange_form_data.get("client_id"), "app_X8zY6vW2pQ9tR3dE7nK1jL5gH")
+
 
     async def test_register_then_get_members_uses_returned_identifier_without_relogin(self):
         service = self.ChatGPTService()
