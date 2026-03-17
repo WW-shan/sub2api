@@ -758,6 +758,42 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         exchange_form_data = mocked_exchange.await_args.kwargs.get("form_data")
         self.assertEqual(exchange_form_data.get("code_verifier"), "pkce-verifier-123")
 
+    async def test_collect_register_session_tokens_uses_dynamic_client_id_from_signin_authorize_url(self):
+        service = self.ChatGPTService()
+
+        with patch.object(
+            service,
+            "_make_request",
+            new=AsyncMock(
+                return_value=service._success_result(
+                    {
+                        "accessToken": "at_session",
+                        "sessionToken": "st_session",
+                        "currentAccountId": "acc_session",
+                    }
+                )
+            ),
+        ), patch.object(
+            service,
+            "_get_session",
+            new=AsyncMock(return_value=SimpleNamespace(cookies=[])),
+        ), patch.object(
+            service,
+            "_make_register_request",
+            new=AsyncMock(return_value=service._success_result({"refresh_token": "rt_oauth"})),
+        ) as mocked_exchange:
+            payload = await service._collect_register_session_tokens(
+                db_session=None,
+                identifier="acc_123",
+                proxy="",
+                callback_url="https://chatgpt.com/api/auth/callback/openai?code=cbcode123",
+                oauth_client_id="app_X8zY6vW2pQ9tR3dE7nK1jL5gH",
+            )
+
+        self.assertEqual(payload["refresh_token"], "rt_oauth")
+        exchange_form_data = mocked_exchange.await_args.kwargs.get("form_data")
+        self.assertEqual(exchange_form_data.get("client_id"), "app_X8zY6vW2pQ9tR3dE7nK1jL5gH")
+
     async def test_register_then_get_members_uses_returned_identifier_without_relogin(self):
         service = self.ChatGPTService()
 

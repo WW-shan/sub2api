@@ -1144,6 +1144,7 @@ class ChatGPTService:
         identifier: str,
         proxy: Optional[str] = None,
         callback_url: str = "",
+        oauth_client_id: str = "",
     ) -> Dict[str, Any]:
         """从注册会话中提取 account/token 字段用于持久化"""
         headers = self._build_browser_base_headers(
@@ -1195,7 +1196,7 @@ class ChatGPTService:
                 "grant_type": "authorization_code",
                 "code": callback_code,
                 "redirect_uri": "https://chatgpt.com/api/auth/callback/openai",
-                "client_id": "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh",
+                "client_id": oauth_client_id or "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh",
             }
             if code_verifier:
                 token_form_data["code_verifier"] = code_verifier
@@ -1382,6 +1383,13 @@ class ChatGPTService:
                 return signin_result
 
             authorize_url = signin_result.get("data", {}).get("authorize_url", "")
+            authorize_client_id = ""
+            if authorize_url:
+                try:
+                    parsed_qs = urllib.parse.parse_qs(urlparse(authorize_url).query)
+                    authorize_client_id = str((parsed_qs.get("client_id") or [""])[0] or "").strip()
+                except Exception:
+                    authorize_client_id = ""
             
             await asyncio.sleep(random.uniform(0.3, 0.8))
 
@@ -1450,6 +1458,7 @@ class ChatGPTService:
                     runtime_identifier,
                     resolved_proxy,
                     callback_url,
+                    authorize_client_id,
                 )
 
                 return self._success_result(
@@ -1469,6 +1478,7 @@ class ChatGPTService:
                     runtime_identifier,
                     resolved_proxy,
                     callback_url,
+                    authorize_client_id,
                 )
 
                 return self._success_result(
