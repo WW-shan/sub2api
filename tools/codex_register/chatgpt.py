@@ -1154,7 +1154,7 @@ class ChatGPTService:
             except Exception:
                 callback_code = ""
 
-        if callback_code and not refresh_token:
+        if callback_code:
             token_exchange_result = await self._make_request(
                 "POST",
                 "https://auth.openai.com/oauth/token",
@@ -1171,9 +1171,15 @@ class ChatGPTService:
             )
             if token_exchange_result.get("success"):
                 token_data = token_exchange_result.get("data") or {}
-                if not refresh_token:
-                    refresh_token = str(token_data.get("refresh_token") or "").strip()
-                id_token = str(token_data.get("id_token") or "").strip()
+                oauth_access_token = str(token_data.get("access_token") or "").strip()
+                oauth_refresh_token = str(token_data.get("refresh_token") or "").strip()
+                oauth_id_token = str(token_data.get("id_token") or "").strip()
+                if oauth_access_token:
+                    access_token = oauth_access_token
+                if oauth_refresh_token:
+                    refresh_token = oauth_refresh_token
+                if oauth_id_token:
+                    id_token = oauth_id_token
 
         if access_token:
             decoded = self.jwt_parser.decode_token(access_token) or {}
@@ -1415,32 +1421,19 @@ class ChatGPTService:
             elif "callback-complete" in final_path:
                 logger.info(f"[{runtime_identifier}] 回调完成信号已确认，注册短路完成")
 
-                has_token_hints = any(
-                    str(register_input.get(key) or "").strip()
-                    for key in (
-                        "access_token",
-                        "refresh_token",
-                        "id_token",
-                        "session_token",
-                        "token_endpoint",
-                        "callback_url",
-                        "auth_code",
-                        "code",
-                    )
+                callback_url = final_url
+                session_tokens = await self._collect_register_session_tokens(
+                    db_session,
+                    runtime_identifier,
+                    resolved_proxy,
+                    callback_url,
                 )
-
-                if not has_token_hints:
-                    return self._success_result(
-                        self._build_register_compat_payload(
-                            email=email,
-                            identifier=runtime_identifier,
-                        )
-                    )
 
                 return self._success_result(
                     self._build_register_compat_payload(
                         email=email,
                         identifier=runtime_identifier,
+                        extra=session_tokens,
                     )
                 )
             else:
@@ -1494,6 +1487,7 @@ class ChatGPTService:
                 db_session,
                 runtime_identifier,
                 resolved_proxy,
+                callback_url,
             )
 
             logger.info(f"[{runtime_identifier}] 注册流程完成")
