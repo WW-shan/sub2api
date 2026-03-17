@@ -1177,20 +1177,68 @@ class ChatGPTService:
                 account_id = str(next(iter(accounts.keys())) or "").strip()
 
         id_token = ""
-        callback_code = ""
-        if callback_url and "code=" in callback_url:
-            try:
-                callback_code = str(urlparse(callback_url).query or "")
-                callback_code = urllib.parse.parse_qs(callback_code).get("code", [""])[0]
-            except Exception:
-                callback_code = ""
 
-        if callback_code:
+        def _extract_code_from_url(raw_url: str) -> str:
+            parsed_url = str(raw_url or "").strip()
+            if not parsed_url or "code=" not in parsed_url:
+                return ""
+            try:
+                query = str(urlparse(parsed_url).query or "")
+                return str(urllib.parse.parse_qs(query).get("code", [""])[0] or "").strip()
+            except Exception:
+                return ""
+
+        callback_code = _extract_code_from_url(callback_url)
+
+        session: Optional[AsyncSession] = None
+        auth_session_payload: Dict[str, Any] = {}
+
+        if callback_code or not refresh_token:
             session = await self._get_session(db_session, identifier, proxy=proxy)
-            auth_session_payload = self._decode_oai_client_auth_session_cookie(session)
+            decoded_payload = self._decode_oai_client_auth_session_cookie(session)
+            if isinstance(decoded_payload, dict):
+                auth_session_payload = decoded_payload
+
+        if not callback_code and not refresh_token and session is not None:
             workspaces = auth_session_payload.get("workspaces") if isinstance(auth_session_payload, dict) else []
             workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else {}
-            code_verifier = str((workspace or {}).get("code_verifier") or "").strip()
+            workspace_id = str((workspace or {}).get("id") or "").strip() if isinstance(workspace, dict) else ""
+
+            if workspace_id:
+                workspace_select_result = await self._make_register_request(
+                    "POST",
+                    "https://auth.openai.com/api/accounts/workspace/select",
+                    self._build_auth_headers(),
+                    json_data={"workspace_id": workspace_id},
+                    db_session=db_session,
+                    identifier=identifier,
+                    special_session_step=True,
+                    session=session,
+                    proxy=proxy,
+                )
+                if workspace_select_result.get("success"):
+                    workspace_data = workspace_select_result.get("data")
+                    if isinstance(workspace_data, dict):
+                        callback_code = _extract_code_from_url(
+                            str(workspace_data.get("continue_url") or workspace_data.get("url") or "")
+                        )
+
+        if callback_code:
+            if session is None:
+                session = await self._get_session(db_session, identifier, proxy=proxy)
+                decoded_payload = self._decode_oai_client_auth_session_cookie(session)
+                if isinstance(decoded_payload, dict):
+                    auth_session_payload = decoded_payload
+
+            code_verifier = ""
+            if isinstance(auth_session_payload, dict):
+                code_verifier = str(auth_session_payload.get("code_verifier") or "").strip()
+
+                if not code_verifier:
+                    workspaces = auth_session_payload.get("workspaces")
+                    workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else {}
+                    if isinstance(workspace, dict):
+                        code_verifier = str(workspace.get("code_verifier") or "").strip()
 
             token_form_data: Dict[str, Any] = {
                 "grant_type": "authorization_code",
@@ -1540,6 +1588,7 @@ class ChatGPTService:
                 runtime_identifier,
                 resolved_proxy,
                 callback_url,
+                authorize_client_id,
             )
 
             logger.info(f"[{runtime_identifier}] 注册流程完成")
