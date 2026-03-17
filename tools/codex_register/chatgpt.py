@@ -1757,15 +1757,16 @@ class ChatGPTService:
 
         code_verifier, code_challenge = self._generate_pkce()
         state = secrets.token_urlsafe(32)
-        authorize_url = f"{self.OPENAI_AUTH_BASE}/oauth/authorize?{urllib.parse.urlencode({
-            'response_type': 'code',
-            'client_id': oauth_client_id,
-            'redirect_uri': oauth_redirect_uri,
-            'scope': self.GPT_TEAM_OAUTH_SCOPE,
-            'code_challenge': code_challenge,
-            'code_challenge_method': 'S256',
-            'state': state,
-        })}"
+        authorize_params = {
+            "response_type": "code",
+            "client_id": oauth_client_id,
+            "redirect_uri": oauth_redirect_uri,
+            "scope": self.GPT_TEAM_OAUTH_SCOPE,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+        }
+        authorize_url = f"{self.OPENAI_AUTH_BASE}/oauth/authorize?{urllib.parse.urlencode(authorize_params)}"
 
         authorize_result = await self._make_register_request(
             "GET",

@@ -3,6 +3,7 @@ import importlib
 import json
 import os
 import re
+import subprocess
 import sys
 import types
 import unittest
@@ -93,6 +94,14 @@ def _build_chatgpt_import_stubs() -> dict:
 
 
 class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
+    def test_chatgpt_module_compiles_without_syntax_error(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "py_compile", "chatgpt.py"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def setUp(self):
         self._module_patch = patch.dict(sys.modules, _build_chatgpt_import_stubs())
         self._module_patch.start()
