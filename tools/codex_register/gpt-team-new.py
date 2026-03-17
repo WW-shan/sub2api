@@ -8,7 +8,7 @@ gpt-team-new.py
 - 母号登录：HTTP OAuth + PKCE，自动拉取 account_id / auth_token
 - Codex 授权：HTTP 交换 code → token → 上传到 CPA
 - 子号邀请：注册成功后自动发送团队邀请
-配置文件: config.yaml（兼容原格式）
+配置方式: 文件内固定常量（无 config.yaml）
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 import urllib3
-import yaml
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -43,43 +42,25 @@ from urllib3.util.retry import Retry
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============================================================
-# ① 读取 config.yaml
+# ① 固定常量配置（无 config.yaml）
 # ============================================================
-_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
-
-
-def _load_config() -> Dict[str, Any]:
-    if not os.path.exists(_CONFIG_FILE):
-        raise FileNotFoundError(f"找不到配置文件: {_CONFIG_FILE}\n请先创建 config.yaml")
-    with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-_cfg = _load_config()
-
 # 账号总数
-TOTAL_ACCOUNTS: int = int(_cfg.get("total_accounts", 2))
+TOTAL_ACCOUNTS: int = 5
 
 # 统一邮件 Worker 配置
-MAIL_WORKER_BASE_URL: str = _cfg["mail_worker"]["base_url"].rstrip("/")
-MAIL_WORKER_TOKEN: str = _cfg["mail_worker"]["token"]
-MAIL_DOMAIN: str = _cfg["mail_worker"]["domain"]
-MAIL_POLL_SECONDS: int = int(_cfg["mail_worker"].get("poll_seconds", 3))
-MAIL_POLL_MAX_ATTEMPTS: int = int(_cfg["mail_worker"].get("poll_max_attempts", 40))
+MAIL_WORKER_BASE_URL: str = "https://openai-register.wwshan.workers.dev"
+MAIL_WORKER_TOKEN: str = "7BwPEFa1NGMTjUVpdf1w"
+MAIL_DOMAIN: str = "wwcloud.me"
+MAIL_POLL_SECONDS: int = 3
+MAIL_POLL_MAX_ATTEMPTS: int = 40
 
-# CLI Proxy API（CPA）配置
-CLI_PROXY_API_BASE: str = _cfg["cli_proxy"]["api_base"].rstrip("/")
-CLI_PROXY_PASSWORD: str = _cfg["cli_proxy"]["password"]
 
 # 输出文件
-ACCOUNTS_FILE: str = _cfg["output"].get("accounts_file", "accounts.txt")
-INVITE_TRACKER_FILE: str = _cfg["output"]["invite_tracker_file"]
+ACCOUNTS_FILE: str = "accounts.txt"
+INVITE_TRACKER_FILE: str = "invite_tracker.json"
 
-# CPA 上传开关
-CPA_UPLOAD_ENABLED: bool = bool(_cfg.get("cli_proxy", {}).get("upload_enabled", True))
-
-# 车头（Teams）列表
-TEAMS: List[Dict[str, Any]] = _cfg.get("teams", [])
+# 车头（Teams）列表（按需填写）
+TEAMS: List[Dict[str, Any]] = []
 
 # OAuth 常量（Codex CLI 客户端）
 OPENAI_AUTH_BASE = "https://auth.openai.com"
@@ -87,7 +68,7 @@ OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
 OAUTH_SCOPE = "openid profile email offline_access"
 
-print(f"✅ 配置已加载: {_CONFIG_FILE}")
+print("✅ 固定配置已加载（无 config.yaml）")
 print(f"   注册数量: {TOTAL_ACCOUNTS} | 车头数量: {len(TEAMS)} | 邮箱域名: {MAIL_DOMAIN}")
 
 # ============================================================
