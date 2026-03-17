@@ -1851,34 +1851,33 @@ class ChatGPTService:
                         resolved_code_verifier = workspace_verifier
 
         continue_data = continue_result.get("data") if isinstance(continue_result.get("data"), dict) else {}
-        continue_url_from_continue = str(
+        continue_url = str(
             continue_data.get("continue_url")
             or continue_data.get("redirect_url")
             or continue_data.get("final_url")
             or continue_data.get("url")
             or ""
         ).strip()
-        if continue_url_from_continue:
-            continue_auth_code = self._oauth_extract_code_from_url(continue_url_from_continue)
-            if not continue_auth_code:
-                continue_auth_code = await self._oauth_follow_and_extract_code(
-                    session=session,
-                    url=continue_url_from_continue,
-                    db_session=db_session,
-                    identifier=identifier,
-                    proxy=proxy,
-                )
-            if continue_auth_code:
-                return await self._oauth_exchange_code_for_tokens(
-                    session=session,
-                    code=continue_auth_code,
-                    code_verifier=resolved_code_verifier,
-                    oauth_client_id=oauth_client_id,
-                    oauth_redirect_uri=oauth_redirect_uri,
-                    db_session=db_session,
-                    identifier=identifier,
-                    proxy=proxy,
-                )
+
+        if continue_url:
+            await self._make_register_request(
+                "GET",
+                continue_url,
+                self._build_browser_base_headers(
+                    {
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Upgrade-Insecure-Requests": "1",
+                    },
+                    origin=self.OPENAI_AUTH_BASE,
+                    referer=f"{self.OPENAI_AUTH_BASE}/log-in",
+                ),
+                db_session=db_session,
+                identifier=identifier,
+                special_session_step=True,
+                session=session,
+                proxy=proxy,
+                allow_redirects=True,
+            )
 
         password_headers = self._build_auth_headers(
             extra_headers={
@@ -1911,35 +1910,148 @@ class ChatGPTService:
             allow_redirects=False,
         )
         if not password_result.get("success"):
-            return {}
+            if sentinel_password:
+                password_headers_without_sentinel = dict(password_headers)
+                password_headers_without_sentinel.pop("openai-sentinel-token", None)
+                password_result = await self._make_register_request(
+                    "POST",
+                    f"{self.OPENAI_AUTH_BASE}/api/accounts/password/verify",
+                    password_headers_without_sentinel,
+                    json_data={"password": str(password or "")},
+                    db_session=db_session,
+                    identifier=identifier,
+                    special_session_step=True,
+                    session=session,
+                    proxy=proxy,
+                    allow_redirects=False,
+                )
+            if not password_result.get("success"):
+                return {}
 
         password_data = password_result.get("data") if isinstance(password_result.get("data"), dict) else {}
-        continue_url = str(
+        flow_continue_url = str(
             password_data.get("continue_url")
             or password_data.get("redirect_url")
             or password_data.get("final_url")
             or password_data.get("url")
             or ""
         ).strip()
-        if not continue_url:
-            return {}
+        password_page = password_data.get("page") if isinstance(password_data, dict) else {}
+        password_page_type = str((password_page or {}).get("type") or "").strip() if isinstance(password_page, dict) else ""
+        need_email_otp = password_page_type == "email_otp_verification" or "email-verification" in flow_continue_url
 
-        auth_code = self._oauth_extract_code_from_url(continue_url)
-        if not auth_code:
+        if need_email_otp:
+            otp_init_headers = self._build_auth_headers(
+                extra_headers={
+                    "Referer": f"{self.OPENAI_AUTH_BASE}/email-verification",
+                    "oai-device-id": device_id,
+                    **self._generate_datadog_trace_headers(),
+                }
+            )
+            sentinel_otp_init = await self._request_sentinel_token(
+                session=session,
+                db_session=db_session,
+                identifier=identifier,
+                proxy=proxy,
+                device_id=device_id,
+                flow="email_otp",
+            )
+            if sentinel_otp_init:
+                otp_init_headers["openai-sentinel-token"] = sentinel_otp_init
+
+            otp_init_result = await self._make_register_request(
+                "POST",
+                f"{self.OPENAI_AUTH_BASE}/api/accounts/email-otp/init",
+                otp_init_headers,
+                json_data={},
+                db_session=db_session,
+                identifier=identifier,
+                special_session_step=True,
+                session=session,
+                proxy=proxy,
+            )
+            if not otp_init_result.get("success"):
+                return {}
+
+            otp_result = await self._poll_otp_from_mail_worker(
+                {
+                    "register_input": {
+                        "fixed_email": str(email or "").strip(),
+                        "resolved_email": str(email or "").strip(),
+                        "mail_worker_base_url": str(os.getenv("REGISTER_MAIL_WORKER_BASE_URL") or "").strip().rstrip("/"),
+                        "mail_worker_token": str(os.getenv("REGISTER_MAIL_WORKER_TOKEN") or "").strip(),
+                        "mail_poll_seconds": 3,
+                        "mail_poll_max_attempts": 40,
+                    },
+                    "db_session": db_session,
+                    "identifier": identifier,
+                    "session": session,
+                    "proxy": proxy,
+                }
+            )
+            if not otp_result.get("success"):
+                return {}
+
+            otp_code = str(((otp_result.get("data") or {}).get("otp_code") or "")).strip()
+            if not otp_code:
+                return {}
+
+            otp_validate_headers = self._build_auth_headers(
+                extra_headers={
+                    "Referer": f"{self.OPENAI_AUTH_BASE}/email-verification",
+                    "oai-device-id": device_id,
+                    **self._generate_datadog_trace_headers(),
+                }
+            )
+            sentinel_otp_validate = await self._request_sentinel_token(
+                session=session,
+                db_session=db_session,
+                identifier=identifier,
+                proxy=proxy,
+                device_id=device_id,
+                flow="email_otp",
+            )
+            if sentinel_otp_validate:
+                otp_validate_headers["openai-sentinel-token"] = sentinel_otp_validate
+
+            otp_validate_result = await self._make_register_request(
+                "POST",
+                f"{self.OPENAI_AUTH_BASE}/api/accounts/email-otp/validate",
+                otp_validate_headers,
+                json_data={"code": otp_code},
+                db_session=db_session,
+                identifier=identifier,
+                special_session_step=True,
+                session=session,
+                proxy=proxy,
+            )
+            if not otp_validate_result.get("success"):
+                return {}
+
+            otp_validate_data = otp_validate_result.get("data") if isinstance(otp_validate_result.get("data"), dict) else {}
+            flow_continue_url = str(
+                otp_validate_data.get("continue_url")
+                or otp_validate_data.get("redirect_url")
+                or otp_validate_data.get("final_url")
+                or otp_validate_data.get("url")
+                or ""
+            ).strip()
+
+        auth_code = self._oauth_extract_code_from_url(flow_continue_url)
+        if not auth_code and flow_continue_url:
             auth_code = await self._oauth_follow_and_extract_code(
                 session=session,
-                url=continue_url,
+                url=flow_continue_url,
                 db_session=db_session,
                 identifier=identifier,
                 proxy=proxy,
             )
 
-        auth_session_payload = self._decode_oai_client_auth_session_cookie(session)
         if not auth_code:
             auth_code = await self._oauth_resolve_code_via_workspace_org(
                 session=session,
                 auth_session_payload=auth_session_payload,
-                consent_url=continue_url,
+                consent_url=flow_continue_url,
                 db_session=db_session,
                 identifier=identifier,
                 proxy=proxy,
@@ -1948,19 +2060,6 @@ class ChatGPTService:
 
         if not auth_code:
             return {}
-
-        resolved_code_verifier = str(code_verifier or "").strip()
-        if isinstance(auth_session_payload, dict):
-            cookie_code_verifier = str(auth_session_payload.get("code_verifier") or "").strip()
-            if cookie_code_verifier:
-                resolved_code_verifier = cookie_code_verifier
-            if not resolved_code_verifier:
-                workspaces = auth_session_payload.get("workspaces")
-                workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else {}
-                if isinstance(workspace, dict):
-                    workspace_verifier = str(workspace.get("code_verifier") or "").strip()
-                    if workspace_verifier:
-                        resolved_code_verifier = workspace_verifier
 
         return await self._oauth_exchange_code_for_tokens(
             session=session,
@@ -1972,7 +2071,6 @@ class ChatGPTService:
             identifier=identifier,
             proxy=proxy,
         )
-
     def _merge_register_payloads(
         self,
         *,

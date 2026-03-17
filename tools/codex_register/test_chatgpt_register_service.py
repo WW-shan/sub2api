@@ -1196,13 +1196,24 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("openai-sentinel-token", headers)
                 return service._success_result(
                     {
-                        "continue_url": "https://chatgpt.com/api/auth/callback/openai?code=cb_retry_123",
+                        "continue_url": "https://auth.openai.com/log-in/password",
+                    }
+                )
+
+            if method == "GET" and str(url) == "https://auth.openai.com/log-in/password":
+                return service._success_result({})
+
+            if method == "POST" and str(url) == "https://auth.openai.com/api/accounts/password/verify":
+                self.assertIn("openai-sentinel-token", headers)
+                return service._success_result(
+                    {
+                        "continue_url": "https://chatgpt.com/api/auth/callback/openai?code=pwd_retry_123",
                     }
                 )
 
             if method == "POST" and str(url) == "https://auth.openai.com/oauth/token":
                 form_data = kwargs.get("form_data") or {}
-                self.assertEqual(form_data.get("code"), "cb_retry_123")
+                self.assertEqual(form_data.get("code"), "pwd_retry_123")
                 self.assertEqual(form_data.get("code_verifier"), "pkce-cookie-verifier")
                 return service._success_result(
                     {
