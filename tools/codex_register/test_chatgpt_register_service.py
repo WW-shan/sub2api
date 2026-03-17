@@ -178,6 +178,10 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=service._success_result({"final_url": "https://chatgpt.com/a/callback-complete"})),
         ), patch.object(
             service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(return_value={"access_token": "at_independent", "refresh_token": "rt_independent"}),
+        ), patch.object(
+            service,
             "_create_account_with_info",
             new=AsyncMock(side_effect=AssertionError("create account should not run after callback-complete")),
         ):
@@ -370,6 +374,10 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=service._success_result({"final_url": "https://chatgpt.com/some/other/path"})),
         ), patch.object(
             service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(return_value={"access_token": "at_independent", "refresh_token": "rt_independent"}),
+        ), patch.object(
+            service,
             "_register_user_with_password",
             new=AsyncMock(return_value=service._success_result({})),
         ), patch.object(
@@ -434,6 +442,10 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=service._success_result({"final_url": "https://auth.openai.com/about-you"})),
         ), patch.object(
             service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(return_value={"access_token": "at_independent", "refresh_token": "rt_independent"}),
+        ), patch.object(
+            service,
             "_create_account_with_info",
             new=AsyncMock(return_value=service._success_result({"callback_url": "https://auth.openai.com/callback?code=ok"})),
         ) as mocked_create_account, patch.object(
@@ -491,6 +503,10 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             service,
             "_authorize_and_redirect",
             new=AsyncMock(return_value=service._success_result({"final_url": "https://auth.openai.com/about-you"})),
+        ), patch.object(
+            service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(return_value={"refresh_token": "rt_independent"}),
         ), patch.object(
             service,
             "_create_account_with_info",
@@ -557,6 +573,13 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             service,
             "_authorize_and_redirect",
             new=AsyncMock(return_value=service._success_result({"final_url": "https://auth.openai.com/about-you"})),
+        ), patch.object(
+            service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(return_value={
+                "access_token": "at_token",
+                "refresh_token": "rt_token",
+            }),
         ), patch.object(
             service,
             "_make_request",
@@ -686,6 +709,13 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
                     {"final_url": "https://chatgpt.com/a/callback-complete?code=cbcode123"}
                 )
             ),
+        ), patch.object(
+            service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(return_value={
+                "access_token": "at_cb",
+                "refresh_token": "rt_cb",
+            }),
         ), patch.object(
             service,
             "_make_request",
@@ -1189,19 +1219,22 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             service,
             "_collect_register_session_tokens",
             new=AsyncMock(
-                side_effect=[
-                    {
-                        "access_token": "at_session",
-                        "refresh_token": "",
-                        "session_token": "st_session",
-                        "account_id": "acc_session",
-                    },
-                    {
-                        "access_token": "at_independent",
-                        "refresh_token": "rt_independent",
-                        "id_token": "id_independent",
-                    },
-                ]
+                return_value={
+                    "access_token": "at_session",
+                    "refresh_token": "",
+                    "session_token": "st_session",
+                    "account_id": "acc_session",
+                }
+            ),
+        ), patch.object(
+            service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(
+                return_value={
+                    "access_token": "at_independent",
+                    "refresh_token": "rt_independent",
+                    "id_token": "id_independent",
+                }
             ),
         ):
             result = await service.register(identifier="acc_123")
@@ -1284,6 +1317,147 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exchange_form_data.get("client_id"), "app_X8zY6vW2pQ9tR3dE7nK1jL5gH")
 
 
+    async def test_register_fails_when_independent_oauth_missing_refresh_token(self):
+        service = self.ChatGPTService()
+
+        with self._register_env(), patch.object(
+            service,
+            "_resolve_register_proxy",
+            new=AsyncMock(return_value=""),
+        ), patch.object(
+            service,
+            "_visit_homepage",
+            new=AsyncMock(return_value=service._success_result({})),
+        ), patch.object(
+            service,
+            "_get_csrf_token",
+            new=AsyncMock(return_value=service._success_result({"csrf_token": "csrf"})),
+        ), patch.object(
+            service,
+            "_prepare_identity",
+            new=lambda ctx: service._success_result(
+                {
+                    **(ctx or {}),
+                    "register_input": {
+                        **dict((ctx or {}).get("register_input") or {}),
+                        "fixed_email": "user@example.com",
+                        "fixed_password": "pw",
+                    },
+                }
+            ),
+        ), patch.object(
+            service,
+            "_signin_with_email",
+            new=AsyncMock(
+                return_value=service._success_result(
+                    {
+                        "authorize_url": "https://auth.openai.com/api/accounts/authorize?client_id=app_X8zY6vW2pQ9tR3dE7nK1jL5gH"
+                    }
+                )
+            ),
+        ), patch.object(
+            service,
+            "_authorize_and_redirect",
+            new=AsyncMock(return_value=service._success_result({"final_url": "https://chatgpt.com/a/callback-complete"})),
+        ), patch.object(
+            service,
+            "_execute_callback",
+            new=AsyncMock(return_value=service._success_result({})),
+        ), patch.object(
+            service,
+            "_collect_register_session_tokens",
+            new=AsyncMock(
+                return_value={
+                    "access_token": "at_session",
+                    "session_token": "st_session",
+                    "account_id": "acc_session",
+                }
+            ),
+        ), patch.object(
+            service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(return_value={"access_token": "at_independent"}),
+            create=True,
+        ):
+            result = await service.register(identifier="acc_123")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "refresh_token_missing_after_oauth")
+
+    async def test_register_strong_clone_uses_independent_oauth_refresh_token(self):
+        service = self.ChatGPTService()
+
+        with self._register_env(), patch.object(
+            service,
+            "_resolve_register_proxy",
+            new=AsyncMock(return_value=""),
+        ), patch.object(
+            service,
+            "_visit_homepage",
+            new=AsyncMock(return_value=service._success_result({})),
+        ), patch.object(
+            service,
+            "_get_csrf_token",
+            new=AsyncMock(return_value=service._success_result({"csrf_token": "csrf"})),
+        ), patch.object(
+            service,
+            "_prepare_identity",
+            new=lambda ctx: service._success_result(
+                {
+                    **(ctx or {}),
+                    "register_input": {
+                        **dict((ctx or {}).get("register_input") or {}),
+                        "fixed_email": "user@example.com",
+                        "fixed_password": "pw",
+                    },
+                }
+            ),
+        ), patch.object(
+            service,
+            "_signin_with_email",
+            new=AsyncMock(
+                return_value=service._success_result(
+                    {
+                        "authorize_url": "https://auth.openai.com/api/accounts/authorize?client_id=app_X8zY6vW2pQ9tR3dE7nK1jL5gH"
+                    }
+                )
+            ),
+        ), patch.object(
+            service,
+            "_authorize_and_redirect",
+            new=AsyncMock(return_value=service._success_result({"final_url": "https://chatgpt.com/a/callback-complete"})),
+        ), patch.object(
+            service,
+            "_execute_callback",
+            new=AsyncMock(return_value=service._success_result({})),
+        ), patch.object(
+            service,
+            "_collect_register_session_tokens",
+            new=AsyncMock(
+                return_value={
+                    "access_token": "at_session",
+                    "refresh_token": "rt_session",
+                    "session_token": "st_session",
+                    "account_id": "acc_session",
+                }
+            ),
+        ), patch.object(
+            service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(
+                return_value={
+                    "access_token": "at_independent",
+                    "refresh_token": "rt_independent",
+                    "id_token": "id_independent",
+                }
+            ),
+            create=True,
+        ):
+            result = await service.register(identifier="acc_123")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["refresh_token"], "rt_independent")
+
     async def test_register_then_get_members_uses_returned_identifier_without_relogin(self):
         service = self.ChatGPTService()
 
@@ -1320,6 +1494,10 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             service,
             "_authorize_and_redirect",
             new=AsyncMock(return_value=service._success_result({"final_url": "https://chatgpt.com/a/callback-complete"})),
+        ), patch.object(
+            service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(return_value={"refresh_token": "rt_independent", "access_token": "at_independent"}),
         ):
             reg = await service.register(identifier="acc_123")
 
@@ -1448,6 +1626,10 @@ class ChatGPTRegisterContractTests(unittest.IsolatedAsyncioTestCase):
             service,
             "_collect_register_session_tokens",
             new=AsyncMock(side_effect=_capture_tokens),
+        ), patch.object(
+            service,
+            "_fetch_independent_oauth_tokens_after_register",
+            new=AsyncMock(return_value={"refresh_token": "rt_independent", "access_token": "at_independent"}),
         ):
             result = await service.register(identifier="acc_123")
 

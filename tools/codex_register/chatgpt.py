@@ -4,14 +4,17 @@ ChatGPT API 服务
 """
 import asyncio
 import base64
+import hashlib
 import importlib
 import json
 import logging
 import os
 import random
+import secrets
 import urllib.parse
+import uuid
 from urllib.parse import urlparse
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from curl_cffi.requests import AsyncSession
 from sqlalchemy.ext.asyncio import AsyncSession as DBAsyncSession
 try:
@@ -26,6 +29,10 @@ class ChatGPTService:
     """ChatGPT API 服务类"""
 
     BASE_URL = "https://chatgpt.com/backend-api"
+    OPENAI_AUTH_BASE = "https://auth.openai.com"
+    GPT_TEAM_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+    GPT_TEAM_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
+    GPT_TEAM_OAUTH_SCOPE = "openid profile email offline_access"
 
     # 重试配置
     MAX_RETRIES = 3
@@ -261,18 +268,42 @@ class ChatGPTService:
         headers: Dict[str, str],
         json_data: Optional[Dict[str, Any]] = None,
         form_data: Optional[Dict[str, Any]] = None,
+        allow_redirects: Optional[bool] = None,
     ):
         """在给定会话上发送 HTTP 请求"""
+        request_kwargs: Dict[str, Any] = {"headers": headers}
+        if allow_redirects is not None:
+            request_kwargs["allow_redirects"] = allow_redirects
+
         if method == "GET":
-            return await session.get(url, headers=headers)
+            try:
+                return await session.get(url, **request_kwargs)
+            except TypeError:
+                request_kwargs.pop("allow_redirects", None)
+                return await session.get(url, **request_kwargs)
+
         if method == "POST":
             if form_data is not None:
-                return await session.post(url, headers=headers, data=form_data)
-            return await session.post(url, headers=headers, json=json_data)
+                request_kwargs["data"] = form_data
+            else:
+                request_kwargs["json"] = json_data
+            try:
+                return await session.post(url, **request_kwargs)
+            except TypeError:
+                request_kwargs.pop("allow_redirects", None)
+                return await session.post(url, **request_kwargs)
+
         if method == "DELETE":
             if form_data is not None:
-                return await session.delete(url, headers=headers, data=form_data)
-            return await session.delete(url, headers=headers, json=json_data)
+                request_kwargs["data"] = form_data
+            else:
+                request_kwargs["json"] = json_data
+            try:
+                return await session.delete(url, **request_kwargs)
+            except TypeError:
+                request_kwargs.pop("allow_redirects", None)
+                return await session.delete(url, **request_kwargs)
+
         raise ValueError(f"不支持的 HTTP 方法: {method}")
 
     async def _make_special_session_request(
@@ -284,6 +315,7 @@ class ChatGPTService:
         session: AsyncSession,
         identifier: str,
         form_data: Optional[Dict[str, Any]] = None,
+        allow_redirects: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """特殊注册步骤：强制使用传入会话"""
         base_headers = {
@@ -311,6 +343,7 @@ class ChatGPTService:
                     headers,
                     json_data,
                     form_data=form_data,
+                    allow_redirects=allow_redirects,
                 )
                 status_code = response.status_code
 
@@ -666,6 +699,7 @@ class ChatGPTService:
         session: Optional[AsyncSession] = None,
         proxy: Optional[str] = None,
         form_data: Optional[Dict[str, Any]] = None,
+        allow_redirects: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """注册流程请求分发器。special_session_step 会强制同一会话执行。"""
         if not special_session_step:
@@ -692,6 +726,7 @@ class ChatGPTService:
             active_session,
             identifier,
             form_data=form_data,
+            allow_redirects=allow_redirects,
         )
         enriched = dict(result)
         enriched.setdefault("session", active_session)
@@ -1356,6 +1391,613 @@ class ChatGPTService:
             payload["id_token"] = id_token
         return payload
 
+    def _generate_pkce(self) -> Tuple[str, str]:
+        code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b"=").decode("ascii")
+        digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+        code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+        return code_verifier, code_challenge
+
+    def _generate_datadog_trace_headers(self) -> Dict[str, str]:
+        trace_id = str(random.getrandbits(64))
+        parent_id = str(random.getrandbits(64))
+        trace_hex = format(int(trace_id), "016x")
+        parent_hex = format(int(parent_id), "016x")
+        return {
+            "traceparent": f"00-0000000000000000{trace_hex}-{parent_hex}-01",
+            "tracestate": "dd=s:1;o:rum",
+            "x-datadog-origin": "rum",
+            "x-datadog-parent-id": parent_id,
+            "x-datadog-sampling-priority": "1",
+            "x-datadog-trace-id": trace_id,
+        }
+
+    async def _request_sentinel_token(
+        self,
+        *,
+        session: AsyncSession,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str],
+        device_id: str,
+        flow: str,
+    ) -> str:
+        headers = self._build_sentinel_headers(extra_headers=self._generate_datadog_trace_headers())
+        body = {"p": "", "id": device_id, "flow": flow}
+
+        result = await self._make_register_request(
+            "POST",
+            "https://sentinel.openai.com/backend-api/sentinel/req",
+            headers,
+            json_data=body,
+            db_session=db_session,
+            identifier=identifier,
+            special_session_step=True,
+            session=session,
+            proxy=proxy,
+        )
+        if not result.get("success"):
+            return ""
+
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        challenge_token = str(data.get("token") or "").strip()
+        if not challenge_token:
+            return ""
+
+        return json.dumps(
+            {
+                "p": "",
+                "t": "",
+                "c": challenge_token,
+                "id": device_id,
+                "flow": flow,
+            }
+        )
+
+    def _oauth_extract_code_from_url(self, raw_url: str) -> str:
+        parsed_url = str(raw_url or "").strip()
+        if not parsed_url:
+            return ""
+
+        try:
+            parsed = urlparse(parsed_url)
+            query_map = urllib.parse.parse_qs(str(parsed.query or ""))
+            code = str((query_map.get("code") or [""])[0] or "").strip()
+            if code:
+                return code
+
+            fragment_map = urllib.parse.parse_qs(str(parsed.fragment or ""))
+            return str((fragment_map.get("code") or [""])[0] or "").strip()
+        except Exception:
+            return ""
+
+    async def _oauth_follow_and_extract_code(
+        self,
+        *,
+        session: AsyncSession,
+        url: str,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str],
+        max_depth: int = 10,
+    ) -> str:
+        current_url = str(url or "").strip()
+        if not current_url:
+            return ""
+
+        visited_urls = set()
+
+        for _ in range(max(1, max_depth)):
+            normalized_url = current_url
+            if normalized_url.startswith("/"):
+                normalized_url = urllib.parse.urljoin(f"{self.OPENAI_AUTH_BASE}/", normalized_url)
+
+            code = self._oauth_extract_code_from_url(normalized_url)
+            if code:
+                return code
+
+            if not normalized_url or normalized_url in visited_urls:
+                break
+            visited_urls.add(normalized_url)
+
+            follow_result = await self._make_register_request(
+                "GET",
+                normalized_url,
+                self._build_browser_base_headers(
+                    {
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Upgrade-Insecure-Requests": "1",
+                    },
+                    origin=self.OPENAI_AUTH_BASE,
+                    referer=normalized_url,
+                ),
+                db_session=db_session,
+                identifier=identifier,
+                special_session_step=True,
+                session=session,
+                proxy=proxy,
+                allow_redirects=False,
+            )
+            if not follow_result.get("success"):
+                break
+
+            follow_data = follow_result.get("data") if isinstance(follow_result.get("data"), dict) else {}
+            next_url = str(
+                follow_data.get("continue_url")
+                or follow_data.get("redirect_url")
+                or follow_data.get("final_url")
+                or follow_data.get("url")
+                or ""
+            ).strip()
+
+            if not next_url:
+                break
+            current_url = next_url
+
+        return ""
+
+    async def _oauth_resolve_code_via_workspace_org(
+        self,
+        *,
+        session: AsyncSession,
+        auth_session_payload: Dict[str, Any],
+        consent_url: str,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str],
+        device_id: str,
+    ) -> str:
+        workspaces = auth_session_payload.get("workspaces") if isinstance(auth_session_payload, dict) else []
+        workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else {}
+        workspace_id = str((workspace or {}).get("id") or "").strip() if isinstance(workspace, dict) else ""
+        if not workspace_id:
+            return ""
+
+        ws_headers = self._build_auth_headers(
+            extra_headers={
+                "Referer": consent_url or f"{self.OPENAI_AUTH_BASE}/sign-in-with-chatgpt/codex/consent",
+                "oai-device-id": device_id,
+                **self._generate_datadog_trace_headers(),
+            }
+        )
+
+        ws_result = await self._make_register_request(
+            "POST",
+            f"{self.OPENAI_AUTH_BASE}/api/accounts/workspace/select",
+            ws_headers,
+            json_data={"workspace_id": workspace_id},
+            db_session=db_session,
+            identifier=identifier,
+            special_session_step=True,
+            session=session,
+            proxy=proxy,
+            allow_redirects=False,
+        )
+        if not ws_result.get("success"):
+            return ""
+
+        ws_data = ws_result.get("data") if isinstance(ws_result.get("data"), dict) else {}
+        ws_next_url = str(
+            ws_data.get("continue_url")
+            or ws_data.get("redirect_url")
+            or ws_data.get("final_url")
+            or ws_data.get("url")
+            or ""
+        ).strip()
+
+        code = self._oauth_extract_code_from_url(ws_next_url)
+        if code:
+            return code
+
+        if ws_next_url:
+            code = await self._oauth_follow_and_extract_code(
+                session=session,
+                url=ws_next_url,
+                db_session=db_session,
+                identifier=identifier,
+                proxy=proxy,
+            )
+            if code:
+                return code
+
+        data_payload = ws_data.get("data") if isinstance(ws_data.get("data"), dict) else {}
+        orgs = data_payload.get("orgs") if isinstance(data_payload, dict) else []
+        first_org = orgs[0] if isinstance(orgs, list) and orgs and isinstance(orgs[0], dict) else {}
+
+        org_id = str(first_org.get("id") or "").strip()
+        if not org_id:
+            return ""
+
+        project_id = ""
+        projects = first_org.get("projects") if isinstance(first_org, dict) else []
+        if isinstance(projects, list) and projects:
+            first_project = projects[0] if isinstance(projects[0], dict) else {}
+            project_id = str(first_project.get("id") or "").strip()
+
+        org_payload: Dict[str, Any] = {"org_id": org_id}
+        if project_id:
+            org_payload["project_id"] = project_id
+
+        org_headers = self._build_auth_headers(
+            extra_headers={
+                "Referer": ws_next_url or consent_url or f"{self.OPENAI_AUTH_BASE}/organization-selector",
+                "oai-device-id": device_id,
+                **self._generate_datadog_trace_headers(),
+            }
+        )
+
+        org_result = await self._make_register_request(
+            "POST",
+            f"{self.OPENAI_AUTH_BASE}/api/accounts/organization/select",
+            org_headers,
+            json_data=org_payload,
+            db_session=db_session,
+            identifier=identifier,
+            special_session_step=True,
+            session=session,
+            proxy=proxy,
+            allow_redirects=False,
+        )
+        if not org_result.get("success"):
+            return ""
+
+        org_data = org_result.get("data") if isinstance(org_result.get("data"), dict) else {}
+        org_next_url = str(
+            org_data.get("continue_url")
+            or org_data.get("redirect_url")
+            or org_data.get("final_url")
+            or org_data.get("url")
+            or ""
+        ).strip()
+
+        code = self._oauth_extract_code_from_url(org_next_url)
+        if code:
+            return code
+
+        if not org_next_url:
+            return ""
+
+        return await self._oauth_follow_and_extract_code(
+            session=session,
+            url=org_next_url,
+            db_session=db_session,
+            identifier=identifier,
+            proxy=proxy,
+        )
+
+    async def _oauth_exchange_code_for_tokens(
+        self,
+        *,
+        session: AsyncSession,
+        code: str,
+        code_verifier: str,
+        oauth_client_id: str,
+        oauth_redirect_uri: str,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str],
+    ) -> Dict[str, Any]:
+        token_form_data: Dict[str, Any] = {
+            "grant_type": "authorization_code",
+            "code": str(code or "").strip(),
+            "redirect_uri": str(oauth_redirect_uri or self.GPT_TEAM_OAUTH_REDIRECT_URI).strip(),
+            "client_id": str(oauth_client_id or self.GPT_TEAM_OAUTH_CLIENT_ID).strip(),
+        }
+        resolved_code_verifier = str(code_verifier or "").strip()
+        if resolved_code_verifier:
+            token_form_data["code_verifier"] = resolved_code_verifier
+
+        token_result = await self._make_register_request(
+            "POST",
+            f"{self.OPENAI_AUTH_BASE}/oauth/token",
+            {"Content-Type": "application/x-www-form-urlencoded"},
+            db_session=db_session,
+            identifier=identifier,
+            special_session_step=True,
+            session=session,
+            proxy=proxy,
+            form_data=token_form_data,
+        )
+        if not token_result.get("success"):
+            return {}
+
+        token_data = token_result.get("data") if isinstance(token_result.get("data"), dict) else {}
+
+        access_token = str(token_data.get("access_token") or token_data.get("accessToken") or "").strip()
+        refresh_token = str(token_data.get("refresh_token") or token_data.get("refreshToken") or "").strip()
+        id_token = str(token_data.get("id_token") or token_data.get("idToken") or "").strip()
+        expires_at = str(token_data.get("expires_at") or token_data.get("expiresAt") or "").strip()
+
+        account_id = ""
+        if access_token:
+            decoded = self.jwt_parser.decode_token(access_token) or {}
+            auth_payload = decoded.get("https://api.openai.com/auth") if isinstance(decoded, dict) else {}
+            if isinstance(auth_payload, dict):
+                account_id = str(
+                    auth_payload.get("chatgpt_account_id")
+                    or auth_payload.get("organization_id")
+                    or ""
+                ).strip()
+
+        payload: Dict[str, Any] = {}
+        if account_id:
+            payload["account_id"] = account_id
+        if access_token:
+            payload["access_token"] = access_token
+        if refresh_token:
+            payload["refresh_token"] = refresh_token
+        if id_token:
+            payload["id_token"] = id_token
+        if expires_at:
+            payload["expires_at"] = expires_at
+        return payload
+
+    async def _fetch_independent_oauth_tokens_after_register(
+        self,
+        *,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str],
+        email: str,
+        password: str,
+        authorize_client_id: str,
+    ) -> Dict[str, Any]:
+        session = await self._get_session(db_session, identifier, proxy=proxy)
+        device_id = str(uuid.uuid4())
+
+        try:
+            cookies = getattr(session, "cookies", None)
+            if cookies is not None and hasattr(cookies, "set"):
+                cookies.set("oai-did", device_id, domain=".auth.openai.com")
+                cookies.set("oai-did", device_id, domain="auth.openai.com")
+        except Exception:
+            pass
+
+        oauth_client_id = str(authorize_client_id or self.GPT_TEAM_OAUTH_CLIENT_ID).strip()
+        oauth_redirect_uri = self.GPT_TEAM_OAUTH_REDIRECT_URI
+
+        code_verifier, code_challenge = self._generate_pkce()
+        state = secrets.token_urlsafe(32)
+        authorize_url = f"{self.OPENAI_AUTH_BASE}/oauth/authorize?{urllib.parse.urlencode({
+            'response_type': 'code',
+            'client_id': oauth_client_id,
+            'redirect_uri': oauth_redirect_uri,
+            'scope': self.GPT_TEAM_OAUTH_SCOPE,
+            'code_challenge': code_challenge,
+            'code_challenge_method': 'S256',
+            'state': state,
+        })}"
+
+        authorize_result = await self._make_register_request(
+            "GET",
+            authorize_url,
+            self._build_browser_base_headers(
+                {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Upgrade-Insecure-Requests": "1",
+                },
+                origin=self.OPENAI_AUTH_BASE,
+                referer=f"{self.OPENAI_AUTH_BASE}/",
+            ),
+            db_session=db_session,
+            identifier=identifier,
+            special_session_step=True,
+            session=session,
+            proxy=proxy,
+            allow_redirects=True,
+        )
+        if not authorize_result.get("success"):
+            return {}
+
+        continue_headers = self._build_auth_headers(
+            extra_headers={
+                "Referer": f"{self.OPENAI_AUTH_BASE}/log-in",
+                "oai-device-id": device_id,
+                **self._generate_datadog_trace_headers(),
+            }
+        )
+        sentinel_continue = await self._request_sentinel_token(
+            session=session,
+            db_session=db_session,
+            identifier=identifier,
+            proxy=proxy,
+            device_id=device_id,
+            flow="authorize_continue",
+        )
+        if sentinel_continue:
+            continue_headers["openai-sentinel-token"] = sentinel_continue
+
+        continue_result = await self._make_register_request(
+            "POST",
+            f"{self.OPENAI_AUTH_BASE}/api/accounts/authorize/continue",
+            continue_headers,
+            json_data={"username": {"kind": "email", "value": str(email or "").strip()}},
+            db_session=db_session,
+            identifier=identifier,
+            special_session_step=True,
+            session=session,
+            proxy=proxy,
+        )
+        if not continue_result.get("success"):
+            return {}
+
+        password_headers = self._build_auth_headers(
+            extra_headers={
+                "Referer": f"{self.OPENAI_AUTH_BASE}/log-in/password",
+                "oai-device-id": device_id,
+                **self._generate_datadog_trace_headers(),
+            }
+        )
+        sentinel_password = await self._request_sentinel_token(
+            session=session,
+            db_session=db_session,
+            identifier=identifier,
+            proxy=proxy,
+            device_id=device_id,
+            flow="password_verify",
+        )
+        if sentinel_password:
+            password_headers["openai-sentinel-token"] = sentinel_password
+
+        password_result = await self._make_register_request(
+            "POST",
+            f"{self.OPENAI_AUTH_BASE}/api/accounts/password/verify",
+            password_headers,
+            json_data={"password": str(password or "")},
+            db_session=db_session,
+            identifier=identifier,
+            special_session_step=True,
+            session=session,
+            proxy=proxy,
+            allow_redirects=False,
+        )
+        if not password_result.get("success"):
+            return {}
+
+        password_data = password_result.get("data") if isinstance(password_result.get("data"), dict) else {}
+        continue_url = str(
+            password_data.get("continue_url")
+            or password_data.get("redirect_url")
+            or password_data.get("final_url")
+            or password_data.get("url")
+            or ""
+        ).strip()
+        if not continue_url:
+            return {}
+
+        auth_code = self._oauth_extract_code_from_url(continue_url)
+        if not auth_code:
+            auth_code = await self._oauth_follow_and_extract_code(
+                session=session,
+                url=continue_url,
+                db_session=db_session,
+                identifier=identifier,
+                proxy=proxy,
+            )
+
+        auth_session_payload = self._decode_oai_client_auth_session_cookie(session)
+        if not auth_code:
+            auth_code = await self._oauth_resolve_code_via_workspace_org(
+                session=session,
+                auth_session_payload=auth_session_payload,
+                consent_url=continue_url,
+                db_session=db_session,
+                identifier=identifier,
+                proxy=proxy,
+                device_id=device_id,
+            )
+
+        if not auth_code:
+            return {}
+
+        resolved_code_verifier = str(code_verifier or "").strip()
+        if isinstance(auth_session_payload, dict):
+            cookie_code_verifier = str(auth_session_payload.get("code_verifier") or "").strip()
+            if cookie_code_verifier:
+                resolved_code_verifier = cookie_code_verifier
+            if not resolved_code_verifier:
+                workspaces = auth_session_payload.get("workspaces")
+                workspace = workspaces[0] if isinstance(workspaces, list) and workspaces else {}
+                if isinstance(workspace, dict):
+                    workspace_verifier = str(workspace.get("code_verifier") or "").strip()
+                    if workspace_verifier:
+                        resolved_code_verifier = workspace_verifier
+
+        return await self._oauth_exchange_code_for_tokens(
+            session=session,
+            code=auth_code,
+            code_verifier=resolved_code_verifier,
+            oauth_client_id=oauth_client_id,
+            oauth_redirect_uri=oauth_redirect_uri,
+            db_session=db_session,
+            identifier=identifier,
+            proxy=proxy,
+        )
+
+    def _merge_register_payloads(
+        self,
+        *,
+        session_payload: Dict[str, Any],
+        independent_oauth_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        token_keys = {"access_token", "refresh_token", "id_token", "expires_at"}
+        merged: Dict[str, Any] = {}
+
+        for key, value in (session_payload or {}).items():
+            if key in token_keys:
+                continue
+            if value:
+                merged[key] = value
+
+        for token_key in token_keys:
+            token_value = (independent_oauth_payload or {}).get(token_key)
+            if token_value:
+                merged[token_key] = token_value
+
+        for fallback_key in ("access_token", "id_token", "expires_at"):
+            if not merged.get(fallback_key):
+                fallback_value = (session_payload or {}).get(fallback_key)
+                if fallback_value:
+                    merged[fallback_key] = fallback_value
+
+        for key, value in (independent_oauth_payload or {}).items():
+            if key in token_keys:
+                continue
+            if value and key not in merged:
+                merged[key] = value
+
+        return merged
+
+    async def _finalize_register_success(
+        self,
+        *,
+        db_session: Optional[DBAsyncSession],
+        identifier: str,
+        proxy: Optional[str],
+        email: str,
+        password: str,
+        callback_url: str,
+        authorize_client_id: str,
+    ) -> Dict[str, Any]:
+        session_tokens = await self._collect_register_session_tokens(
+            db_session,
+            identifier,
+            proxy,
+            callback_url,
+            authorize_client_id,
+        )
+        independent_oauth_tokens = await self._fetch_independent_oauth_tokens_after_register(
+            db_session=db_session,
+            identifier=identifier,
+            proxy=proxy,
+            email=email,
+            password=password,
+            authorize_client_id=authorize_client_id,
+        )
+
+        independent_refresh_token = str(
+            (independent_oauth_tokens or {}).get("refresh_token")
+            or (independent_oauth_tokens or {}).get("refreshToken")
+            or ""
+        ).strip()
+        if not independent_refresh_token:
+            return self._error_result(
+                502,
+                "independent oauth token exchange missing refresh_token",
+                "refresh_token_missing_after_oauth",
+            )
+
+        merged_tokens = self._merge_register_payloads(
+            session_payload=session_tokens,
+            independent_oauth_payload=independent_oauth_tokens,
+        )
+        return self._success_result(
+            self._build_register_compat_payload(
+                email=email,
+                identifier=identifier,
+                extra=merged_tokens,
+            )
+        )
+
     def _build_register_compat_payload(
         self,
         *,
@@ -1564,58 +2206,28 @@ class ChatGPTService:
 
                 await asyncio.sleep(random.uniform(0.3, 0.5))
                 await self._execute_callback(callback_url, db_session, runtime_identifier, resolved_proxy)
-                session_tokens = await self._collect_register_session_tokens(
-                    db_session,
-                    runtime_identifier,
-                    resolved_proxy,
-                    callback_url,
-                    authorize_client_id,
-                )
-                independent_oauth_tokens = await self._collect_register_session_tokens(
-                    db_session,
-                    runtime_identifier,
-                    resolved_proxy,
-                    "",
-                    authorize_client_id,
-                )
-                merged_tokens = dict(session_tokens)
-                merged_tokens.update({k: v for k, v in independent_oauth_tokens.items() if v})
-
-                return self._success_result(
-                    self._build_register_compat_payload(
-                        email=email,
-                        identifier=runtime_identifier,
-                        extra=merged_tokens,
-                    )
+                return await self._finalize_register_success(
+                    db_session=db_session,
+                    identifier=runtime_identifier,
+                    proxy=resolved_proxy,
+                    email=email,
+                    password=password,
+                    callback_url=callback_url,
+                    authorize_client_id=authorize_client_id,
                 )
 
             elif "callback-complete" in final_path:
                 logger.info(f"[{runtime_identifier}] 回调完成信号已确认，注册短路完成")
 
                 callback_url = final_url
-                session_tokens = await self._collect_register_session_tokens(
-                    db_session,
-                    runtime_identifier,
-                    resolved_proxy,
-                    callback_url,
-                    authorize_client_id,
-                )
-                independent_oauth_tokens = await self._collect_register_session_tokens(
-                    db_session,
-                    runtime_identifier,
-                    resolved_proxy,
-                    "",
-                    authorize_client_id,
-                )
-                merged_tokens = dict(session_tokens)
-                merged_tokens.update({k: v for k, v in independent_oauth_tokens.items() if v})
-
-                return self._success_result(
-                    self._build_register_compat_payload(
-                        email=email,
-                        identifier=runtime_identifier,
-                        extra=merged_tokens,
-                    )
+                return await self._finalize_register_success(
+                    db_session=db_session,
+                    identifier=runtime_identifier,
+                    proxy=resolved_proxy,
+                    email=email,
+                    password=password,
+                    callback_url=callback_url,
+                    authorize_client_id=authorize_client_id,
                 )
             else:
                 logger.warning(f"[{runtime_identifier}] 未知路径: {final_url}，执行完整流程")
@@ -1664,30 +2276,14 @@ class ChatGPTService:
             # 步骤 8: 执行回调
             await asyncio.sleep(random.uniform(0.2, 0.5))
             await self._execute_callback(callback_url, db_session, runtime_identifier, resolved_proxy)
-            session_tokens = await self._collect_register_session_tokens(
-                db_session,
-                runtime_identifier,
-                resolved_proxy,
-                callback_url,
-                authorize_client_id,
-            )
-            independent_oauth_tokens = await self._collect_register_session_tokens(
-                db_session,
-                runtime_identifier,
-                resolved_proxy,
-                "",
-                authorize_client_id,
-            )
-            merged_tokens = dict(session_tokens)
-            merged_tokens.update({k: v for k, v in independent_oauth_tokens.items() if v})
-
-            logger.info(f"[{runtime_identifier}] 注册流程完成")
-            return self._success_result(
-                self._build_register_compat_payload(
-                    email=email,
-                    identifier=runtime_identifier,
-                    extra=merged_tokens,
-                )
+            return await self._finalize_register_success(
+                db_session=db_session,
+                identifier=runtime_identifier,
+                proxy=resolved_proxy,
+                email=email,
+                password=password,
+                callback_url=callback_url,
+                authorize_client_id=authorize_client_id,
             )
 
         except Exception as exc:
