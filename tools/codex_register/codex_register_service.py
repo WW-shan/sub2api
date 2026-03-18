@@ -647,7 +647,6 @@ class InMemoryStateStore:
 
 
 def _build_state_store_from_env() -> Any:
-    del os
     return InMemoryStateStore()
 
 

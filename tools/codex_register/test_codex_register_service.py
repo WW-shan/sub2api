@@ -217,6 +217,17 @@ class MinimalServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accounts["data"], [])
 
 
+class StateStoreEnvContractRedTests(unittest.TestCase):
+    def setUp(self):
+        if MODULE_NAME in sys.modules:
+            del sys.modules[MODULE_NAME]
+        self.module = importlib.import_module(MODULE_NAME)
+
+    def test_build_state_store_from_env_returns_in_memory_store(self):
+        store = self.module._build_state_store_from_env()
+        self.assertIsInstance(store, self.module.InMemoryStateStore)
+
+
 class FourSegmentParserContractRedTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         if MODULE_NAME in sys.modules:
