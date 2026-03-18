@@ -451,7 +451,6 @@
         </div>
       </section>
 
-
       <section
         class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20"
       >
@@ -649,25 +648,26 @@ const props = defineProps({
 
 const { t } = useI18n();
 
-const status = ref<CodexStatus | null>(null);
-const loading = ref(false);
-const error = ref<string | null>(null);
-const statusError = ref<string | null>(null);
-const logsError = ref<string | null>(null);
-const accountsError = ref<string | null>(null);
-const logs = ref<CodexLogEntry[]>([]);
-const accounts = ref<CodexRegisterAccount[]>([]);
-const refreshing = ref(false);
-let timer: number | undefined;
-const POLL_INTERVAL = 10000;
-const selectedLogLevel = ref<"all" | "info" | "warn" | "error">("all");
-const selectedLogLimit = ref(200);
-const resumeOnly = ref(false);
-const showRawSnapshot = ref(false);
-const accountSearchKeyword = ref("");
-const subscribeGateTokenVisible = ref(false);
-const subscribeGateCopyHint = ref("");
+const visibleLogs = computed(() => {
+  const level = selectedLogLevel.value;
+  const onlyResume = resumeOnly.value;
 
+  return logs.value.filter((log, index) => {
+    if (index >= selectedLogLimit.value) {
+      return false;
+    }
+
+    if (level !== "all" && log.level !== level) {
+      return false;
+    }
+
+    if (onlyResume && !String(log.message || "").includes("resume")) {
+      return false;
+    }
+
+    return true;
+  });
+});
 type PhaseTone = "neutral" | "running" | "waiting" | "failed";
 type PrimaryAction = "start" | "resume" | "inProgress";
 type SecretField = "access_token" | "refresh_token";
@@ -922,6 +922,14 @@ const workflowFailureDetail = computed(() => {
   }
 
   return status.value?.last_error || "";
+});
+
+const resumeDiagnosticLabel = computed(() => {
+  if (!status.value) {
+    return combinedError.value ? t("common.unknown") : t("common.loading");
+  }
+
+  return t("admin.codexRegister.debug.snapshotDescription");
 });
 
 const isWaitingManual = computed(() =>
