@@ -4,7 +4,7 @@
 get_tokens.py
 =============
 简化版：只做注册 + 获取 access_token
-输出格式（results.txt）：email|password|access_token
+输出格式（results.txt）：email|password|access_token|refresh_token
 配置方式：固定常量（无 config.yaml）
 """
 
@@ -42,7 +42,7 @@ MAIL_WORKER_TOKEN: str = "7BwPEFa1NGMTjUVpdf1w"
 MAIL_DOMAIN: str = "wwcloud.me"
 MAIL_POLL_SECONDS: int = 3
 MAIL_POLL_MAX_ATTEMPTS: int = 40
-RESULTS_FILE: str = "results.txt"
+RESULTS_FILE: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.txt")
 
 # OAuth 常量
 OPENAI_AUTH_BASE = "https://auth.openai.com"
@@ -567,9 +567,9 @@ def _follow_redirects_for_code(
     return None
 
 
-def oauth_login(email: str, password: str, proxy: str = "") -> Optional[str]:
+def oauth_login(email: str, password: str, proxy: str = "") -> Optional[Tuple[str, str]]:
     """
-    HTTP OAuth 登录，返回 access_token 字符串，失败返回 None。
+    HTTP OAuth 登录，返回 (access_token, refresh_token)，失败返回 None。
     流程：A.获取login_session → B.提交邮箱 → C.提交密码 → D.OTP(可选) → E.获取code → F.换token
     """
     session = create_session(proxy=proxy)
@@ -933,9 +933,10 @@ def oauth_login(email: str, password: str, proxy: str = "") -> Optional[str]:
         if resp_tok.status_code == 200:
             data = resp_tok.json()
             access_token = str(data.get("access_token") or "")
-            if access_token:
-                logger.info("[登录] access_token 获取成功")
-                return access_token
+            refresh_token = str(data.get("refresh_token") or "")
+            if access_token and refresh_token:
+                logger.info("[登录] access_token/refresh_token 获取成功")
+                return access_token, refresh_token
         logger.warning("[登录] token 交换失败: HTTP %s", resp_tok.status_code)
     except Exception as e:
         logger.warning("[登录] token 交换异常: %s", e)
@@ -949,11 +950,11 @@ def oauth_login(email: str, password: str, proxy: str = "") -> Optional[str]:
 _save_lock = __import__("threading").Lock()
 
 
-def save_result(email: str, password: str, access_token: str) -> None:
+def save_result(email: str, password: str, access_token: str, refresh_token: str) -> None:
     """追加保存一行到 results.txt"""
     with _save_lock:
         with open(RESULTS_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{email}|{password}|{access_token}\n")
+            f.write(f"{email}|{password}|{access_token}|{refresh_token}\n")
     logger.info("已保存: %s → %s", email, RESULTS_FILE)
 
 
@@ -985,12 +986,15 @@ def process_one(proxy: str = "") -> bool:
     time.sleep(3)
 
     # 3. 登录获取 access_token（最多重试 3 次）
-    access_token: Optional[str] = None
+    access_token: str = ""
+    refresh_token: str = ""
+    token_pair: Optional[Tuple[str, str]] = None
     for attempt in range(1, 4):
-        access_token = oauth_login(
+        token_pair = oauth_login(
             email=email, password=password, proxy=proxy
         )
-        if access_token:
+        if token_pair:
+            access_token, refresh_token = token_pair
             break
         if attempt < 3:
             logger.warning("登录第 %d 次失败，15s 后重试...", attempt)
@@ -998,11 +1002,11 @@ def process_one(proxy: str = "") -> bool:
 
     if not access_token:
         logger.warning("获取 access_token 失败（注册已成功）: %s", email)
-        save_result(email, password, "")
+        save_result(email, password, "", "")
         return False
 
     # 4. 保存
-    save_result(email, password, access_token)
+    save_result(email, password, access_token, refresh_token)
     logger.info("完成: %s", email)
     return True
 
