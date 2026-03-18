@@ -36,7 +36,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ============================================================
 # 固定常量配置（无 config.yaml）
 # ============================================================
-TOTAL_ACCOUNTS: int = 5
+TOTAL_ACCOUNTS: int = 1
 MAIL_WORKER_BASE_URL: str = "https://openai-register.wwshan.workers.dev"
 MAIL_WORKER_TOKEN: str = "7BwPEFa1NGMTjUVpdf1w"
 MAIL_DOMAIN: str = "wwcloud.me"

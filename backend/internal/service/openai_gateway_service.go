@@ -4737,11 +4737,3 @@ func sanitizeOpenAIUndefinedPlaceholderFields(reqBody map[string]any) bool {
 	}
 	return modified
 }
-
-func optionalTrimmedStringPtr(raw string) *string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil
-	}
-	return &trimmed
-}
