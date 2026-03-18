@@ -648,6 +648,25 @@ const props = defineProps({
 
 const { t } = useI18n();
 
+const status = ref<CodexStatus | null>(null);
+const loading = ref(false);
+const error = ref<string | null>(null);
+const statusError = ref<string | null>(null);
+const logsError = ref<string | null>(null);
+const accountsError = ref<string | null>(null);
+const logs = ref<CodexLogEntry[]>([]);
+const accounts = ref<CodexRegisterAccount[]>([]);
+const refreshing = ref(false);
+let timer: number | undefined;
+const POLL_INTERVAL = 10000;
+const selectedLogLevel = ref<"all" | "info" | "warn" | "error">("all");
+const selectedLogLimit = ref(200);
+const resumeOnly = ref(false);
+const showRawSnapshot = ref(false);
+const accountSearchKeyword = ref("");
+const subscribeGateTokenVisible = ref(false);
+const subscribeGateCopyHint = ref("");
+
 const visibleLogs = computed(() => {
   const level = selectedLogLevel.value;
   const onlyResume = resumeOnly.value;
@@ -668,6 +687,7 @@ const visibleLogs = computed(() => {
     return true;
   });
 });
+
 type PhaseTone = "neutral" | "running" | "waiting" | "failed";
 type PrimaryAction = "start" | "resume" | "inProgress";
 type SecretField = "access_token" | "refresh_token";
