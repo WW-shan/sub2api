@@ -156,6 +156,79 @@
       </section>
 
       <section
+        v-if="showSubscribeGate"
+        class="rounded-2xl border border-primary-200 bg-primary-50/70 p-5 dark:border-primary-900/60 dark:bg-primary-900/10"
+        data-testid="codex-subscribe-gate"
+      >
+        <h3 class="text-sm font-semibold text-primary-800 dark:text-primary-300">
+          {{ t("admin.codexRegister.subscribeGate.title") }}
+        </h3>
+        <p class="mt-2 text-sm text-primary-700 dark:text-primary-200">
+          {{ t("admin.codexRegister.subscribeGate.email") }}:
+          {{ subscribeGateEmail || t("common.unknown") }}
+        </p>
+
+        <div v-if="subscribeGateHasTokenControls" class="mt-3" data-testid="codex-subscribe-gate-token">
+          <p class="text-sm text-primary-800 dark:text-primary-100 break-all">
+            {{ subscribeGateTokenDisplay }}
+          </p>
+          <div
+            class="mt-3 flex flex-wrap items-center gap-2"
+            data-testid="codex-subscribe-gate-controls"
+          >
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              @click="subscribeGateTokenVisible = !subscribeGateTokenVisible"
+            >
+              {{
+                subscribeGateTokenVisible
+                  ? t("admin.codexRegister.actions.hide")
+                  : t("admin.codexRegister.actions.show")
+              }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              data-testid="codex-subscribe-gate-copy"
+              @click="copySubscribeGateToken"
+            >
+              {{ t("admin.codexRegister.actions.copy") }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              @click="resumeWorkflow"
+            >
+              {{ t("admin.codexRegister.actions.resume") }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              @click="toggleEnabled(false)"
+            >
+              {{ t("admin.codexRegister.actions.stop") }}
+            </button>
+          </div>
+          <p
+            v-if="subscribeGateCopyHint"
+            class="mt-2 text-xs text-primary-700 dark:text-primary-300"
+            data-testid="codex-subscribe-gate-copy-hint"
+          >
+            {{ subscribeGateCopyHint }}
+          </p>
+        </div>
+
+        <p
+          v-else
+          class="mt-3 text-xs text-primary-700 dark:text-primary-300"
+          data-testid="codex-subscribe-gate-diagnostic"
+        >
+          {{ subscribeGateDiagnosticHint }}
+        </p>
+      </section>
+
+      <section
         class="rounded-2xl border border-slate-200 bg-white/70 p-6 dark:border-dark-700 dark:bg-dark-900/40"
         data-testid="codex-debug-snapshot"
         data-section-order="debug"
@@ -378,166 +451,12 @@
         </div>
       </section>
 
-      <section
-        class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20"
-        data-section-order="status"
-      >
-        <div
-          class="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]"
-        >
-          <section
-            class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20"
-          >
-            <div
-              class="border-b border-gray-200 px-6 py-4 dark:border-dark-700"
-            >
-              <h2 class="text-base font-semibold text-gray-900 dark:text-white">
-                {{ t("admin.codexRegister.panels.statusTitle") }}
-              </h2>
-              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                {{ t("admin.codexRegister.panels.statusDescription") }}
-              </p>
-            </div>
-            <div class="space-y-4 p-6">
-              <div class="grid gap-3 sm:grid-cols-2">
-                <div
-                  class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40"
-                >
-                  <p
-                    class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-                  >
-                    {{ t("admin.codexRegister.panels.serviceStatus") }}
-                  </p>
-                  <p
-                    class="mt-2 text-sm font-medium text-gray-900 dark:text-white"
-                  >
-                    {{ serviceStatusLabel }}
-                  </p>
-                </div>
-                <div
-                  class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40"
-                >
-                  <p
-                    class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-                  >
-                    {{ t("admin.codexRegister.panels.proxyConfig") }}
-                  </p>
-                  <p
-                    class="mt-2 text-sm font-medium text-gray-900 dark:text-white"
-                  >
-                    {{ proxyDetailLabel }}
-                  </p>
-                </div>
-                <div
-                  class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40"
-                >
-                  <p
-                    class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-                  >
-                    {{ t("admin.codexRegister.panels.phaseTitle") }}
-                  </p>
-                  <p
-                    class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all"
-                  >
-                    {{ codexPhaseLabel }}
-                  </p>
-                </div>
-                <div
-                  class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40"
-                >
-                  <p
-                    class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-                  >
-                    {{ t("admin.codexRegister.panels.waitingReasonTitle") }}
-                  </p>
-                  <p
-                    class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all"
-                  >
-                    {{ waitingReasonLabel }}
-                  </p>
-                </div>
-                <div
-                  class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40"
-                >
-                  <p
-                    class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-                  >
-                    {{ t("admin.codexRegister.panels.lastSuccessTitle") }}
-                  </p>
-                  <p
-                    class="mt-2 text-sm font-medium text-gray-900 dark:text-white"
-                  >
-                    {{ lastSuccessLabel }}
-                  </p>
-                </div>
-                <div
-                  class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40"
-                >
-                  <p
-                    class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-                  >
-                    {{ t("admin.codexRegister.panels.sleepRangeTitle") }}
-                  </p>
-                  <p
-                    class="mt-2 text-sm font-medium text-gray-900 dark:text-white"
-                  >
-                    {{ sleepRangeDetailLabel }}
-                  </p>
-                </div>
-              </div>
-
-              <div
-                :class="[
-                  'rounded-xl border p-4',
-                  status?.last_error
-                    ? 'border-red-200 bg-red-50 dark:border-red-900/60 dark:bg-red-900/20'
-                    : 'border-emerald-200 bg-emerald-50 dark:border-emerald-900/60 dark:bg-emerald-900/10',
-                ]"
-              >
-                <div class="flex items-center justify-between gap-3">
-                  <h3
-                    :class="[
-                      'text-sm font-semibold',
-                      status?.last_error
-                        ? 'text-red-700 dark:text-red-300'
-                        : 'text-emerald-700 dark:text-emerald-300',
-                    ]"
-                  >
-                    {{ t("admin.codexRegister.panels.errorTitle") }}
-                  </h3>
-                  <span
-                    :class="[
-                      'text-xs',
-                      status?.last_error
-                        ? 'text-red-500 dark:text-red-400'
-                        : 'text-emerald-500 dark:text-emerald-400',
-                    ]"
-                  >
-                    {{ errorStateLabel }}
-                  </span>
-                </div>
-                <pre
-                  v-if="status?.last_error"
-                  class="mt-3 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border border-red-200/80 bg-white/70 p-3 text-[11px] leading-snug text-red-800 dark:border-red-900/60 dark:bg-dark-950/60 dark:text-red-200"
-                  >{{ status.last_error }}</pre
-                >
-                <p
-                  v-else
-                  class="mt-3 text-sm text-emerald-700 dark:text-emerald-300"
-                >
-                  {{ t("admin.codexRegister.panels.noErrors") }}
-                </p>
-              </div>
-            </div>
-          </section>
-        </div>
-      </section>
 
       <section
         class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20"
       >
         <div
-          class="flex items-center justify-between gap-3 border-b border-gray-200 px-6 py-4 dark:border-dark-700"
+          class="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-6 py-4 dark:border-dark-700"
         >
           <div>
             <h2 class="text-base font-semibold text-gray-900 dark:text-white">
@@ -547,20 +466,29 @@
               {{ t("admin.codexRegister.accounts.description") }}
             </p>
           </div>
-          <span
-            class="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300"
-          >
-            {{
-              t("admin.codexRegister.panels.eventCount", {
-                count: accounts.length,
-              })
-            }}
-          </span>
+          <div class="flex items-center gap-2">
+            <input
+              v-model.trim="accountSearchKeyword"
+              type="text"
+              class="input input-sm w-52"
+              :placeholder="t('admin.codexRegister.accounts.searchPlaceholder')"
+              data-testid="codex-accounts-search"
+            />
+            <span
+              class="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300"
+            >
+              {{
+                t("admin.codexRegister.panels.eventCount", {
+                  count: filteredAccounts.length,
+                })
+              }}
+            </span>
+          </div>
         </div>
 
         <div class="p-6">
           <div
-            v-if="accounts.length === 0"
+            v-if="filteredAccounts.length === 0"
             class="rounded-xl border border-dashed border-gray-200 px-6 py-10 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-gray-400"
           >
             {{ t("admin.codexRegister.accounts.empty") }}
@@ -568,6 +496,7 @@
           <div
             v-else
             class="overflow-auto rounded-xl border border-gray-200 bg-white dark:border-dark-700 dark:bg-dark-900/40"
+            data-testid="codex-accounts-scroll"
           >
             <table
               class="min-w-full divide-y divide-gray-200 text-xs dark:divide-dark-700"
@@ -607,7 +536,7 @@
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-100 dark:divide-dark-800">
-                <tr v-for="account in accounts" :key="account.id">
+                <tr v-for="account in filteredAccounts" :key="account.id">
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                     {{ account.email }}
                   </td>
@@ -735,6 +664,9 @@ const selectedLogLevel = ref<"all" | "info" | "warn" | "error">("all");
 const selectedLogLimit = ref(200);
 const resumeOnly = ref(false);
 const showRawSnapshot = ref(false);
+const accountSearchKeyword = ref("");
+const subscribeGateTokenVisible = ref(false);
+const subscribeGateCopyHint = ref("");
 
 type PhaseTone = "neutral" | "running" | "waiting" | "failed";
 type PrimaryAction = "start" | "resume" | "inProgress";
@@ -1007,6 +939,71 @@ const waitingTodoSteps = computed(() => {
   ];
 });
 
+const showSubscribeGate = computed(() => {
+  const phase = status.value?.job_phase || "";
+  const manualAction = status.value?.manual_gate?.action || "";
+  const hasResumeEmail = Boolean(status.value?.resume_context?.email);
+  return (
+    phase === "waiting_manual:subscribe_then_resume" ||
+    manualAction === "subscribe_then_resume" ||
+    (phase.startsWith("waiting_manual:") && hasResumeEmail)
+  );
+});
+
+const subscribeGateEmail = computed(
+  () => status.value?.resume_context?.email || "",
+);
+const subscribeGateRawToken = computed(
+  () =>
+    status.value?.resume_context?.access_token_raw ||
+    status.value?.manual_gate?.token ||
+    "",
+);
+const subscribeGateHasTokenControls = computed(() =>
+  Boolean(subscribeGateEmail.value && subscribeGateRawToken.value),
+);
+const subscribeGateMissingContextHint = computed(() => {
+  const translated = t(
+    "admin.codexRegister.subscribeGate.missingResumeContextHint",
+  );
+  if (
+    translated === "admin.codexRegister.subscribeGate.missingResumeContextHint"
+  ) {
+    return "Missing resume_context.email or resume_context.access_token_raw.";
+  }
+  return translated;
+});
+const subscribeGateDiagnosticHint = computed(() => {
+  const backendHint = status.value?.resume_hint;
+  if (backendHint) {
+    return backendHint;
+  }
+  return subscribeGateMissingContextHint.value;
+});
+function maskSubscribeGateToken(value: string): string {
+  if (!value) return "-";
+  if (value.length <= 11) return "******";
+  return `${value.slice(0, 7)}...${value.slice(-4)}`;
+}
+
+const subscribeGateTokenDisplay = computed(() =>
+  subscribeGateTokenVisible.value
+    ? subscribeGateRawToken.value
+    : maskSubscribeGateToken(subscribeGateRawToken.value),
+);
+
+const filteredAccounts = computed(() => {
+  const keyword = accountSearchKeyword.value.trim().toLowerCase();
+  if (!keyword) {
+    return accounts.value;
+  }
+  return accounts.value.filter((account) =>
+    String(account.email || "")
+      .toLowerCase()
+      .includes(keyword),
+  );
+});
+
 const canStart = computed(() => Boolean(status.value?.can_start));
 const canResume = computed(() => Boolean(status.value?.can_resume));
 const canAbandon = computed(() => Boolean(status.value?.can_abandon));
@@ -1218,6 +1215,20 @@ async function fetchAccounts() {
 async function copyText(value: string) {
   if (!value) return;
   await navigator.clipboard.writeText(value);
+}
+
+async function copySubscribeGateToken() {
+  subscribeGateCopyHint.value = "";
+  const token = subscribeGateRawToken.value;
+  if (!token) {
+    subscribeGateCopyHint.value = subscribeGateMissingContextHint.value;
+    return;
+  }
+  try {
+    await copyText(token);
+  } catch (errorValue) {
+    subscribeGateCopyHint.value = getErrorMessage(errorValue);
+  }
 }
 
 async function refreshAll() {

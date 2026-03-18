@@ -99,34 +99,45 @@ class MinimalServiceContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_enable_is_non_blocking_and_enters_running_get_tokens(self):
         fake = FakeProcess(block=True)
 
-        with patch.object(self.module.subprocess, "Popen", return_value=fake):
-            result = await self.service.handle_path("/enable")
+        with patch.object(
+            self.service,
+            "_extract_latest_valid_results_record",
+            return_value={"email": "mother@example.com", "password": "p", "access_token": "t", "line_end_offset": 1},
+        ):
+            with patch.object(self.module.subprocess, "Popen", return_value=fake):
+                result = await self.service.handle_path("/enable")
 
-        self.assertTrue(result["success"])
-        status = (await self.service.handle_path("/status"))["data"]
-        self.assertEqual(status["job_phase"], "running:get_tokens")
-        self.assertFalse(status["can_start"])
-        self.assertFalse(status["can_resume"])
-        self.assertTrue(status["can_abandon"])
+            self.assertTrue(result["success"])
+            status = (await self.service.handle_path("/status"))["data"]
+            self.assertEqual(status["job_phase"], "running:get_tokens")
+            self.assertFalse(status["can_start"])
+            self.assertFalse(status["can_resume"])
+            self.assertTrue(status["can_abandon"])
 
-        fake.release()
-        await self._wait_for_phase("waiting_manual:resume_email")
+            fake.release()
+            await self._wait_for_phase("waiting_manual:subscribe_then_resume")
 
     async def test_enable_completion_moves_to_waiting_resume_email(self):
         fake = FakeProcess(returncode=0)
 
-        with patch.object(self.module.subprocess, "Popen", return_value=fake):
-            result = await self.service.handle_path("/enable")
-            self.assertTrue(result["success"])
+        with patch.object(
+            self.service,
+            "_extract_latest_valid_results_record",
+            return_value={"email": "mother@example.com", "password": "p", "access_token": "t", "line_end_offset": 1},
+        ):
+            with patch.object(self.module.subprocess, "Popen", return_value=fake):
+                result = await self.service.handle_path("/enable")
+                self.assertTrue(result["success"])
 
-        status = await self._wait_for_phase("waiting_manual:resume_email")
-        self.assertEqual(status["waiting_reason"], "resume_email")
-        self.assertTrue(status["can_resume"])
+            status = await self._wait_for_phase("waiting_manual:subscribe_then_resume")
+            self.assertEqual(status["waiting_reason"], "subscribe_then_resume")
+            self.assertTrue(status["can_resume"])
 
     async def test_resume_requires_waiting_phase_and_single_string_email(self):
         invalid_phase = await self.service.handle_path("/resume", payload={"email": "a@b.com"})
         self.assertFalse(invalid_phase["success"])
-        self.assertEqual(invalid_phase["error"], "invalid_phase")
+        self.assertIsInstance(invalid_phase["error"], dict)
+        self.assertEqual(invalid_phase["error"].get("code"), "invalid_phase")
 
         await self.store.save_state(
             {
@@ -204,6 +215,341 @@ class MinimalServiceContractTests(unittest.IsolatedAsyncioTestCase):
         accounts = await self.service.handle_path("/accounts")
         self.assertTrue(accounts["success"])
         self.assertEqual(accounts["data"], [])
+
+
+class ManualSubscribeGateContractTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        if MODULE_NAME in sys.modules:
+            del sys.modules[MODULE_NAME]
+        self.module = importlib.import_module(MODULE_NAME)
+        service_cls = getattr(self.module, "CodexRegisterService")
+        store_cls = getattr(self.module, "InMemoryStateStore")
+        self.store = store_cls()
+        self.service = service_cls(
+            state_store=self.store,
+            chatgpt_service=SimpleNamespace(),
+            workflow_id="wf-test",
+            sleep_min=1,
+            sleep_max=1,
+            auto_run=False,
+        )
+
+    async def _wait_for_phase(self, expected_phase: str, timeout_seconds: float = 1.5):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while loop.time() < deadline:
+            status = (await self.service.handle_path("/status"))["data"]
+            if status["job_phase"] == expected_phase:
+                return status
+            await asyncio.sleep(0.01)
+        self.fail(f"timed out waiting for phase: {expected_phase}")
+
+    async def test_enable_transitions_to_subscribe_waiting_gate_contract(self):
+        fake = FakeProcess(returncode=0)
+
+        with patch.object(
+            self.service,
+            "_extract_latest_valid_results_record",
+            return_value={"email": "mother@example.com", "password": "p", "access_token": "t", "line_end_offset": 1},
+        ):
+            with patch.object(self.module.subprocess, "Popen", return_value=fake):
+                result = await self.service.handle_path("/enable")
+                self.assertTrue(result["success"])
+
+            status = await self._wait_for_phase("waiting_manual:subscribe_then_resume")
+            self.assertEqual(status["waiting_reason"], "subscribe_then_resume")
+            self.assertTrue(status["can_resume"])
+            self.assertFalse(status["can_start"])
+            self.assertTrue(status["can_abandon"])
+
+            self.assertIn("manual_gate", status)
+            self.assertIsInstance(status["manual_gate"], dict)
+            self.assertEqual(status["manual_gate"].get("name"), "subscribe_then_resume")
+            self.assertEqual(status["manual_gate"].get("status"), "waiting")
+
+    async def test_resume_invalid_phase_returns_contract_error_and_preserves_state(self):
+        before = await self.store.load_state()
+
+        result = await self.service.handle_path("/resume", payload={"resume_context": {"email": "a@b.com"}})
+
+        self.assertFalse(result["success"])
+        self.assertIsInstance(result["error"], dict)
+        self.assertEqual(result["error"].get("code"), "invalid_phase")
+        after = await self.store.load_state()
+        self.assertEqual(after, before)
+
+    async def test_resume_context_missing_returns_contract_error_and_preserves_state(self):
+        seeded = {
+            **(await self.store.load_state()),
+            "job_phase": "waiting_manual:subscribe_then_resume",
+            "waiting_reason": "subscribe_then_resume",
+            "can_start": False,
+            "can_resume": True,
+            "can_abandon": True,
+            "manual_gate": {"name": "subscribe_then_resume", "status": "waiting"},
+        }
+        await self.store.save_state(seeded)
+
+        result = await self.service.handle_path("/resume", payload={})
+
+        self.assertFalse(result["success"])
+        self.assertIsInstance(result["error"], dict)
+        self.assertEqual(result["error"].get("code"), "resume_context_missing")
+        after = await self.store.load_state()
+        self.assertEqual(after, seeded)
+
+    async def test_status_exposes_resume_context_and_resume_hint_after_parse_path(self):
+        seeded = {
+            **(await self.store.load_state()),
+            "job_phase": "waiting_manual:subscribe_then_resume",
+            "waiting_reason": "subscribe_then_resume",
+            "can_start": False,
+            "can_resume": True,
+            "can_abandon": True,
+            "resume_context": {
+                "email": "mother@example.com",
+                "team_name": "1",
+                "source": "parse_path",
+                "access_token_raw": "token-value",
+            },
+            "resume_hint": {
+                "action": "call_resume",
+                "path": "/resume",
+                "required_fields": ["resume_context.email"],
+            },
+        }
+        await self.store.save_state(seeded)
+
+        status_result = await self.service.handle_path("/status")
+
+        self.assertTrue(status_result["success"])
+        status = status_result["data"]
+        self.assertIn("resume_context", status)
+        self.assertEqual(status["resume_context"].get("email"), "mother@example.com")
+        self.assertEqual(status["resume_context"].get("source"), "parse_path")
+        self.assertEqual(status["resume_context"].get("access_token_raw"), "token-value")
+        self.assertNotIn("password", status["resume_context"])
+        self.assertNotIn("access_token", status["resume_context"])
+        self.assertIn("resume_hint", status)
+        self.assertEqual(status["resume_hint"].get("action"), "call_resume")
+        self.assertEqual(status["resume_hint"].get("path"), "/resume")
+        self.assertIn("resume_context.email", status["resume_hint"].get("required_fields", []))
+
+    async def test_enable_tokens_result_missing_transitions_to_failed_not_waiting(self):
+        fake = FakeProcess(returncode=0)
+
+        with patch.object(self.service, "_extract_latest_valid_results_record", return_value=None):
+            with patch.object(self.module.subprocess, "Popen", return_value=fake):
+                result = await self.service.handle_path("/enable")
+                self.assertTrue(result["success"])
+
+            status = await self._wait_for_phase("failed")
+            self.assertEqual(status["job_phase"], "failed")
+            self.assertEqual(status["last_error"], "tokens_result_missing")
+            self.assertEqual(status["waiting_reason"], "")
+            self.assertFalse(status["enabled"])
+            self.assertTrue(status["can_start"])
+            self.assertFalse(status["can_resume"])
+            self.assertTrue(status["can_abandon"])
+            self.assertIsNone(status.get("manual_gate"))
+            self.assertIsNone(status.get("resume_context"))
+            self.assertIsNone(status.get("resume_hint"))
+
+
+class LifecycleIdempotencyRedTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        if MODULE_NAME in sys.modules:
+            del sys.modules[MODULE_NAME]
+        self.module = importlib.import_module(MODULE_NAME)
+        service_cls = getattr(self.module, "CodexRegisterService")
+        store_cls = getattr(self.module, "InMemoryStateStore")
+        self.store = store_cls()
+        self.service = service_cls(
+            state_store=self.store,
+            chatgpt_service=SimpleNamespace(),
+            workflow_id="wf-test",
+            sleep_min=1,
+            sleep_max=1,
+            auto_run=False,
+        )
+
+    async def _wait_for_phase(self, expected_phase: str, timeout_seconds: float = 1.5):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while loop.time() < deadline:
+            status = (await self.service.handle_path("/status"))["data"]
+            if status["job_phase"] == expected_phase:
+                return status
+            await asyncio.sleep(0.01)
+        self.fail(f"timed out waiting for phase: {expected_phase}")
+
+    async def test_clears_resume_context_on_disable_and_completed_state(self):
+        waiting_seed = {
+            **(await self.store.load_state()),
+            "job_phase": "waiting_manual:subscribe_then_resume",
+            "waiting_reason": "subscribe_then_resume",
+            "enabled": True,
+            "can_start": False,
+            "can_resume": True,
+            "can_abandon": True,
+            "manual_gate": {"name": "subscribe_then_resume", "status": "waiting"},
+            "resume_context": {"email": "mother@example.com", "source": "parse_path", "team_name": "1"},
+            "resume_hint": {"action": "call_resume", "path": "/resume", "required_fields": ["resume_context.email"]},
+        }
+        await self.store.save_state(waiting_seed)
+
+        disable_result = await self.service.handle_path("/disable")
+        self.assertTrue(disable_result["success"])
+        after_disable = (await self.service.handle_path("/status"))["data"]
+        self.assertIsNone(after_disable.get("manual_gate"))
+        self.assertIsNone(after_disable.get("resume_context"))
+        self.assertIsNone(after_disable.get("resume_hint"))
+
+        second_store = getattr(self.module, "InMemoryStateStore")()
+        second_service = getattr(self.module, "CodexRegisterService")(
+            state_store=second_store,
+            chatgpt_service=SimpleNamespace(),
+            workflow_id="wf-test-2",
+            sleep_min=1,
+            sleep_max=1,
+            auto_run=False,
+        )
+        await second_store.save_state(waiting_seed)
+        fake = FakeProcess(returncode=0)
+
+        with patch.object(self.module.subprocess, "Popen", return_value=fake):
+            first_resume = await second_service.handle_path("/resume", payload={"email": "ignored@example.com"})
+            self.assertTrue(first_resume["success"])
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 1.5
+        while loop.time() < deadline:
+            status = (await second_service.handle_path("/status"))["data"]
+            if status["job_phase"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            self.fail("timed out waiting for completed phase")
+
+        completed_state = (await second_service.handle_path("/status"))["data"]
+        self.assertIsNone(completed_state.get("manual_gate"))
+        self.assertIsNone(completed_state.get("resume_context"))
+        self.assertIsNone(completed_state.get("resume_hint"))
+
+    async def test_double_resume_already_running_contract(self):
+        await self.store.save_state(
+            {
+                **(await self.store.load_state()),
+                "job_phase": "waiting_manual:subscribe_then_resume",
+                "waiting_reason": "subscribe_then_resume",
+                "enabled": True,
+                "can_start": False,
+                "can_resume": True,
+                "can_abandon": True,
+                "resume_context": {"email": "mother@example.com", "team_name": "1", "source": "parse_path"},
+            }
+        )
+
+        fake = FakeProcess(block=True)
+        with patch.object(self.module.subprocess, "Popen", return_value=fake):
+            first = await self.service.handle_path("/resume", payload={"email": "ignored@example.com"})
+            self.assertTrue(first["success"])
+
+            second = await self.service.handle_path("/resume", payload={"email": "ignored@example.com"})
+
+        self.assertFalse(second["success"])
+        self.assertIsInstance(second["error"], dict)
+        self.assertEqual(second["error"].get("code"), "already_running")
+
+        fake.release()
+        await self._wait_for_phase("completed")
+
+    async def test_disable_twice_waiting_is_idempotent_and_clears_resume_context(self):
+        await self.store.save_state(
+            {
+                **(await self.store.load_state()),
+                "job_phase": "waiting_manual:subscribe_then_resume",
+                "waiting_reason": "subscribe_then_resume",
+                "enabled": True,
+                "can_start": False,
+                "can_resume": True,
+                "can_abandon": True,
+                "manual_gate": {"name": "subscribe_then_resume", "status": "waiting"},
+                "resume_context": {"email": "mother@example.com", "team_name": "1", "source": "parse_path"},
+                "resume_hint": {"action": "call_resume", "path": "/resume", "required_fields": ["resume_context.email"]},
+            }
+        )
+
+        first_disable = await self.service.handle_path("/disable")
+        second_disable = await self.service.handle_path("/disable")
+
+        self.assertTrue(first_disable["success"])
+        self.assertTrue(second_disable["success"])
+
+        status = (await self.service.handle_path("/status"))["data"]
+        self.assertEqual(status["job_phase"], "abandoned")
+        self.assertIsNone(status.get("manual_gate"))
+        self.assertIsNone(status.get("resume_context"))
+        self.assertIsNone(status.get("resume_hint"))
+
+    async def test_disable_during_parse_precedence_disable_wins_over_waiting_transition(self):
+        fake = FakeProcess(block=True)
+        await self.store.save_state(
+            {
+                **(await self.store.load_state()),
+                "job_phase": "running:get_tokens",
+                "waiting_reason": "",
+                "enabled": True,
+                "can_start": False,
+                "can_resume": False,
+                "can_abandon": True,
+                "manual_gate": {"name": "subscribe_then_resume", "status": "waiting"},
+                "resume_context": {"email": "stale@example.com", "team_name": "1", "source": "parse_path"},
+                "resume_hint": {"action": "call_resume", "path": "/resume", "required_fields": ["resume_context.email"]},
+            }
+        )
+        self.service._active_process = fake
+        self.service._active_context = {"mode": "enable", "name": "get_tokens"}
+        self.service._stop_requested = False
+
+        disable_result = await self.service.handle_path("/disable")
+        self.assertTrue(disable_result["success"])
+
+        with patch.object(
+            self.service,
+            "_extract_latest_valid_results_record",
+            return_value={"email": "mother@example.com", "password": "p", "access_token": "t", "line_end_offset": 1},
+        ):
+            await self.service._handle_process_exit(fake, {"mode": "enable", "name": "get_tokens"}, 0)
+
+        status = (await self.service.handle_path("/status"))["data"]
+        self.assertEqual(status["job_phase"], "abandoned")
+        self.assertIsNone(status.get("manual_gate"))
+        self.assertIsNone(status.get("resume_context"))
+        self.assertIsNone(status.get("resume_hint"))
+
+    async def test_failed_state_flags_parse_failure_path_are_deterministic(self):
+        await self.store.save_state(
+            {
+                **(await self.store.load_state()),
+                "last_success": "2026-03-18T00:00:00+00:00",
+            }
+        )
+        fake = FakeProcess(returncode=0)
+
+        with patch.object(self.service, "_extract_latest_valid_results_record", return_value=None):
+            with patch.object(self.module.subprocess, "Popen", return_value=fake):
+                result = await self.service.handle_path("/enable")
+                self.assertTrue(result["success"])
+
+        failed = await self._wait_for_phase("failed")
+        self.assertEqual(failed["last_error"], "tokens_result_missing")
+        self.assertEqual(failed["waiting_reason"], "")
+        self.assertFalse(failed["enabled"])
+        self.assertTrue(failed["can_start"])
+        self.assertFalse(failed["can_resume"])
+        self.assertTrue(failed["can_abandon"])
+        self.assertEqual(failed["last_success"], "")
 
 
 class HTTPMethodContractTests(unittest.TestCase):

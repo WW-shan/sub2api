@@ -1075,6 +1075,7 @@ export default {
         title: 'Created Accounts',
         description: 'Only codex-register auto-created account records are shown',
         empty: 'No account records yet',
+        searchPlaceholder: 'Search by email',
         columns: {
           email: 'Email',
           password: 'Password',
@@ -1083,6 +1084,11 @@ export default {
           accountId: 'Account ID',
           createdAt: 'Created At'
         }
+      },
+      subscribeGate: {
+        title: 'Manual Subscribe Gate',
+        email: 'Target Email',
+        missingResumeContextHint: 'Missing resume_context.email or resume_context.access_token_raw.'
       },
       debug: {
         snapshotTitle: 'Debug Snapshot',

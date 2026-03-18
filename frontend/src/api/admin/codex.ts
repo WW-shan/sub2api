@@ -13,6 +13,17 @@ export interface CodexTransition {
   reason: string;
 }
 
+export interface CodexManualGate {
+  action?: string | null;
+  token?: string | null;
+  continue_url?: string | null;
+}
+
+export interface CodexResumeContext {
+  email?: string | null;
+  access_token_raw?: string | null;
+}
+
 export interface CodexStatus {
   enabled: boolean;
   sleep_min: number;
@@ -27,6 +38,9 @@ export interface CodexStatus {
   can_start: boolean;
   can_resume: boolean;
   can_abandon: boolean;
+  manual_gate: CodexManualGate | null;
+  resume_context: CodexResumeContext | null;
+  resume_hint: string | null;
   last_transition: CodexTransition | null;
   last_resume_gate_reason: string | null;
   recent_logs_tail: CodexLogEntry[];
@@ -179,6 +193,9 @@ export async function getStatus(): Promise<CodexStatus> {
       can_start: false,
       can_resume: false,
       can_abandon: false,
+      manual_gate: null,
+      resume_context: null,
+      resume_hint: null,
       last_transition: null,
       last_resume_gate_reason: null,
       recent_logs_tail: [],
@@ -236,6 +253,9 @@ export async function enable(): Promise<CodexStatus> {
       can_start: false,
       can_resume: false,
       can_abandon: false,
+      manual_gate: null,
+      resume_context: null,
+      resume_hint: null,
       last_transition: null,
       last_resume_gate_reason: null,
       recent_logs_tail: [],
@@ -262,6 +282,9 @@ export async function disable(): Promise<CodexStatus> {
       can_start: false,
       can_resume: false,
       can_abandon: false,
+      manual_gate: null,
+      resume_context: null,
+      resume_hint: null,
       last_transition: null,
       last_resume_gate_reason: null,
       recent_logs_tail: [],
@@ -288,6 +311,9 @@ export async function resume(): Promise<CodexStatus> {
       can_start: false,
       can_resume: false,
       can_abandon: false,
+      manual_gate: null,
+      resume_context: null,
+      resume_hint: null,
       last_transition: null,
       last_resume_gate_reason: null,
       recent_logs_tail: [],
@@ -314,6 +340,9 @@ export async function retry(): Promise<CodexStatus> {
       can_start: false,
       can_resume: false,
       can_abandon: false,
+      manual_gate: null,
+      resume_context: null,
+      resume_hint: null,
       last_transition: null,
       last_resume_gate_reason: null,
       recent_logs_tail: [],

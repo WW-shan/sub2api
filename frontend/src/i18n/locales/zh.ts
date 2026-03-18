@@ -1097,6 +1097,7 @@ export default {
         title: '已创建账户',
         description: '仅展示 codex-register 自动创建的账户记录',
         empty: '暂无账户记录',
+        searchPlaceholder: '按邮箱搜索',
         columns: {
           email: '邮箱',
           password: '密码',
@@ -1105,6 +1106,11 @@ export default {
           accountId: 'Account ID',
           createdAt: '创建时间'
         }
+      },
+      subscribeGate: {
+        title: '手动订阅关卡',
+        email: '目标邮箱',
+        missingResumeContextHint: '缺少 resume_context.email 或 resume_context.access_token_raw。'
       },
       debug: {
         snapshotTitle: '调试快照',

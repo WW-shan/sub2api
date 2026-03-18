@@ -40,6 +40,22 @@ function makeStatus(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function makeSubscribeGateStatus(overrides: Record<string, unknown> = {}) {
+  return makeStatus({
+    job_phase: 'waiting_manual:subscribe_then_resume',
+    waiting_reason: 'subscribe_then_resume',
+    manual_gate: {
+      action: 'subscribe_then_resume',
+      token: 'tok-1234567890abcdef',
+      continue_url: 'https://chatgpt.com/invite'
+    },
+    resume_context: {
+      email: 'owner@example.com'
+    },
+    ...overrides
+  })
+}
+
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     codex: codexApiMocks
@@ -286,8 +302,10 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
-    const showButtons = wrapper.findAll('button').filter((btn) => btn.text() === '显示')
-    expect(showButtons.length).toBe(2)
+    const accountRows = wrapper.findAll('tbody tr')
+    expect(accountRows.length).toBeGreaterThan(0)
+    const showButtons = accountRows[0].findAll('button').filter((btn) => btn.text() === '显示')
+    expect(showButtons.length).toBeGreaterThanOrEqual(1)
 
     await showButtons[0].trigger('click')
     await flushPromises()
@@ -343,10 +361,11 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
-    const resumeButton = wrapper.findAll('button').find((btn) => btn.text() === '继续')
-    expect(resumeButton).toBeDefined()
+    const resumeButton = wrapper.find('[data-testid="codex-controlbar-primary"] button')
+    expect(resumeButton.exists()).toBe(true)
+    expect(resumeButton.text()).toBe('继续')
 
-    await resumeButton!.trigger('click')
+    await resumeButton.trigger('click')
     await flushPromises()
 
     expect(codexApiMocks.resume).toHaveBeenCalledTimes(1)
@@ -423,10 +442,11 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
-    const stopButton = wrapper.findAll('button').find((btn) => btn.text() === '停止')
-    expect(stopButton).toBeDefined()
+    const stopButton = wrapper.find('[data-testid="codex-controlbar-secondary"] button:last-of-type')
+    expect(stopButton.exists()).toBe(true)
+    expect(stopButton.text()).toBe('停止')
 
-    await stopButton!.trigger('click')
+    await stopButton.trigger('click')
     await flushPromises()
 
     expect(codexApiMocks.disable).toHaveBeenCalledTimes(1)
@@ -502,7 +522,7 @@ describe('CodexRegistrationCard', () => {
     expect(lastCall?.[0]).toEqual({ level: 'warn', limit: 50 })
   })
 
-  it('renders debug snapshot before events and status sections', async () => {
+  it('renders debug snapshot before events section', async () => {
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
       global: { stubs: { StatCard: StatCardStub } }
@@ -514,7 +534,7 @@ describe('CodexRegistrationCard', () => {
       .findAll('[data-section-order]')
       .map((node) => node.attributes('data-section-order'))
 
-    expect(order).toEqual(['debug', 'events', 'status'])
+    expect(order).toEqual(['debug', 'events'])
   })
 
   it('renders phase/waiting/gate/transition cards with transition reason and time', async () => {
@@ -866,10 +886,161 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
-    const copyButtons = wrapper.findAll('button').filter((btn) => btn.text() === '复制')
+    const firstRow = wrapper.find('tbody tr')
+    expect(firstRow.exists()).toBe(true)
+    const copyButtons = firstRow.findAll('button').filter((btn) => btn.text() === '复制')
     expect(copyButtons.length).toBeGreaterThan(0)
 
     await copyButtons[0].trigger('click')
     expect(writeText).toHaveBeenCalled()
+  })
+
+  it('current status panel is removed and should not render', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('当前状态')
+    expect(wrapper.find('[data-section-order="status"]').exists()).toBe(false)
+  })
+
+  it('subscribe gate renders for waiting_manual:subscribe_then_resume', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(makeSubscribeGateStatus())
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const gate = wrapper.find('[data-testid="codex-subscribe-gate"]')
+    expect(gate.exists()).toBe(true)
+    expect(gate.text()).toContain('owner@example.com')
+    expect(gate.text()).toContain('tok-123...cdef')
+    expect(gate.text()).not.toContain('tok-1234567890abcdef')
+
+    const controls = gate.find('[data-testid="codex-subscribe-gate-controls"]')
+    expect(controls.text()).toContain('显示')
+    expect(controls.text()).toContain('复制')
+    expect(controls.text()).toContain('继续')
+  })
+
+  it('manual_gate is absent and still renders subscribe gate via waiting phase fallback', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(
+      makeSubscribeGateStatus({
+        manual_gate: null
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const gate = wrapper.find('[data-testid="codex-subscribe-gate"]')
+    expect(gate.exists()).toBe(true)
+    expect(gate.text()).toContain('owner@example.com')
+  })
+
+  it('copy fails and keeps non-blocking UX with unchanged phase/action', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(makeSubscribeGateStatus())
+    const writeText = vi.fn().mockRejectedValue(new Error('copy denied'))
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const copyButton = wrapper.find('[data-testid="codex-subscribe-gate-copy"]')
+    await copyButton.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="codex-subscribe-gate-copy-hint"]').text()).toContain('copy denied')
+    expect(wrapper.text()).toContain('等待你手动操作')
+    expect(wrapper.find('[data-testid="codex-controlbar-primary"]').text()).toContain('继续')
+  })
+
+  it('missing resume_context still shows gate shell but hides token controls', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(
+      makeSubscribeGateStatus({
+        resume_context: null
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const gate = wrapper.find('[data-testid="codex-subscribe-gate"]')
+    expect(gate.exists()).toBe(true)
+    expect(gate.find('[data-testid="codex-subscribe-gate-token"]').exists()).toBe(false)
+    expect(gate.find('[data-testid="codex-subscribe-gate-controls"]').exists()).toBe(false)
+    expect(gate.find('[data-testid="codex-subscribe-gate-diagnostic"]').text()).toContain('resume_context.email')
+  })
+
+  it('filters account rows by email keyword and keeps scroll container', async () => {
+    codexApiMocks.getAccounts.mockResolvedValueOnce([
+      {
+        id: 1,
+        email: 'alice@example.com',
+        access_token: 'at-alice-secret',
+        refresh_token: 'rt-alice-secret',
+        account_id: 'acct-alice',
+        source: 'codex-register',
+        created_at: '2026-03-07T10:00:01Z',
+        updated_at: '2026-03-07T10:00:01Z'
+      },
+      {
+        id: 2,
+        email: 'bob@example.com',
+        access_token: 'at-bob-secret',
+        refresh_token: 'rt-bob-secret',
+        account_id: 'acct-bob',
+        source: 'codex-register',
+        created_at: '2026-03-06T10:00:01Z',
+        updated_at: '2026-03-06T10:00:01Z'
+      },
+      {
+        id: 3,
+        email: 'carol@example.com',
+        access_token: 'at-carol-secret',
+        refresh_token: 'rt-carol-secret',
+        account_id: 'acct-carol',
+        source: 'codex-register',
+        created_at: '2026-03-05T10:00:01Z',
+        updated_at: '2026-03-05T10:00:01Z'
+      }
+    ])
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const search = wrapper.find('[data-testid="codex-accounts-search"]')
+    await search.setValue('bob')
+    await flushPromises()
+
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].text()).toContain('bob@example.com')
+
+    const scrollContainer = wrapper.find('[data-testid="codex-accounts-scroll"]')
+    expect(scrollContainer.exists()).toBe(true)
+    expect(scrollContainer.classes()).toContain('overflow-auto')
   })
 })

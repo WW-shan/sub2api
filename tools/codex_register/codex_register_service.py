@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import re
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -96,6 +97,8 @@ class CodexRegisterService:
                 reason="enabled",
             )
             state["last_error"] = ""
+            self._clear_resume_fields(state)
+            state["results_baseline_offset"] = self._capture_results_baseline_offset()
             await self._save_state(state)
             await self._append_log("enable_started", command=command)
 
@@ -112,6 +115,7 @@ class CodexRegisterService:
                     reason="enable_spawn_failed",
                 )
                 state["last_error"] = error
+                self._clear_resume_fields(state)
                 await self._save_state(state)
                 await self._append_log("enable_spawn_failed", error=error)
                 return self._result(False, error="spawn_failed", data=state)
@@ -125,16 +129,37 @@ class CodexRegisterService:
 
     async def _handle_resume(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         async with self._state_lock:
-            if self._has_active_process_locked():
-                return self._result(False, error="already_running")
-
             state = await self._load_state()
-            if str(state.get("job_phase") or "") != "waiting_manual:resume_email":
-                return self._result(False, error="invalid_phase", data=state)
+            phase = str(state.get("job_phase") or "")
+            waiting_phases = {"waiting_manual:resume_email", "waiting_manual:subscribe_then_resume"}
 
-            email, email_error = self._extract_resume_email(payload)
-            if email_error:
-                return self._result(False, error=email_error, data=state)
+            if self._has_active_process_locked():
+                return self._result(
+                    False,
+                    error={"code": "already_running", "message": "resume already in progress"},
+                    data=state,
+                )
+
+            if phase not in waiting_phases:
+                return self._result(
+                    False,
+                    error={"code": "invalid_phase", "message": f"resume not allowed in phase: {phase or 'unknown'}"},
+                    data=state,
+                )
+
+            if phase == "waiting_manual:subscribe_then_resume":
+                resume_context = state.get("resume_context")
+                if not isinstance(resume_context, dict) or not str(resume_context.get("email") or "").strip():
+                    return self._result(
+                        False,
+                        error={"code": "resume_context_missing", "message": "resume_context.email is required"},
+                        data=state,
+                    )
+                email = str(resume_context.get("email") or "").strip()
+            else:
+                email, email_error = self._extract_resume_email(payload)
+                if email_error:
+                    return self._result(False, error=email_error, data=state)
 
             wrapper_code = self._build_gpt_wrapper_code()
             command = [
@@ -172,6 +197,7 @@ class CodexRegisterService:
                     reason="resume_spawn_failed",
                 )
                 state["last_error"] = error
+                self._clear_resume_fields(state)
                 await self._save_state(state)
                 await self._append_log("resume_spawn_failed", error=error)
                 return self._result(False, error="spawn_failed", data=state)
@@ -198,6 +224,7 @@ class CodexRegisterService:
                 can_abandon=False,
                 reason="disabled",
             )
+            self._clear_resume_fields(state)
             await self._save_state(state)
             await self._append_log("disabled")
 
@@ -276,10 +303,35 @@ class CodexRegisterService:
                 return
 
             if return_code == 0 and mode == "enable":
+                parsed_result = self._extract_latest_valid_results_record(
+                    baseline_offset=int(state.get("results_baseline_offset") or 0)
+                )
+                resume_context = self._build_resume_context_from_parsed_result(parsed_result)
+                resume_email = str(resume_context.get("email") or "").strip()
+                if not resume_email:
+                    self._set_phase(
+                        state,
+                        to_phase="failed",
+                        waiting_reason="",
+                        enabled=False,
+                        can_start=True,
+                        can_resume=False,
+                        can_abandon=True,
+                        reason="tokens_result_missing",
+                    )
+                    state["last_error"] = "tokens_result_missing"
+                    state["last_success"] = ""
+                    self._clear_resume_fields(state)
+                    await self._save_state(state)
+                    await self._append_log("get_tokens_result_missing")
+                    return
+
+                resume_hint = self._build_resume_hint(resume_context)
+
                 self._set_phase(
                     state,
-                    to_phase="waiting_manual:resume_email",
-                    waiting_reason="resume_email",
+                    to_phase="waiting_manual:subscribe_then_resume",
+                    waiting_reason="subscribe_then_resume",
                     enabled=True,
                     can_start=False,
                     can_resume=True,
@@ -288,6 +340,9 @@ class CodexRegisterService:
                 )
                 state["last_error"] = ""
                 state["last_success"] = self._now_iso()
+                state["manual_gate"] = {"name": "subscribe_then_resume", "status": "waiting"}
+                state["resume_context"] = resume_context
+                state["resume_hint"] = resume_hint
                 await self._save_state(state)
                 await self._append_log("get_tokens_completed")
                 return
@@ -305,6 +360,7 @@ class CodexRegisterService:
                 )
                 state["last_error"] = ""
                 state["last_success"] = self._now_iso()
+                self._clear_resume_fields(state)
                 await self._save_state(state)
                 await self._append_log("gpt_batch_completed", email=context.get("email", ""))
                 return
@@ -320,8 +376,96 @@ class CodexRegisterService:
                 reason=f"{name}_failed",
             )
             state["last_error"] = f"{name}_exit_{return_code}"
+            self._clear_resume_fields(state)
             await self._save_state(state)
             await self._append_log("process_failed", process=name, return_code=return_code)
+
+    def _capture_results_baseline_offset(self) -> int:
+        path = self._base_dir / "results.txt"
+        try:
+            return int(path.stat().st_size)
+        except Exception:
+            return 0
+
+    def _extract_latest_valid_results_record(self, *, baseline_offset: int) -> Optional[Dict[str, Any]]:
+        path = self._base_dir / "results.txt"
+        try:
+            with path.open("rb") as f:
+                f.seek(max(0, int(baseline_offset)))
+                chunk = f.read()
+        except Exception:
+            return None
+
+        if not chunk:
+            return None
+
+        content = chunk.decode("utf-8", errors="ignore")
+        latest: Optional[Dict[str, Any]] = None
+        running_offset = max(0, int(baseline_offset))
+
+        for line in content.splitlines(keepends=True):
+            parsed = self._parse_results_line(line)
+            if parsed is not None:
+                latest = {
+                    **parsed,
+                    "line_offset": running_offset,
+                    "line_end_offset": running_offset + len(line.encode("utf-8", errors="ignore")),
+                }
+            running_offset += len(line.encode("utf-8", errors="ignore"))
+
+        return latest
+
+    def _parse_results_line(self, line: str) -> Optional[Dict[str, str]]:
+        normalized = str(line or "").strip()
+        if not normalized:
+            return None
+
+        parts = normalized.split("|")
+        if len(parts) != 3:
+            return None
+
+        email = parts[0].strip()
+        password = parts[1].strip()
+        access_token = parts[2].strip()
+
+        if not email or "@" not in email:
+            return None
+        if not password:
+            return None
+        if not access_token:
+            return None
+        if re.search(r"\s", access_token):
+            return None
+
+        return {
+            "email": email,
+            "password": password,
+            "access_token": access_token,
+        }
+
+    def _build_resume_context_from_parsed_result(self, parsed_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(parsed_result, dict):
+            return {
+                "email": "",
+                "team_name": "1",
+                "source": "parse_path",
+            }
+
+        return {
+            "email": str(parsed_result.get("email") or "").strip(),
+            "access_token_raw": str(parsed_result.get("access_token") or "").strip(),
+            "team_name": "1",
+            "source": "parse_path",
+            "results_offset": int(parsed_result.get("line_end_offset") or 0),
+        }
+
+    def _build_resume_hint(self, resume_context: Dict[str, Any]) -> Dict[str, Any]:
+        del resume_context
+        return {
+            "action": "call_resume",
+            "path": "/resume",
+            "required_fields": ["resume_context.email"],
+        }
 
     def _extract_resume_email(self, payload: Dict[str, Any]) -> Tuple[str, str]:
         email_raw = payload.get("email")
@@ -434,6 +578,11 @@ class CodexRegisterService:
             "reason": reason,
         }
 
+    def _clear_resume_fields(self, state: Dict[str, Any]) -> None:
+        state["manual_gate"] = None
+        state["resume_context"] = None
+        state["resume_hint"] = None
+
     def _default_state(self) -> Dict[str, Any]:
         return {
             "enabled": False,
@@ -452,6 +601,10 @@ class CodexRegisterService:
             "last_transition": None,
             "last_resume_gate_reason": "",
             "recent_logs_tail": [],
+            "manual_gate": None,
+            "resume_context": None,
+            "resume_hint": None,
+            "results_baseline_offset": 0,
         }
 
     def _is_authorized(self, payload: Dict[str, Any]) -> bool:
