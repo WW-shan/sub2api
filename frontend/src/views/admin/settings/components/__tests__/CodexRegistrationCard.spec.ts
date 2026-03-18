@@ -999,6 +999,64 @@ describe('CodexRegistrationCard', () => {
     expect(gate.find('[data-testid="codex-subscribe-gate-diagnostic"]').text()).toContain('resume_context.email')
   })
 
+  it('prefers plan_type over codex_register_role in account badge', async () => {
+    codexApiMocks.getAccounts.mockResolvedValueOnce([
+      {
+        id: 1,
+        email: 'team@example.com',
+        access_token: 'at-team-secret',
+        refresh_token: 'rt-team-secret',
+        account_id: 'acct-team',
+        source: 'codex-register',
+        codex_register_role: 'child',
+        plan_type: 'team',
+        created_at: '2026-03-07T10:00:01Z',
+        updated_at: '2026-03-07T10:00:01Z'
+      },
+      {
+        id: 2,
+        email: 'free@example.com',
+        access_token: 'at-free-secret',
+        refresh_token: 'rt-free-secret',
+        account_id: 'acct-free',
+        source: 'codex-register',
+        codex_register_role: 'parent',
+        plan_type: 'free',
+        created_at: '2026-03-06T10:00:01Z',
+        updated_at: '2026-03-06T10:00:01Z'
+      },
+      {
+        id: 3,
+        email: 'legacy@example.com',
+        access_token: 'at-legacy-secret',
+        refresh_token: 'rt-legacy-secret',
+        account_id: 'acct-legacy',
+        source: 'legacy-source',
+        codex_register_role: 'parent',
+        created_at: '2026-03-05T10:00:01Z',
+        updated_at: '2026-03-05T10:00:01Z'
+      }
+    ])
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows).toHaveLength(3)
+    expect(rows[0].text()).toContain('team@example.com')
+    expect(rows[0].text()).toContain('team')
+    expect(rows[0].text()).not.toContain('child')
+    expect(rows[1].text()).toContain('free@example.com')
+    expect(rows[1].text()).toContain('free')
+    expect(rows[1].text()).not.toContain('parent')
+    expect(rows[2].text()).toContain('legacy@example.com')
+    expect(rows[2].text()).toContain('parent')
+  })
+
   it('filters account rows by email keyword and keeps scroll container', async () => {
     codexApiMocks.getAccounts.mockResolvedValueOnce([
       {

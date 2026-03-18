@@ -543,17 +543,12 @@
                     <span
                       :class="[
                         'inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold',
-                        (account.codex_register_role || account.source) ===
-                        'parent'
+                        accountRoleBadgeLabel(account) === 'team'
                           ? 'border border-purple-200 bg-purple-100 text-purple-800 dark:border-purple-900/60 dark:bg-purple-900/30 dark:text-purple-300'
                           : 'border border-blue-200 bg-blue-100 text-blue-800 dark:border-blue-900/60 dark:bg-blue-900/30 dark:text-blue-300',
                       ]"
                     >
-                      {{
-                        account.codex_register_role ||
-                        account.source ||
-                        "unknown"
-                      }}
+                      {{ accountRoleBadgeLabel(account) }}
                     </span>
                   </td>
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
@@ -1034,6 +1029,15 @@ const subscribeGateTokenDisplay = computed(() =>
     ? subscribeGateRawToken.value
     : maskSubscribeGateToken(subscribeGateRawToken.value),
 );
+
+function accountRoleBadgeLabel(account: CodexRegisterAccount): string {
+  return (
+    String(account.plan_type || '').trim() ||
+    String(account.codex_register_role || '').trim() ||
+    String(account.source || '').trim() ||
+    'unknown'
+  )
+}
 
 const filteredAccounts = computed(() => {
   const keyword = accountSearchKeyword.value.trim().toLowerCase();
