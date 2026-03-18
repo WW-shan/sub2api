@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import importlib
 import importlib.util
 import json
@@ -307,6 +308,8 @@ class GetTokensHelperLoadingContractTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertEqual(results_path.read_text(encoding="utf-8"), "one@example.com|pw|at|rt\n")
             self.assertFalse(accounts_path.exists())
+
+
 
 
 class GptTeamPersistenceContractTests(unittest.TestCase):

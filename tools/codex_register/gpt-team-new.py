@@ -1515,9 +1515,13 @@ def chatgpt_http_login(
         logger.warning(f"  [{tag}] 重定向异常: %s", e)
         pass
 
-    # 如果落地不在 chatgpt.com，需要做 workspace/select 来获取 chatgpt.com callback redirect
-    if "chatgpt.com" not in final_url:
-        logger.info(f"  [{tag}] 落地非 chatgpt.com，执行 workspace/select 流程...")
+
+    # 如果落地到 chatgpt callback 错误页，也回退到 workspace/select 尝试拿 callback redirect
+    callback_failed = final_url.startswith(f"{CHATGPT_BASE}/auth/error") and "error=Callback" in final_url
+
+    # 如果落地不在 chatgpt.com，或者已落到 callback error，需要做 workspace/select 来获取 chatgpt.com callback redirect
+    if "chatgpt.com" not in final_url or callback_failed:
+        logger.info(f"  [{tag}] 落地未完成 callback，执行 workspace/select 流程...")
         try:
             # 解析 oai-client-auth-session cookie 获取 workspace 信息
             ws_id = None
