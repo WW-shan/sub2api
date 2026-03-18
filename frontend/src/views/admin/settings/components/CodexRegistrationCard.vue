@@ -908,6 +908,7 @@ const batchProgressLabel = computed(() => {
   });
 });
 
+const workflowFailureDetail = computed(() => {
   if (status.value?.job_phase !== "failed") {
     return "";
   }
