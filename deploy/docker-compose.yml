@@ -121,6 +121,12 @@ services:
       - ANTIGRAVITY_OAUTH_CLIENT_SECRET=${ANTIGRAVITY_OAUTH_CLIENT_SECRET:-}
 
       # =======================================================================
+      # Codex Register Group Routing
+      # =======================================================================
+      - CODEX_GROUP_IDS_TEAM=${CODEX_GROUP_IDS_TEAM:-}
+      - CODEX_GROUP_IDS_FREE=${CODEX_GROUP_IDS_FREE:-}
+
+      # =======================================================================
       # Security Configuration (URL Allowlist)
       # =======================================================================
       # Enable URL allowlist validation (false to skip allowlist checks)

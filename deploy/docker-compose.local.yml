@@ -132,6 +132,12 @@ services:
       - ANTIGRAVITY_OAUTH_CLIENT_SECRET=${ANTIGRAVITY_OAUTH_CLIENT_SECRET:-}
 
       # =======================================================================
+      # Codex Register Group Routing
+      # =======================================================================
+      - CODEX_GROUP_IDS_TEAM=${CODEX_GROUP_IDS_TEAM:-}
+      - CODEX_GROUP_IDS_FREE=${CODEX_GROUP_IDS_FREE:-}
+
+      # =======================================================================
       # Security Configuration (URL Allowlist)
       # =======================================================================
       # Enable URL allowlist validation (false to skip allowlist checks)
@@ -177,14 +183,8 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-sub2api}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       - POSTGRES_DB=${POSTGRES_DB:-sub2api}
-      - CODEX_PROXY=${CODEX_PROXY:-}
-      - CODEX_SLEEP_MIN=${CODEX_SLEEP_MIN:-5}
-      - CODEX_SLEEP_MAX=${CODEX_SLEEP_MAX:-30}
-      - CODEX_GROUP_IDS=${CODEX_GROUP_IDS:-}
-      - CODEX_MODEL_MAPPING_JSON=${CODEX_MODEL_MAPPING_JSON:-}
-      - REGISTER_MAIL_DOMAIN=${REGISTER_MAIL_DOMAIN:-}
-      - REGISTER_MAIL_WORKER_BASE_URL=${REGISTER_MAIL_WORKER_BASE_URL:-}
-      - REGISTER_MAIL_WORKER_TOKEN=${REGISTER_MAIL_WORKER_TOKEN:-}
+      - CODEX_GROUP_IDS_TEAM=${CODEX_GROUP_IDS_TEAM:-}
+      - CODEX_GROUP_IDS_FREE=${CODEX_GROUP_IDS_FREE:-}
       - TZ=${TZ:-Asia/Shanghai}
     depends_on:
       postgres:
