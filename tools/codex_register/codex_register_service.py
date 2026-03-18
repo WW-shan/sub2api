@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 LOGGER = logging.getLogger("codex_register")
 
+_EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
 
 class CodexRegisterService:
     def __init__(
@@ -508,9 +510,12 @@ class CodexRegisterService:
 
         email = str(parsed.get("email") or "").strip().lower()
         access_token = str(parsed.get("access_token") or "").strip()
-        if not email or "@" not in email:
-            return None
+        account_id = str(parsed.get("account_id") or "").strip()
+        has_email_shape = bool(email and "@" in email)
+
         if not access_token or re.search(r"\s", access_token):
+            return None
+        if not has_email_shape and not account_id:
             return None
 
         record = dict(parsed)
@@ -519,7 +524,7 @@ class CodexRegisterService:
         record["password"] = str(parsed.get("password") or "").strip()
         record["refresh_token"] = str(parsed.get("refresh_token") or "").strip()
         record["id_token"] = str(parsed.get("id_token") or "").strip()
-        record["account_id"] = str(parsed.get("account_id") or "").strip()
+        record["account_id"] = account_id
         record["auth_file"] = str(parsed.get("auth_file") or "").strip()
         record["expires_at"] = str(parsed.get("expires_at") or parsed.get("expired") or "").strip()
         record["team_name"] = str(parsed.get("team_name") or "").strip()
@@ -532,6 +537,7 @@ class CodexRegisterService:
         record["workspace_id"] = str(parsed.get("workspace_id") or "").strip()
         record["codex_register_role"] = str(parsed.get("codex_register_role") or "").strip()
         return record
+
 
     def _build_resume_context_from_parsed_result(self, parsed_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not isinstance(parsed_result, dict):
@@ -685,6 +691,27 @@ class CodexRegisterService:
         )
         return cur.fetchone()
 
+    def _build_model_mapping(self) -> Dict[str, str]:
+        return {
+            "gpt-5.4": "gpt-5.4",
+            "gpt-5.4-mini": "gpt-5.4-mini",
+            "gpt-5.4-nano": "gpt-5.4-nano",
+            "gpt-5.4-pro": "gpt-5.4-pro",
+            "gpt-5": "gpt-5",
+            "gpt-5-mini": "gpt-5-mini",
+            "gpt-5-nano": "gpt-5-nano",
+            "gpt-5-codex": "gpt-5-codex",
+            "gpt-5.3-codex": "gpt-5.3-codex",
+            "gpt-5.2-codex": "gpt-5.2-codex",
+            "gpt-5.1-codex": "gpt-5.1-codex",
+            "gpt-5.1-codex-max": "gpt-5.1-codex-max",
+            "gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
+            "codex-mini-latest": "codex-mini-latest",
+            "claude-opus*": "gpt-5.4",
+            "claude-sonnet*": "gpt-5.3-codex",
+            "claude-haiku*": "gpt-5.4-mini",
+        }
+
     def _build_account_credentials(self, existing: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
         credentials = dict(existing)
         credentials["email"] = str(record.get("email") or credentials.get("email") or "").strip().lower()
@@ -824,9 +851,12 @@ class CodexRegisterService:
             self._bind_account_groups(cur, int(existing_id), group_ids)
             return "updated"
 
-        identifier = account_id or email
-        name = f"codex-{identifier}"
+        if not _EMAIL_PATTERN.fullmatch(email):
+            return "skipped"
+
+        name = email
         credentials = self._build_account_credentials({}, record)
+        credentials["model_mapping"] = self._build_model_mapping()
         extra = self._build_account_extra({}, record)
         extra["codex_auto_register_updated_at"] = self._now_iso()
 
@@ -839,6 +869,7 @@ class CodexRegisterService:
         created_id = int(created_row[0])
         self._bind_account_groups(cur, created_id, group_ids)
         return "created"
+
 
     def _process_accounts_jsonl_records(self, state: Dict[str, Any]) -> Dict[str, Any]:
         start_offset = int(state.get("accounts_jsonl_offset") or 0)
