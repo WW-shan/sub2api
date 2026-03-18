@@ -56,7 +56,8 @@ MAIL_POLL_MAX_ATTEMPTS: int = 40
 
 
 # 输出文件
-ACCOUNTS_FILE: str = "accounts.txt"
+SCRIPT_DIR = Path(__file__).resolve().parent
+ACCOUNTS_FILE: str = str(SCRIPT_DIR / "accounts.txt")
 INVITE_TRACKER_FILE: str = "invite_tracker.json"
 
 # 车头（Teams）列表（按需填写）
@@ -1752,12 +1753,12 @@ def auto_invite_to_team(email):
 _csv_lock = threading.Lock()
 
 
-def save_to_txt(email, password):
-    """保存账号到 TXT（一行一个：email|password|时间）"""
+def save_to_txt(email, password, access_token="", refresh_token=""):
+    """保存账号到 TXT（一行一个：email|password|access_token|refresh_token）"""
     with _csv_lock:
         with open(ACCOUNTS_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{email}|{password}|{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    logger.info("📄 已保存: %s → %s", email, ACCOUNTS_FILE)
+            f.write(f"{email}|{password}|{access_token}|{refresh_token}\n")
+    logger.info("📄 已保存账号到: %s", ACCOUNTS_FILE)
 
 
 # ============================================================
@@ -1785,11 +1786,10 @@ def register_one_account(proxy=""):
     reg_ok = registrar.register(email=email, password=password)
     if not reg_ok:
         logger.error("❌ 注册失败 | email=%s", email)
-        save_to_txt(email, password)
+        save_to_txt(email, password, "", "")
         return email, password, False
 
     logger.info("✅ 注册成功 | email=%s", email)
-    save_to_txt(email, password)
     time.sleep(3)
 
     # 3. 团队邀请
@@ -1824,10 +1824,17 @@ def register_one_account(proxy=""):
 
     if not tokens:
         logger.warning("❌ Codex 登录失败（注册已成功）| email=%s", email)
+        save_to_txt(email, password, "", "")
         return email, password, True
 
     # 5. 保存 token 到本地
     token_dict = build_token_dict(email, tokens)
+    save_to_txt(
+        email,
+        password,
+        str(token_dict.get("access_token") or ""),
+        str(token_dict.get("refresh_token") or ""),
+    )
 
     local_dir = "output_tokens"
     os.makedirs(local_dir, exist_ok=True)

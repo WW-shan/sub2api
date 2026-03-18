@@ -421,26 +421,30 @@ class CodexRegisterService:
             return None
 
         parts = normalized.split("|")
-        if len(parts) != 3:
+        if len(parts) != 4:
             return None
 
         email = parts[0].strip()
         password = parts[1].strip()
         access_token = parts[2].strip()
+        refresh_token = parts[3].strip()
 
         if not email or "@" not in email:
-            return None
-        if not password:
             return None
         if not access_token:
             return None
         if re.search(r"\s", access_token):
+            return None
+        if not refresh_token:
+            return None
+        if re.search(r"\s", refresh_token):
             return None
 
         return {
             "email": email,
             "password": password,
             "access_token": access_token,
+            "refresh_token": refresh_token,
         }
 
     def _build_resume_context_from_parsed_result(self, parsed_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:

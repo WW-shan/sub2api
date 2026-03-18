@@ -217,6 +217,65 @@ class MinimalServiceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accounts["data"], [])
 
 
+class FourSegmentParserContractRedTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        if MODULE_NAME in sys.modules:
+            del sys.modules[MODULE_NAME]
+        self.module = importlib.import_module(MODULE_NAME)
+        service_cls = getattr(self.module, "CodexRegisterService")
+        store_cls = getattr(self.module, "InMemoryStateStore")
+        self.store = store_cls()
+        self.service = service_cls(
+            state_store=self.store,
+            chatgpt_service=SimpleNamespace(),
+            workflow_id="wf-test",
+            sleep_min=1,
+            sleep_max=1,
+            auto_run=False,
+        )
+
+    async def _wait_for_phase(self, expected_phase: str, timeout_seconds: float = 1.5):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while loop.time() < deadline:
+            status = (await self.service.handle_path("/status"))["data"]
+            if status["job_phase"] == expected_phase:
+                return status
+            await asyncio.sleep(0.01)
+        self.fail(f"timed out waiting for phase: {expected_phase}")
+
+    def test_three_segment_line_rejected_by_parse_results_line(self):
+        parsed = self.service._parse_results_line("mother@example.com|pw-123|access-token")
+        self.assertIsNone(parsed)
+
+    def test_four_segment_line_accepted_and_exposes_refresh_token(self):
+        parsed = self.service._parse_results_line(
+            "mother@example.com|pw-123|access-token|refresh-token"
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["email"], "mother@example.com")
+        self.assertEqual(parsed["password"], "pw-123")
+        self.assertEqual(parsed["access_token"], "access-token")
+        self.assertEqual(parsed["refresh_token"], "refresh-token")
+
+    async def test_enable_tokens_result_missing_for_incremental_four_segment_line_without_refresh_token(self):
+        fake = FakeProcess(returncode=0)
+
+        with patch.object(self.service, "_capture_results_baseline_offset", return_value=0):
+            with patch.object(self.module.Path, "open") as open_mock:
+                open_mock.return_value.__enter__.return_value.read.return_value = (
+                    b"mother@example.com|pw-123|access-token|\n"
+                )
+                with patch.object(self.module.subprocess, "Popen", return_value=fake):
+                    result = await self.service.handle_path("/enable")
+                    self.assertTrue(result["success"])
+
+                status = await self._wait_for_phase("failed")
+                self.assertEqual(status["job_phase"], "failed")
+                self.assertEqual(status["last_error"], "tokens_result_missing")
+                self.assertEqual(status["waiting_reason"], "")
+
+
 class ManualSubscribeGateContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         if MODULE_NAME in sys.modules:
