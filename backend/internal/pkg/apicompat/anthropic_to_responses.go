@@ -46,10 +46,9 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 	}
 
 	// Determine reasoning effort: only output_config.effort controls the
-	// level; thinking.type is ignored. Default is high when unset.
-	// Anthropic levels map to OpenAI with one-level downgrade: low→low,
-	// medium→medium, high→high.
-	effort := "high" // default stays high
+	// level; thinking.type is ignored. Default is xhigh when unset.
+	// Anthropic levels map to OpenAI: low→low, medium→high, high→xhigh.
+	effort := "high" // default → maps to xhigh
 	if req.OutputConfig != nil && req.OutputConfig.Effort != "" {
 		effort = req.OutputConfig.Effort
 	}
@@ -379,17 +378,17 @@ func extractAnthropicTextFromBlocks(blocks []AnthropicContentBlock) string {
 }
 
 // mapAnthropicEffortToResponses converts Anthropic reasoning effort levels to
-// OpenAI Responses API effort levels with one-level downgrade.
+// OpenAI Responses API effort levels.
 //
 //	low    → low
-//	medium → medium
-//	high   → high
+//	medium → high
+//	high   → xhigh
 func mapAnthropicEffortToResponses(effort string) string {
 	switch effort {
-	case "high":
-		return "high"
 	case "medium":
-		return "medium"
+		return "high"
+	case "high":
+		return "xhigh"
 	default:
 		return effort // "low" and any unknown values pass through unchanged
 	}
