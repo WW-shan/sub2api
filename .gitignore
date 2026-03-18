@@ -132,6 +132,7 @@ docs/*
 frontend/coverage/
 aicodex
 output/
+*.txt
 .sisyphus/
 tools/codex_register/.worktrees/
 .worktrees/
