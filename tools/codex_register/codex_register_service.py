@@ -67,8 +67,8 @@ class CodexRegisterService:
             return self._result(True, data=await self._list_logs())
 
         if path == "/accounts":
-            state = await self._load_state()
-            return self._result(True, data=self._build_accounts_status_data(state))
+            accounts = self._list_accounts_for_frontend()
+            return self._result(True, data=accounts)
 
         if path == "/enable":
             return await self._handle_enable()
@@ -411,6 +411,43 @@ class CodexRegisterService:
             await self._save_state(state)
             await self._append_log("process_failed", process=name, return_code=return_code)
 
+    def _list_accounts_for_frontend(self) -> List[Dict[str, Any]]:
+        """Read accounts.jsonl and normalize into frontend-ready records.
+
+        Fields:
+          - id: monotonically increasing integer (1-based)
+          - email: normalized email
+          - refresh_token/access_token: optional, may be empty strings
+          - account_id: optional string or None
+          - source: record source (e.g., 'get_tokens', 'gpt-team-new', 'accounts_jsonl')
+          - codex_register_role, plan_type, organization_id, workspace_id: currently None
+          - created_at/updated_at: best-effort timestamps from record or empty string
+        """
+        records, _next_offset = self._read_accounts_jsonl_records(start_offset=0)
+        accounts: List[Dict[str, Any]] = []
+        next_id = 1
+        for record in records:
+            email = str(record.get("email") or "").strip()
+            if not email:
+                continue
+            account = {
+                "id": next_id,
+                "email": email,
+                "refresh_token": record.get("refresh_token") or "",
+                "access_token": record.get("access_token") or "",
+                "account_id": (record.get("account_id") or "") or None,
+                "source": record.get("source") or "accounts_jsonl",
+                "codex_register_role": None,
+                "plan_type": None,
+                "organization_id": None,
+                "workspace_id": None,
+                "created_at": record.get("created_at") or "",
+                "updated_at": record.get("created_at") or "",
+            }
+            accounts.append(account)
+            next_id += 1
+        return accounts
+
     def _capture_accounts_jsonl_offset(self) -> int:
         try:
             return int(self._accounts_jsonl_path.stat().st_size)
@@ -576,6 +613,16 @@ class CodexRegisterService:
         return group_ids
 
     def _resolve_group_ids_for_record(self, record: Dict[str, Any]) -> List[int]:
+        plan_type = str(record.get("plan_type") or "").lower()
+
+        # 有 plan_type 就完全按它来
+        if plan_type == "team":
+            return self._parse_group_ids_from_env("CODEX_GROUP_IDS_TEAM")
+        if plan_type:
+            # 有 plan_type 且不是 team，一律 free
+            return self._parse_group_ids_from_env("CODEX_GROUP_IDS_FREE")
+
+        # 老数据没有 plan_type，保留原来的 invited 逻辑
         env_name = "CODEX_GROUP_IDS_TEAM" if self._coerce_bool(record.get("invited")) else "CODEX_GROUP_IDS_FREE"
         return self._parse_group_ids_from_env(env_name)
 

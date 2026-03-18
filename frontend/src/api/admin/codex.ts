@@ -44,6 +44,22 @@ export interface CodexStatus {
   last_transition: CodexTransition | null;
   last_resume_gate_reason: string | null;
   recent_logs_tail: CodexLogEntry[];
+  accounts_jsonl_offset?: number;
+  accounts_jsonl_baseline_offset?: number;
+  last_processed_offset?: number;
+  last_processed_records?: number;
+  total_skipped?: number;
+  total_failed?: number;
+  last_processed_summary?: {
+    start_offset?: number;
+    end_offset?: number;
+    records_seen?: number;
+    created?: number;
+    updated?: number;
+    skipped?: number;
+    failed?: number;
+    errors?: string[];
+  } | null;
 }
 
 export interface CodexLogEntry {

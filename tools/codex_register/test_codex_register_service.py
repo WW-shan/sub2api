@@ -193,6 +193,40 @@ class JsonlParsingTests(ServiceTestCase):
             self.assertTrue(record["invited"])
             self.assertGreater(record["line_end_offset"], baseline)
 
+    def test_list_accounts_for_frontend_normalizes_jsonl_records(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            line1 = json.dumps(
+                {
+                    "email": "user1@example.com",
+                    "access_token": "at1",
+                    "refresh_token": "rt1",
+                    "account_id": "acct-1",
+                    "source": "gpt-team-new",
+                    "created_at": "2026-03-19T00:00:00Z",
+                }
+            ) + "\n"
+            line2 = json.dumps(
+                {
+                    "email": "user2@example.com",
+                    "access_token": "at2",
+                }
+            ) + "\n"
+            path.write_text(line1 + "not-json\n" + line2, encoding="utf-8")
+            self.service._accounts_jsonl_path = path
+
+            accounts = self.service._list_accounts_for_frontend()
+
+        self.assertEqual(len(accounts), 2)
+        self.assertEqual(accounts[0]["id"], 1)
+        self.assertEqual(accounts[0]["email"], "user1@example.com")
+        self.assertEqual(accounts[0]["access_token"], "at1")
+        self.assertEqual(accounts[0]["account_id"], "acct-1")
+        self.assertEqual(accounts[0]["source"], "gpt-team-new")
+        self.assertEqual(accounts[1]["id"], 2)
+        self.assertEqual(accounts[1]["email"], "user2@example.com")
+        self.assertEqual(accounts[1]["access_token"], "at2")
+
 
 class GroupRoutingTests(ServiceTestCase):
     def test_group_routing_uses_invited_flag_and_env_values(self):
@@ -370,28 +404,31 @@ class ProcessingFlowTests(ServiceTestCase):
         self.assertEqual(state["last_processed_summary"]["errors"], ["two@example.com:db write failed"])
         self.assertTrue(conn.closed)
 
-    def test_accounts_endpoint_returns_useful_state_summary(self):
-        async def _run():
-            seeded = {
-                **(await self.store.load_state()),
-                "accounts_jsonl_offset": 123,
-                "accounts_jsonl_baseline_offset": 50,
-                "last_processed_offset": 123,
-                "last_processed_records": 2,
-                "total_created": 1,
-                "total_updated": 1,
-                "total_skipped": 0,
-                "total_failed": 0,
-                "last_processed_summary": {"created": 1, "updated": 1},
-            }
-            await self.store.save_state(seeded)
-            return await self.service.handle_path("/accounts")
+    def test_accounts_path_returns_list_of_accounts_from_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"email": "one@example.com", "access_token": "t1", "source": "gpt-team-new"}),
+                        json.dumps({"email": "two@example.com", "access_token": "t2", "source": "get_tokens"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.service._accounts_jsonl_path = path
 
-        result = asyncio.run(_run())
+            async def _run():
+                return await self.service.handle_path("/accounts")
+
+            result = asyncio.run(_run())
+
         self.assertTrue(result["success"])
-        self.assertEqual(result["data"]["accounts_jsonl_offset"], 123)
-        self.assertEqual(result["data"]["total_updated"], 1)
-        self.assertEqual(result["data"]["last_processed_summary"]["created"], 1)
+        accounts = result["data"]
+        self.assertEqual(len(accounts), 2)
+        self.assertEqual(accounts[0]["email"], "one@example.com")
+        self.assertEqual(accounts[1]["email"], "two@example.com")
 
 
 class GetTokensContractTests(unittest.TestCase):

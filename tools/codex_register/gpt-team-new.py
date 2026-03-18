@@ -1149,6 +1149,7 @@ def build_importable_account_record(
         "expires_at": str(token_dict.get("expired") or ""),
         "invited": bool(invited),
         "team_name": team_name,
+        "plan_type": str(token_dict.get("plan_type") or ""),
         "created_at": created_at,
         "source": "gpt-team-new",
     }
@@ -1175,10 +1176,10 @@ def chatgpt_http_login(
     password: str = "",
     proxy: str = "",
     tag: str = "",         # 日志前缀：显示车头名称（如 "1" / "2"）
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     """
     chatgpt.com 专用 HTTP 登录（NextAuth 体系）。
-    返回 (access_token, org_id)，失败返回 ("", "")
+    返回 (access_token, org_id, plan_type)，失败返回 ("", "", "")
 
     流程：
       A. GET chatgpt.com 首页 → POST chatgpt.com/api/auth/signin/openai（CSRF）
@@ -1600,6 +1601,7 @@ def chatgpt_http_login(
             sdata = resp_s.json()
             access_token = str(sdata.get("accessToken") or "")
             acct = sdata.get("account") or {}
+            plan_type = str(acct.get("planType") or "")
             # account.id 是 UUID（邀请 API 路径使用），organizationId 是 org-xxx（Header 使用）
             acct_uuid = str(acct.get("id") or "")
             org_id = str(acct.get("organizationId") or "")
@@ -1607,8 +1609,7 @@ def chatgpt_http_login(
             primary_id = acct_uuid or org_id
             if access_token and primary_id:
                 logger.info(f"  [{tag}] ✅ 获取成功 | uuid=%s | org_id=%s", acct_uuid, org_id)
-                # 返回 (access_token, account_uuid) 给 refresh_team_session_http 存储
-                return access_token, acct_uuid or org_id
+                return access_token, acct_uuid or org_id, plan_type
             elif access_token:
                 # org_id 从 JWT 中解析
                 payload = decode_jwt_payload(access_token)
@@ -1617,14 +1618,14 @@ def chatgpt_http_login(
                     org_id = str(auth_info.get("organization_id") or auth_info.get("chatgpt_account_id") or "")
                 if org_id:
                     logger.info(f"  [{tag}] ✅ 从 JWT 获取 org_id=%s", org_id)
-                    return access_token, org_id
+                    return access_token, org_id, plan_type
             logger.warning(f"  [{tag}] session 不完整: %s", str(sdata)[:200])
         else:
             logger.warning(f"  [{tag}] session HTTP %s | %s", resp_s.status_code, resp_s.text[:150])
     except Exception as e:
-        logger.warning(f"  [{tag}] session 异常: %s", e)
+        logger.info(f"  [{tag}] session 异常: %s", e)
 
-    return "", ""
+    return "", "", ""
 
 
 def refresh_team_session_http(team):
@@ -1644,9 +1645,10 @@ def refresh_team_session_http(team):
     logger.info("🔄 HTTP 刷新母号 session [%s]: %s", mode_str, m_email)
 
     # 使用 chatgpt.com 专用登录函数
-    access_token, org_id = chatgpt_http_login(
+    access_token, org_id, _plan_type = chatgpt_http_login(
         email=m_email,
         password=m_password,
+        proxy="",
         tag=team.get("name", m_email),
     )
 
@@ -1869,8 +1871,23 @@ def register_one_account(proxy=""):
         save_to_txt(email, password, "", "")
         return email, password, True
 
+    # 4.5 读取 chatgpt.com session planType
+    plan_type = ""
+    try:
+        access_token_chatgpt, org_id_chatgpt, plan_type = chatgpt_http_login(
+            email=email,
+            password=password,
+            proxy=proxy,
+            tag=email,
+        )
+        logger.info("🔎 planType 检测 | email=%s | plan_type=%s", email, plan_type)
+    except Exception as e:
+        logger.warning("读取 planType 失败（不影响注册）| email=%s | error=%s", email, e)
+
     # 5. 保存 token 到本地
     token_dict = build_token_dict(email, tokens)
+    if plan_type:
+        token_dict["plan_type"] = plan_type
     save_to_txt(
         email,
         password,

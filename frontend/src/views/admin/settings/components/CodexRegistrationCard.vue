@@ -677,8 +677,29 @@ function phaseInfo(phase?: string | null): { label: string; tone: PhaseTone } {
     return { label: t("admin.codexRegister.phase.unknown"), tone: "neutral" };
   }
 
-  if (phase === "idle" || phase === "completed") {
+  if (phase === "idle") {
     return { label: t("admin.codexRegister.phase.idle"), tone: "neutral" };
+  }
+  if (phase === "completed") {
+    return { label: t("admin.codexRegister.phase.completed"), tone: "neutral" };
+  }
+  if (phase === "running:get_tokens") {
+    return {
+      label: t("admin.codexRegister.phase.runningGetTokens"),
+      tone: "running",
+    };
+  }
+  if (phase === "waiting_manual:subscribe_then_resume") {
+    return {
+      label: t("admin.codexRegister.phase.waitingSubscribeThenResume"),
+      tone: "waiting",
+    };
+  }
+  if (phase === "running:gpt_team_batch") {
+    return {
+      label: t("admin.codexRegister.phase.runningGptTeamBatch"),
+      tone: "running",
+    };
   }
   if (phase === "running:create_parent") {
     return {
@@ -733,6 +754,9 @@ function waitingReasonText(reason?: string | null): string {
   if (reason === "parent_upgrade") {
     return t("admin.codexRegister.waitingReason.parentUpgrade");
   }
+  if (reason === "subscribe_then_resume") {
+    return t("admin.codexRegister.waitingReason.subscribeThenResume");
+  }
   return reason;
 }
 
@@ -769,6 +793,10 @@ const controlbarSummaryLabel = computed(() => {
 
   if (status.value.waiting_reason) {
     return waitingReasonText(status.value.waiting_reason);
+  }
+
+  if (batchSummary.value) {
+    return batchProgressLabel.value;
   }
 
   return proxyDetailLabel.value;
@@ -863,45 +891,23 @@ const resumeGateLabel = computed(
     status.value?.last_resume_gate_reason ||
     t("admin.codexRegister.debug.gateClear"),
 );
-const resumeDiagnosticLabel = computed(() => {
-  if (!status.value) {
-    return t("admin.codexRegister.debug.resumeUnknown");
-  }
+const batchSummary = computed(() => status.value?.last_processed_summary ?? null);
 
-  const phase = status.value.job_phase || "";
-  const gate = status.value.last_resume_gate_reason || "";
-  const tail = status.value.recent_logs_tail || [];
-
-  if (
-    tail.some((item) =>
-      String(item.message || "").includes("resume_request_ignored:not_waiting"),
-    )
-  ) {
-    return t("admin.codexRegister.debug.resumeIgnored");
+const batchProgressLabel = computed(() => {
+  const summary = batchSummary.value;
+  if (!summary) {
+    return t("admin.codexRegister.summary.batchEmpty");
   }
-  if (gate) {
-    return t("admin.codexRegister.debug.resumeGateBlocked", { reason: gate });
-  }
-  if (phase.startsWith("running:")) {
-    return t("admin.codexRegister.debug.resumeStarted");
-  }
-
-  return t("admin.codexRegister.debug.resumeUnknown");
-});
-
-const visibleLogs = computed(() => {
-  if (!resumeOnly.value) return logs.value;
-  return logs.value.filter((item) => {
-    const msg = String(item.message || "");
-    return (
-      msg.includes("resume_") ||
-      msg.includes("resume_gate_") ||
-      msg.includes("http_post_received:path=/resume")
-    );
+  const total = Number(summary.records_seen ?? 0);
+  const created = Number(summary.created ?? 0);
+  const failed = Number(summary.failed ?? 0);
+  return t("admin.codexRegister.summary.batchProgress", {
+    total,
+    created,
+    failed,
   });
 });
 
-const workflowFailureDetail = computed(() => {
   if (status.value?.job_phase !== "failed") {
     return "";
   }
@@ -929,6 +935,14 @@ const waitingTodoSteps = computed(() => {
       t("admin.codexRegister.waitingTodo.parentUpgrade.step1"),
       t("admin.codexRegister.waitingTodo.parentUpgrade.step2"),
       t("admin.codexRegister.waitingTodo.parentUpgrade.step3"),
+    ];
+  }
+
+  if (status.value?.waiting_reason === "subscribe_then_resume") {
+    return [
+      t("admin.codexRegister.waitingTodo.subscribeThenResume.step1"),
+      t("admin.codexRegister.waitingTodo.subscribeThenResume.step2"),
+      t("admin.codexRegister.waitingTodo.subscribeThenResume.step3"),
     ];
   }
 

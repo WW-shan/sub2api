@@ -1045,12 +1045,17 @@ export default {
         proxyConfigured: '已配置',
         proxyMissing: '未配置',
         rangeValue: '{min} - {max}',
-        rangeValueWithUnit: '{min} - {max} 秒'
+        rangeValueWithUnit: '{min} - {max} 秒',
+        batchEmpty: '本轮批量暂无统计数据',
+        batchProgress: '本轮已处理 {total} 条，成功 {created} 条，失败 {failed} 条'
       },
       phase: {
         unknown: '未知阶段',
         idle: '未运行',
         runningCreateParent: '正在创建母号',
+        runningGetTokens: '创建母号中',
+        waitingSubscribeThenResume: '母号开通订阅中',
+        runningGptTeamBatch: '子号批量注册/邀请中',
         waitingManual: '等待你手动操作',
         runningPreResumeCheck: '继续前校验中',
         runningInviteChildren: '正在邀请子号',
@@ -1060,7 +1065,8 @@ export default {
         failed: '执行失败'
       },
       waitingReason: {
-        parentUpgrade: '需要先完成母号升级'
+        parentUpgrade: '需要先完成母号升级',
+        subscribeThenResume: '等待你在官网完成订阅后再点击继续'
       },
       waitingTodo: {
         title: '待办清单',
@@ -1069,6 +1075,11 @@ export default {
           step1: '登录母号并完成升级流程。',
           step2: '确认升级成功且账户状态正常。',
           step3: '返回本页后点击“继续”。'
+        },
+        subscribeThenResume: {
+          step1: '使用上方提示的母号在官网开通订阅。',
+          step2: '确认订阅状态已生效。',
+          step3: '返回本页后点击“继续”恢复自动流程。'
         },
         generic: {
           step1: '根据等待原因完成对应手动操作。',
