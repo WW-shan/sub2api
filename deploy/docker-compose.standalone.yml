@@ -93,6 +93,12 @@ services:
       # SECURITY: This repo does not embed third-party client_secret.
       - GEMINI_CLI_OAUTH_CLIENT_SECRET=${GEMINI_CLI_OAUTH_CLIENT_SECRET:-}
       - ANTIGRAVITY_OAUTH_CLIENT_SECRET=${ANTIGRAVITY_OAUTH_CLIENT_SECRET:-}
+
+      # =======================================================================
+      # Codex Register Group Routing
+      # =======================================================================
+      - CODEX_GROUP_IDS_TEAM=${CODEX_GROUP_IDS_TEAM:-}
+      - CODEX_GROUP_IDS_FREE=${CODEX_GROUP_IDS_FREE:-}
     healthcheck:
       test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
       interval: 30s

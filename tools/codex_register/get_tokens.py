@@ -43,6 +43,7 @@ MAIL_DOMAIN: str = "wwcloud.me"
 MAIL_POLL_SECONDS: int = 3
 MAIL_POLL_MAX_ATTEMPTS: int = 40
 RESULTS_FILE: str = "results.txt"
+ACCOUNTS_JSONL_FILE: str = "accounts.jsonl"
 
 # OAuth 常量
 OPENAI_AUTH_BASE = "https://auth.openai.com"
@@ -949,12 +950,29 @@ def oauth_login(email: str, password: str, proxy: str = "") -> Optional[str]:
 _save_lock = __import__("threading").Lock()
 
 
+def build_accounts_jsonl_record(email: str, password: str, access_token: str) -> Dict[str, Any]:
+    return {
+        "email": str(email or "").strip().lower(),
+        "password": str(password or "").strip(),
+        "access_token": str(access_token or "").strip(),
+        "invited": False,
+        "team_name": "",
+        "source": "get_tokens",
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+
+
 def save_result(email: str, password: str, access_token: str) -> None:
-    """追加保存一行到 results.txt"""
+    """追加保存结果到 results.txt 和 accounts.jsonl"""
+    record = build_accounts_jsonl_record(email, password, access_token)
+    results_line = f"{email}|{password}|{access_token}\n"
+    jsonl_line = json.dumps(record, ensure_ascii=False) + "\n"
     with _save_lock:
         with open(RESULTS_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{email}|{password}|{access_token}\n")
-    logger.info("已保存: %s → %s", email, RESULTS_FILE)
+            f.write(results_line)
+        with open(ACCOUNTS_JSONL_FILE, "a", encoding="utf-8") as f:
+            f.write(jsonl_line)
+    logger.info("已保存: %s → %s, %s", record["email"], RESULTS_FILE, ACCOUNTS_JSONL_FILE)
 
 
 # ============================================================

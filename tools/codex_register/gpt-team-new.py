@@ -57,6 +57,7 @@ MAIL_POLL_MAX_ATTEMPTS: int = 40
 
 # 输出文件
 ACCOUNTS_FILE: str = "accounts.txt"
+ACCOUNTS_JSONL_FILE: str = "accounts.jsonl"
 INVITE_TRACKER_FILE: str = "invite_tracker.json"
 
 # 车头（Teams）列表（按需填写）
@@ -1122,6 +1123,35 @@ def build_token_dict(email: str, tokens: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def build_importable_account_record(
+    *,
+    email: str,
+    password: str,
+    token_dict: Dict[str, Any],
+    invited: bool,
+    team_name: str = "",
+    auth_file: str = "",
+) -> Optional[Dict[str, Any]]:
+    access_token = str(token_dict.get("access_token") or "").strip()
+    if not email or "@" not in email or not access_token:
+        return None
+
+    created_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    return {
+        "email": email,
+        "password": password,
+        "access_token": access_token,
+        "refresh_token": str(token_dict.get("refresh_token") or ""),
+        "id_token": str(token_dict.get("id_token") or ""),
+        "account_id": str(token_dict.get("account_id") or ""),
+        "auth_file": auth_file,
+        "expires_at": str(token_dict.get("expired") or ""),
+        "invited": bool(invited),
+        "team_name": team_name,
+        "created_at": created_at,
+        "source": "gpt-team-new",
+    }
+
 
 # ============================================================
 # ⑭ 母号 Session 自动拉取（chatgpt.com 专用 HTTP 登录）
@@ -1720,12 +1750,15 @@ def auto_invite_to_team(email):
         for team_key, emails in tracker["teams"].items():
             if email in emails:
                 logger.info("⚠️ %s 已邀请，跳过", email)
-                return False
+                existing_team = next((team for team in TEAMS if team.get("email") == team_key), None)
+                existing_team_name = str((existing_team or {}).get("name") or team_key)
+                return False, existing_team_name
         team = get_available_team(tracker)
         if not team:
             logger.warning("所有车头已满，无可用名额")
-            return False
+            return False, ""
         team_key = team["email"]
+        team_name = str(team.get("name") or team_key)
         if team_key not in tracker["teams"]:
             tracker["teams"][team_key] = []
         tracker["teams"][team_key].append(email)
@@ -1741,8 +1774,8 @@ def auto_invite_to_team(email):
             save_invite_tracker(tracker)
     else:
         invited_count = len(tracker["teams"].get(team_key, []))
-        logger.info("车头状态: %s %d/%d", team.get("name"), invited_count, team.get("max_invites", 5))
-    return ok
+        logger.info("车头状态: %s %d/%d", team_name, invited_count, team.get("max_invites", 5))
+    return ok, team_name
 
 
 # ============================================================
@@ -1758,6 +1791,14 @@ def save_to_txt(email, password):
         with open(ACCOUNTS_FILE, "a", encoding="utf-8") as f:
             f.write(f"{email}|{password}|{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     logger.info("📄 已保存: %s → %s", email, ACCOUNTS_FILE)
+
+
+def append_account_jsonl(record: Dict[str, Any]) -> None:
+    """追加写入可导入账号记录。"""
+    with _csv_lock:
+        with open(ACCOUNTS_JSONL_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    logger.info("📄 JSONL 已追加: %s → %s", record.get("email"), ACCOUNTS_JSONL_FILE)
 
 
 # ============================================================
@@ -1794,9 +1835,10 @@ def register_one_account(proxy=""):
 
     # 3. 团队邀请
     invited = False
+    team_name = ""
     if TEAMS:
         logger.info("📨 发送团队邀请 | email=%s", email)
-        invited = auto_invite_to_team(email)
+        invited, team_name = auto_invite_to_team(email)
         if not invited:
             logger.warning("⚠️ 邀请失败，继续尝试获取 Codex token | email=%s", email)
 
@@ -1832,12 +1874,33 @@ def register_one_account(proxy=""):
     local_dir = "output_tokens"
     os.makedirs(local_dir, exist_ok=True)
     token_file = os.path.join(local_dir, f"{email}.json")
+    token_saved = False
     try:
         with open(token_file, "w", encoding="utf-8") as f:
             json.dump(token_dict, f, ensure_ascii=False, indent=2)
+        token_saved = True
         logger.info("📁 token 已保存本地: %s", token_file)
     except Exception as e:
         logger.warning("本地保存 token 失败: %s", e)
+
+    record = build_importable_account_record(
+        email=email,
+        password=password,
+        token_dict=token_dict,
+        invited=invited,
+        team_name=team_name,
+        auth_file=token_file if token_saved else "",
+    )
+    if record is None:
+        logger.warning("⚠️ 账号记录不可导入，跳过 JSONL 输出 | email=%s", email)
+        return email, password, False
+
+    try:
+        append_account_jsonl(record)
+    except Exception as e:
+        logger.error("accounts.jsonl 写入失败 | email=%s | error=%s", email, e)
+        logger.warning("⚠️ token 已获取，但 JSONL 输出失败，流程不计为完整成功 | email=%s", email)
+        return email, password, False
 
     logger.info("🎉 完整流程成功: %s", email)
     return email, password, True

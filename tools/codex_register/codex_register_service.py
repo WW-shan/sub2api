@@ -4,14 +4,15 @@ import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import importlib
 import json
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
-import re
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -48,6 +49,7 @@ class CodexRegisterService:
         self._stop_requested = False
 
         self._base_dir = Path(__file__).resolve().parent
+        self._accounts_jsonl_path = self._base_dir / "accounts.jsonl"
 
     async def handle_path(self, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = payload or {}
@@ -65,7 +67,8 @@ class CodexRegisterService:
             return self._result(True, data=await self._list_logs())
 
         if path == "/accounts":
-            return self._result(True, data=[])
+            state = await self._load_state()
+            return self._result(True, data=self._build_accounts_status_data(state))
 
         if path == "/enable":
             return await self._handle_enable()
@@ -98,7 +101,7 @@ class CodexRegisterService:
             )
             state["last_error"] = ""
             self._clear_resume_fields(state)
-            state["results_baseline_offset"] = self._capture_results_baseline_offset()
+            state["accounts_jsonl_baseline_offset"] = self._capture_accounts_jsonl_offset()
             await self._save_state(state)
             await self._append_log("enable_started", command=command)
 
@@ -304,7 +307,7 @@ class CodexRegisterService:
 
             if return_code == 0 and mode == "enable":
                 parsed_result = self._extract_latest_valid_results_record(
-                    baseline_offset=int(state.get("results_baseline_offset") or 0)
+                    baseline_offset=int(state.get("accounts_jsonl_baseline_offset") or 0)
                 )
                 resume_context = self._build_resume_context_from_parsed_result(parsed_result)
                 resume_email = str(resume_context.get("email") or "").strip()
@@ -327,6 +330,7 @@ class CodexRegisterService:
                     return
 
                 resume_hint = self._build_resume_hint(resume_context)
+                line_end_offset = int(parsed_result.get("line_end_offset") or 0) if isinstance(parsed_result, dict) else 0
 
                 self._set_phase(
                     state,
@@ -343,11 +347,32 @@ class CodexRegisterService:
                 state["manual_gate"] = {"name": "subscribe_then_resume", "status": "waiting"}
                 state["resume_context"] = resume_context
                 state["resume_hint"] = resume_hint
+                state["accounts_jsonl_offset"] = line_end_offset
+                state["accounts_jsonl_baseline_offset"] = line_end_offset
                 await self._save_state(state)
                 await self._append_log("get_tokens_completed")
                 return
 
             if return_code == 0 and mode == "resume":
+                try:
+                    processing_summary = self._process_accounts_jsonl_records(state)
+                except Exception as exc:
+                    self._set_phase(
+                        state,
+                        to_phase="failed",
+                        waiting_reason="",
+                        enabled=False,
+                        can_start=True,
+                        can_resume=False,
+                        can_abandon=True,
+                        reason="accounts_processing_failed",
+                    )
+                    state["last_error"] = f"accounts_processing_failed:{exc}"
+                    self._clear_resume_fields(state)
+                    await self._save_state(state)
+                    await self._append_log("accounts_processing_failed", error=str(exc))
+                    return
+
                 self._set_phase(
                     state,
                     to_phase="completed",
@@ -362,7 +387,13 @@ class CodexRegisterService:
                 state["last_success"] = self._now_iso()
                 self._clear_resume_fields(state)
                 await self._save_state(state)
-                await self._append_log("gpt_batch_completed", email=context.get("email", ""))
+                if int(processing_summary.get("failed") or 0) > 0:
+                    await self._append_log("accounts_processing_partial", summary=processing_summary)
+                await self._append_log(
+                    "gpt_batch_completed",
+                    email=context.get("email", ""),
+                    accounts_summary=processing_summary,
+                )
                 return
 
             self._set_phase(
@@ -380,68 +411,82 @@ class CodexRegisterService:
             await self._save_state(state)
             await self._append_log("process_failed", process=name, return_code=return_code)
 
-    def _capture_results_baseline_offset(self) -> int:
-        path = self._base_dir / "results.txt"
+    def _capture_accounts_jsonl_offset(self) -> int:
         try:
-            return int(path.stat().st_size)
+            return int(self._accounts_jsonl_path.stat().st_size)
         except Exception:
             return 0
 
     def _extract_latest_valid_results_record(self, *, baseline_offset: int) -> Optional[Dict[str, Any]]:
-        path = self._base_dir / "results.txt"
+        records, _next_offset = self._read_accounts_jsonl_records(start_offset=baseline_offset)
+        if not records:
+            return None
+        return records[-1]
+
+    def _read_accounts_jsonl_records(self, *, start_offset: int) -> Tuple[List[Dict[str, Any]], int]:
         try:
-            with path.open("rb") as f:
-                f.seek(max(0, int(baseline_offset)))
+            with self._accounts_jsonl_path.open("rb") as f:
+                f.seek(max(0, int(start_offset)))
                 chunk = f.read()
         except Exception:
-            return None
+            return [], max(0, int(start_offset))
 
         if not chunk:
-            return None
+            return [], max(0, int(start_offset))
 
         content = chunk.decode("utf-8", errors="ignore")
-        latest: Optional[Dict[str, Any]] = None
-        running_offset = max(0, int(baseline_offset))
+        running_offset = max(0, int(start_offset))
+        records: List[Dict[str, Any]] = []
 
         for line in content.splitlines(keepends=True):
-            parsed = self._parse_results_line(line)
+            line_size = len(line.encode("utf-8", errors="ignore"))
+            parsed = self._parse_account_jsonl_line(line)
             if parsed is not None:
-                latest = {
-                    **parsed,
-                    "line_offset": running_offset,
-                    "line_end_offset": running_offset + len(line.encode("utf-8", errors="ignore")),
-                }
-            running_offset += len(line.encode("utf-8", errors="ignore"))
+                records.append(
+                    {
+                        **parsed,
+                        "line_offset": running_offset,
+                        "line_end_offset": running_offset + line_size,
+                    }
+                )
+            running_offset += line_size
 
-        return latest
+        return records, max(0, int(start_offset)) + len(chunk)
 
-    def _parse_results_line(self, line: str) -> Optional[Dict[str, str]]:
+    def _parse_account_jsonl_line(self, line: str) -> Optional[Dict[str, Any]]:
         normalized = str(line or "").strip()
         if not normalized:
             return None
 
-        parts = normalized.split("|")
-        if len(parts) != 3:
+        try:
+            parsed = json.loads(normalized)
+        except Exception:
             return None
 
-        email = parts[0].strip()
-        password = parts[1].strip()
-        access_token = parts[2].strip()
+        if not isinstance(parsed, dict):
+            return None
 
+        email = str(parsed.get("email") or "").strip().lower()
+        access_token = str(parsed.get("access_token") or "").strip()
         if not email or "@" not in email:
             return None
-        if not password:
-            return None
-        if not access_token:
-            return None
-        if re.search(r"\s", access_token):
+        if not access_token or re.search(r"\s", access_token):
             return None
 
-        return {
-            "email": email,
-            "password": password,
-            "access_token": access_token,
-        }
+        record = dict(parsed)
+        record["email"] = email
+        record["access_token"] = access_token
+        record["password"] = str(parsed.get("password") or "").strip()
+        record["refresh_token"] = str(parsed.get("refresh_token") or "").strip()
+        record["id_token"] = str(parsed.get("id_token") or "").strip()
+        record["account_id"] = str(parsed.get("account_id") or "").strip()
+        record["auth_file"] = str(parsed.get("auth_file") or "").strip()
+        record["expires_at"] = str(parsed.get("expires_at") or parsed.get("expired") or "").strip()
+        record["team_name"] = str(parsed.get("team_name") or "").strip()
+        record["created_at"] = str(parsed.get("created_at") or "").strip()
+        record["source"] = str(parsed.get("source") or "accounts_jsonl").strip() or "accounts_jsonl"
+        record["invited"] = self._coerce_bool(parsed.get("invited"))
+        return record
 
     def _build_resume_context_from_parsed_result(self, parsed_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not isinstance(parsed_result, dict):
@@ -449,14 +494,15 @@ class CodexRegisterService:
                 "email": "",
                 "team_name": "1",
                 "source": "parse_path",
+                "accounts_jsonl_offset": 0,
             }
 
         return {
             "email": str(parsed_result.get("email") or "").strip(),
             "access_token_raw": str(parsed_result.get("access_token") or "").strip(),
-            "team_name": "1",
+            "team_name": str(parsed_result.get("team_name") or "1").strip() or "1",
             "source": "parse_path",
-            "results_offset": int(parsed_result.get("line_end_offset") or 0),
+            "accounts_jsonl_offset": int(parsed_result.get("line_end_offset") or 0),
         }
 
     def _build_resume_hint(self, resume_context: Dict[str, Any]) -> Dict[str, Any]:
@@ -492,6 +538,333 @@ class CodexRegisterService:
             "module.TEAMS=[{'name':'1','email':email,'password':''}];"
             "module.run_batch()"
         )
+
+    def _coerce_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return False
+
+    def _get_env(self, name: str, default: Any = None, *, required: bool = False) -> str:
+        value = os.getenv(name, default)
+        if required and not value:
+            raise RuntimeError(f"missing_required_env:{name}")
+        return str(value or "")
+
+    def _parse_group_ids_from_env(self, env_name: str) -> List[int]:
+        raw = self._get_env(env_name, "")
+        if not raw:
+            return []
+
+        group_ids: List[int] = []
+        seen = set()
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                value = int(item)
+            except ValueError:
+                continue
+            if value <= 0 or value in seen:
+                continue
+            seen.add(value)
+            group_ids.append(value)
+        return group_ids
+
+    def _resolve_group_ids_for_record(self, record: Dict[str, Any]) -> List[int]:
+        env_name = "CODEX_GROUP_IDS_TEAM" if self._coerce_bool(record.get("invited")) else "CODEX_GROUP_IDS_FREE"
+        return self._parse_group_ids_from_env(env_name)
+
+    def _create_db_connection(self) -> Any:
+        psycopg2 = importlib.import_module("psycopg2")
+
+        conn = psycopg2.connect(
+            host=self._get_env("POSTGRES_HOST", "postgres"),
+            port=int(self._get_env("POSTGRES_PORT", "5432") or "5432"),
+            user=self._get_env("POSTGRES_USER", required=True),
+            password=self._get_env("POSTGRES_PASSWORD", required=True),
+            dbname=self._get_env("POSTGRES_DB", required=True),
+            connect_timeout=int(self._get_env("POSTGRES_CONNECT_TIMEOUT", "5") or "5"),
+        )
+        conn.autocommit = True
+        return conn
+
+    def _pg_json(self, value: Dict[str, Any]) -> Any:
+        return importlib.import_module("psycopg2.extras").Json(value)
+
+    def _ensure_dict(self, value: object) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                return {}
+            if isinstance(parsed, dict):
+                return dict(parsed)
+        return {}
+
+    def _get_existing_account(self, cur: Any, email: str, account_id: str) -> Optional[Tuple[Any, ...]]:
+        conditions: List[str] = []
+        params: List[str] = []
+
+        if email:
+            conditions.append("LOWER(credentials ->> 'email') = LOWER(%s)")
+            params.append(email)
+        if account_id:
+            conditions.append("credentials ->> 'account_id' = %s")
+            params.append(account_id)
+
+        if not conditions:
+            return None
+
+        cur.execute(
+            "SELECT id, name, credentials, extra FROM accounts "
+            "WHERE platform = 'openai' AND type = 'oauth' AND deleted_at IS NULL "
+            f"AND ({' OR '.join(conditions)}) ORDER BY id LIMIT 1",
+            tuple(params),
+        )
+        return cur.fetchone()
+
+    def _build_account_credentials(self, existing: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
+        credentials = dict(existing)
+        credentials["email"] = str(record.get("email") or credentials.get("email") or "").strip().lower()
+        credentials["access_token"] = str(record.get("access_token") or credentials.get("access_token") or "").strip()
+
+        refresh_token = str(record.get("refresh_token") or credentials.get("refresh_token") or "").strip()
+        if refresh_token:
+            credentials["refresh_token"] = refresh_token
+        else:
+            credentials.pop("refresh_token", None)
+
+        id_token = str(record.get("id_token") or credentials.get("id_token") or "").strip()
+        if id_token:
+            credentials["id_token"] = id_token
+        else:
+            credentials.pop("id_token", None)
+
+        account_id = str(record.get("account_id") or credentials.get("account_id") or "").strip()
+        if account_id:
+            credentials["account_id"] = account_id
+            credentials["chatgpt_account_id"] = account_id
+
+        expires_at = str(record.get("expires_at") or credentials.get("expires_at") or "").strip()
+        if expires_at:
+            credentials["expires_at"] = expires_at
+
+        auth_file = str(record.get("auth_file") or credentials.get("codex_auth_file") or "").strip()
+        if auth_file:
+            credentials["codex_auth_file"] = auth_file
+
+        source = str(record.get("source") or credentials.get("source") or "codex-auto-register").strip()
+        credentials["source"] = source or "codex-auto-register"
+        return credentials
+
+    def _build_account_extra(self, existing: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
+        extra = dict(existing)
+        extra["codex_auto_register"] = True
+        extra["invited"] = self._coerce_bool(record.get("invited"))
+
+        team_name = str(record.get("team_name") or extra.get("team_name") or "").strip()
+        if team_name:
+            extra["team_name"] = team_name
+
+        created_at = str(record.get("created_at") or extra.get("created_at") or "").strip()
+        if created_at:
+            extra["created_at"] = created_at
+
+        source = str(record.get("source") or extra.get("source") or "accounts_jsonl").strip()
+        if source:
+            extra["source"] = source
+
+        auth_file = str(record.get("auth_file") or extra.get("codex_auth_file") or "").strip()
+        if auth_file:
+            extra["codex_auth_file"] = auth_file
+
+        return extra
+
+    def _normalize_extra_for_compare(self, extra: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = self._ensure_dict(extra)
+        normalized.pop("codex_auto_register_updated_at", None)
+        return normalized
+
+    def _should_update_account(
+        self,
+        current_credentials: Dict[str, Any],
+        next_credentials: Dict[str, Any],
+        current_extra: Dict[str, Any],
+        next_extra: Dict[str, Any],
+    ) -> bool:
+        return current_credentials != next_credentials or self._normalize_extra_for_compare(current_extra) != self._normalize_extra_for_compare(next_extra)
+
+    def _compute_group_binding_changes(self, current_group_ids: set[int], next_group_ids: set[int]) -> Tuple[set[int], set[int]]:
+        return next_group_ids - current_group_ids, current_group_ids - next_group_ids
+
+    def _bind_account_groups(self, cur: Any, account_id: int, group_ids: List[int]) -> None:
+        if not group_ids:
+            return
+
+        desired_priority = {group_id: index for index, group_id in enumerate(group_ids, start=1)}
+        desired_ids = set(desired_priority.keys())
+
+        cur.execute("SELECT group_id, priority FROM account_groups WHERE account_id = %s", (account_id,))
+        current_rows = cur.fetchall()
+        current_priority = {int(row[0]): int(row[1]) for row in current_rows}
+        current_ids = set(current_priority.keys())
+
+        to_add, to_remove = self._compute_group_binding_changes(current_ids, desired_ids)
+        for group_id in sorted(to_remove):
+            cur.execute("DELETE FROM account_groups WHERE account_id = %s AND group_id = %s", (account_id, group_id))
+
+        for group_id in sorted(to_add):
+            cur.execute(
+                "INSERT INTO account_groups (account_id, group_id, priority, created_at) VALUES (%s, %s, %s, NOW()) "
+                "ON CONFLICT (account_id, group_id) DO UPDATE SET priority = EXCLUDED.priority",
+                (account_id, group_id, desired_priority[group_id]),
+            )
+
+        for group_id in sorted(desired_ids.intersection(current_ids)):
+            next_priority = desired_priority[group_id]
+            if current_priority[group_id] != next_priority:
+                cur.execute(
+                    "UPDATE account_groups SET priority = %s WHERE account_id = %s AND group_id = %s",
+                    (next_priority, account_id, group_id),
+                )
+
+    def _record_identifier(self, record: Dict[str, Any]) -> str:
+        email = str(record.get("email") or "").strip()
+        account_id = str(record.get("account_id") or "").strip()
+        return email or account_id or "unknown"
+
+    def _upsert_account(self, cur: Any, record: Dict[str, Any]) -> str:
+        email = str(record.get("email") or "").strip().lower()
+        access_token = str(record.get("access_token") or "").strip()
+        account_id = str(record.get("account_id") or "").strip()
+        if not email or not access_token:
+            return "skipped"
+
+        existing = self._get_existing_account(cur, email, account_id)
+        group_ids = self._resolve_group_ids_for_record(record)
+
+        if existing is not None:
+            existing_id, _existing_name, existing_credentials, existing_extra = existing
+            current_credentials = self._ensure_dict(existing_credentials)
+            current_extra = self._ensure_dict(existing_extra)
+            next_credentials = self._build_account_credentials(current_credentials, record)
+            next_extra = self._build_account_extra(current_extra, record)
+
+            if not self._should_update_account(current_credentials, next_credentials, current_extra, next_extra):
+                self._bind_account_groups(cur, int(existing_id), group_ids)
+                return "skipped"
+
+            next_extra["codex_auto_register_updated_at"] = self._now_iso()
+            cur.execute(
+                "UPDATE accounts SET credentials = %s, extra = %s, status = 'active', schedulable = true, updated_at = NOW() WHERE id = %s",
+                (self._pg_json(next_credentials), self._pg_json(next_extra), existing_id),
+            )
+            self._bind_account_groups(cur, int(existing_id), group_ids)
+            return "updated"
+
+        identifier = account_id or email
+        name = f"codex-{identifier}"
+        credentials = self._build_account_credentials({}, record)
+        extra = self._build_account_extra({}, record)
+        extra["codex_auto_register_updated_at"] = self._now_iso()
+
+        cur.execute(
+            "INSERT INTO accounts (name, platform, type, credentials, extra, concurrency, priority, rate_multiplier, status, schedulable, auto_pause_on_expired) "
+            "VALUES (%s, 'openai', 'oauth', %s, %s, 3, 50, 1.0, 'active', true, true) RETURNING id",
+            (name, self._pg_json(credentials), self._pg_json(extra)),
+        )
+        created_row = cur.fetchone()
+        created_id = int(created_row[0])
+        self._bind_account_groups(cur, created_id, group_ids)
+        return "created"
+
+    def _process_accounts_jsonl_records(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        start_offset = int(state.get("accounts_jsonl_offset") or 0)
+        records, next_offset = self._read_accounts_jsonl_records(start_offset=start_offset)
+        summary = {
+            "start_offset": start_offset,
+            "end_offset": next_offset,
+            "records_seen": len(records),
+            "created": 0,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "errors": [],
+        }
+
+        if not records:
+            state["accounts_jsonl_offset"] = next_offset
+            state["last_processed_records"] = 0
+            state["last_processed_offset"] = next_offset
+            state["last_processed_summary"] = dict(summary)
+            return summary
+
+        conn = self._create_db_connection()
+        cur = conn.cursor()
+        last_successful_offset = start_offset
+        processed_records = 0
+        try:
+            for record in records:
+                try:
+                    action = self._upsert_account(cur, record)
+                except Exception as exc:
+                    summary["failed"] += 1
+                    summary["errors"].append(f"{self._record_identifier(record)}:{exc}")
+                    summary["end_offset"] = last_successful_offset
+                    break
+
+                processed_records += 1
+                last_successful_offset = int(record.get("line_end_offset") or last_successful_offset)
+                summary["end_offset"] = last_successful_offset
+
+                if action == "created":
+                    summary["created"] += 1
+                elif action == "updated":
+                    summary["updated"] += 1
+                else:
+                    summary["skipped"] += 1
+        finally:
+            self._safe_close(cur)
+            self._safe_close(conn)
+
+        state["accounts_jsonl_offset"] = int(summary["end_offset"])
+        state["last_processed_records"] = processed_records
+        state["last_processed_offset"] = int(summary["end_offset"])
+        state["total_created"] = int(state.get("total_created") or 0) + int(summary["created"])
+        state["total_updated"] = int(state.get("total_updated") or 0) + int(summary["updated"])
+        state["total_skipped"] = int(state.get("total_skipped") or 0) + int(summary["skipped"])
+        state["total_failed"] = int(state.get("total_failed") or 0) + int(summary["failed"])
+        state["last_processed_summary"] = dict(summary)
+        return summary
+
+    def _safe_close(self, value: Any) -> None:
+        close = getattr(value, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    def _build_accounts_status_data(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        summary = state.get("last_processed_summary")
+        return {
+            "accounts_jsonl_offset": int(state.get("accounts_jsonl_offset") or 0),
+            "accounts_jsonl_baseline_offset": int(state.get("accounts_jsonl_baseline_offset") or 0),
+            "last_processed_offset": int(state.get("last_processed_offset") or 0),
+            "last_processed_records": int(state.get("last_processed_records") or 0),
+            "total_created": int(state.get("total_created") or 0),
+            "total_updated": int(state.get("total_updated") or 0),
+            "total_skipped": int(state.get("total_skipped") or 0),
+            "total_failed": int(state.get("total_failed") or 0),
+            "last_processed_summary": dict(summary) if isinstance(summary, dict) else None,
+        }
 
     def _has_active_process_locked(self) -> bool:
         process = self._active_process
@@ -589,6 +962,9 @@ class CodexRegisterService:
             "sleep_min": self.sleep_min,
             "sleep_max": self.sleep_max,
             "total_created": 0,
+            "total_updated": 0,
+            "total_skipped": 0,
+            "total_failed": 0,
             "last_success": "",
             "last_error": "",
             "proxy": "",
@@ -604,7 +980,11 @@ class CodexRegisterService:
             "manual_gate": None,
             "resume_context": None,
             "resume_hint": None,
-            "results_baseline_offset": 0,
+            "accounts_jsonl_offset": 0,
+            "accounts_jsonl_baseline_offset": 0,
+            "last_processed_offset": 0,
+            "last_processed_records": 0,
+            "last_processed_summary": None,
         }
 
     def _is_authorized(self, payload: Dict[str, Any]) -> bool:
@@ -789,4 +1169,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
