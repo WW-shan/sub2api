@@ -23,6 +23,7 @@ import string
 import sys
 import time
 import uuid
+import importlib.util
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -117,6 +118,40 @@ def create_session(proxy: str = "") -> requests.Session:
 
 
 http_session = create_session()
+
+
+def _load_gpt_team_new_module():
+    script_path = os.path.join(SCRIPT_DIR, "gpt-team-new.py")
+    if not os.path.exists(script_path):
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "tools.codex_register.gpt_team_new_for_get_tokens",
+        script_path,
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        return None
+    return module
+
+
+def _get_gpt_team_helpers() -> Dict[str, Any]:
+    module = _load_gpt_team_new_module()
+    if module is None:
+        return {
+            "build_token_dict": None,
+            "build_importable_account_record": None,
+            "chatgpt_http_login": None,
+        }
+    return {
+        "build_token_dict": getattr(module, "build_token_dict", None),
+        "build_importable_account_record": getattr(module, "build_importable_account_record", None),
+        "chatgpt_http_login": getattr(module, "chatgpt_http_login", None),
+    }
+
 
 # ============================================================
 # PKCE
@@ -968,6 +1003,15 @@ def build_accounts_jsonl_record(email: str, password: str, access_token: str, re
     }
 
 
+def save_result_to_results_txt(email: str, password: str, access_token: str, refresh_token: str) -> None:
+    """只追加保存结果到 results.txt（兼容旧格式）。"""
+    results_line = f"{email}|{password}|{access_token}|{refresh_token}\n"
+    with _save_lock:
+        with open(RESULTS_FILE, "a", encoding="utf-8") as f:
+            f.write(results_line)
+    logger.info("已保存到结果文本: %s → %s", email, RESULTS_FILE)
+
+
 def save_result(email: str, password: str, access_token: str, refresh_token: str) -> None:
     """追加保存结果到 results.txt 和 accounts.jsonl"""
     record = build_accounts_jsonl_record(email, password, access_token, refresh_token)
@@ -1008,28 +1052,102 @@ def process_one(proxy: str = "") -> bool:
     logger.info("注册成功: %s", email)
     time.sleep(3)
 
-    # 3. 登录获取 access_token（最多重试 3 次）
-    access_token: str = ""
-    refresh_token: str = ""
+    # 3. 登录获取 token（最多重试 3 次）
     token_pair: Optional[Tuple[str, str]] = None
     for attempt in range(1, 4):
         token_pair = oauth_login(
             email=email, password=password, proxy=proxy
         )
         if token_pair:
-            access_token, refresh_token = token_pair
             break
         if attempt < 3:
             logger.warning("登录第 %d 次失败，15s 后重试...", attempt)
             time.sleep(15)
 
-    if not access_token:
+    if not token_pair:
         logger.warning("获取 access_token 失败（注册已成功）: %s", email)
-        save_result(email, password, "", "")
+        save_result_to_results_txt(email, password, "", "")
         return False
 
-    # 4. 保存
-    save_result(email, password, access_token, refresh_token)
+    access_token, refresh_token = token_pair
+    tokens: Dict[str, Any] = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "id_token": "",
+    }
+
+    helpers = _get_gpt_team_helpers()
+    build_token_dict = helpers.get("build_token_dict")
+    build_importable_account_record = helpers.get("build_importable_account_record")
+    chatgpt_http_login = helpers.get("chatgpt_http_login")
+
+    if callable(build_token_dict):
+        token_dict = build_token_dict(email, tokens)
+    else:
+        token_dict = {
+            "type": "codex",
+            "email": email,
+            "access_token": str(tokens.get("access_token") or ""),
+            "refresh_token": str(tokens.get("refresh_token") or ""),
+            "id_token": str(tokens.get("id_token") or ""),
+            "account_id": "",
+            "expired": "",
+            "last_refresh": "",
+        }
+
+    plan_type = ""
+    org_id_chatgpt = ""
+    if callable(chatgpt_http_login):
+        try:
+            _access_token_chatgpt, org_id_chatgpt, plan_type = chatgpt_http_login(
+                email=email,
+                password=password,
+                proxy=proxy,
+                tag=email,
+            )
+            logger.info("planType 检测 | email=%s | plan_type=%s", email, plan_type)
+        except Exception as e:
+            logger.warning("读取 planType 失败（不影响注册）| email=%s | error=%s", email, e)
+
+    if plan_type:
+        token_dict["plan_type"] = plan_type
+    if org_id_chatgpt:
+        token_dict["organization_id"] = org_id_chatgpt
+    token_dict["codex_register_role"] = "parent"
+
+    save_result_to_results_txt(
+        email,
+        password,
+        str(token_dict.get("access_token") or ""),
+        str(token_dict.get("refresh_token") or ""),
+    )
+
+    record = None
+    if callable(build_importable_account_record):
+        try:
+            record = build_importable_account_record(
+                email=email,
+                password=password,
+                token_dict=token_dict,
+                invited=False,
+                team_name="",
+                auth_file="",
+            )
+        except Exception as e:
+            logger.warning("构造导入记录失败（不影响注册）| email=%s | error=%s", email, e)
+
+    if record is None:
+        logger.warning("账号记录不可导入，跳过 JSONL 输出 | email=%s", email)
+        return False
+
+    record["source"] = "get_tokens"
+    record["codex_register_role"] = "parent"
+
+    jsonl_line = json.dumps(record, ensure_ascii=False) + "\n"
+    with _save_lock:
+        with open(ACCOUNTS_JSONL_FILE, "a", encoding="utf-8") as f:
+            f.write(jsonl_line)
+    logger.info("已保存 JSONL 记录: %s → %s", record.get("email"), ACCOUNTS_JSONL_FILE)
     logger.info("完成: %s", email)
     return True
 
