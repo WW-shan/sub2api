@@ -49,7 +49,9 @@ class CodexRegisterService:
         self._stop_requested = False
 
         self._base_dir = Path(__file__).resolve().parent
-        self._accounts_jsonl_path = self._base_dir / "accounts.jsonl"
+        self._data_dir = Path(os.getenv("CODEX_REGISTER_DATA_DIR") or str(self._base_dir)).resolve()
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._accounts_jsonl_path = self._data_dir / "accounts.jsonl"
 
     async def handle_path(self, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = payload or {}
@@ -420,8 +422,8 @@ class CodexRegisterService:
           - refresh_token/access_token: optional, may be empty strings
           - account_id: optional string or None
           - source: record source (e.g., 'get_tokens', 'gpt-team-new', 'accounts_jsonl')
-          - codex_register_role, plan_type, organization_id, workspace_id: currently None
-          - created_at/updated_at: best-effort timestamps from record or empty string
+          - codex_register_role, plan_type, organization_id, workspace_id: currently optional
+          - created_at/updated_at: best-effort timestamps from record
         """
         records, _next_offset = self._read_accounts_jsonl_records(start_offset=0)
         accounts: List[Dict[str, Any]] = []
@@ -430,6 +432,8 @@ class CodexRegisterService:
             email = str(record.get("email") or "").strip()
             if not email:
                 continue
+            created_at = str(record.get("created_at") or "")
+            updated_at = str(record.get("updated_at") or created_at)
             account = {
                 "id": next_id,
                 "email": email,
@@ -437,18 +441,17 @@ class CodexRegisterService:
                 "access_token": record.get("access_token") or "",
                 "account_id": (record.get("account_id") or "") or None,
                 "source": record.get("source") or "accounts_jsonl",
-                "codex_register_role": None,
-                "plan_type": None,
-                "organization_id": None,
-                "workspace_id": None,
-                "created_at": record.get("created_at") or "",
-                "updated_at": record.get("created_at") or "",
+                "codex_register_role": str(record.get("codex_register_role") or "").strip() or None,
+                "plan_type": str(record.get("plan_type") or "").strip() or None,
+                "organization_id": str(record.get("organization_id") or "").strip() or None,
+                "workspace_id": str(record.get("workspace_id") or "").strip() or None,
+                "created_at": created_at,
+                "updated_at": updated_at,
             }
             accounts.append(account)
             next_id += 1
         return accounts
 
-    def _capture_accounts_jsonl_offset(self) -> int:
         try:
             return int(self._accounts_jsonl_path.stat().st_size)
         except Exception:
@@ -521,8 +524,13 @@ class CodexRegisterService:
         record["expires_at"] = str(parsed.get("expires_at") or parsed.get("expired") or "").strip()
         record["team_name"] = str(parsed.get("team_name") or "").strip()
         record["created_at"] = str(parsed.get("created_at") or "").strip()
+        record["updated_at"] = str(parsed.get("updated_at") or record.get("created_at") or "").strip()
         record["source"] = str(parsed.get("source") or "accounts_jsonl").strip() or "accounts_jsonl"
         record["invited"] = self._coerce_bool(parsed.get("invited"))
+        record["plan_type"] = str(parsed.get("plan_type") or "").strip()
+        record["organization_id"] = str(parsed.get("organization_id") or "").strip()
+        record["workspace_id"] = str(parsed.get("workspace_id") or "").strip()
+        record["codex_register_role"] = str(parsed.get("codex_register_role") or "").strip()
         return record
 
     def _build_resume_context_from_parsed_result(self, parsed_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:

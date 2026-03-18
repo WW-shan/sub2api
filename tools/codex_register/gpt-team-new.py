@@ -41,10 +41,10 @@ from urllib3.util.retry import Retry
 # 消除 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ============================================================
-# ① 固定常量配置（无 config.yaml）
-# ============================================================
-# 账号总数
+SCRIPT_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("CODEX_REGISTER_DATA_DIR") or str(SCRIPT_DIR)).resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 TOTAL_ACCOUNTS: int = 5
 
 # 统一邮件 Worker 配置
@@ -56,10 +56,10 @@ MAIL_POLL_MAX_ATTEMPTS: int = 40
 
 
 # 输出文件
-SCRIPT_DIR = Path(__file__).resolve().parent
-ACCOUNTS_FILE: str = str(SCRIPT_DIR / "accounts.txt")
-ACCOUNTS_JSONL_FILE: str = str(SCRIPT_DIR / "accounts.jsonl")
-INVITE_TRACKER_FILE: str = "invite_tracker.json"
+ACCOUNTS_FILE: str = str(DATA_DIR / "accounts.txt")
+ACCOUNTS_JSONL_FILE: str = str(DATA_DIR / "accounts.jsonl")
+INVITE_TRACKER_FILE: str = str(DATA_DIR / "invite_tracker.json")
+OUTPUT_TOKENS_DIR: str = str(DATA_DIR / "output_tokens")
 
 # 车头（Teams）列表（按需填写）
 TEAMS: List[Dict[str, Any]] = []
@@ -1138,6 +1138,7 @@ def build_importable_account_record(
         return None
 
     created_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    updated_at = str(token_dict.get("updated_at") or created_at)
     return {
         "email": email,
         "password": password,
@@ -1150,7 +1151,11 @@ def build_importable_account_record(
         "invited": bool(invited),
         "team_name": team_name,
         "plan_type": str(token_dict.get("plan_type") or ""),
+        "organization_id": str(token_dict.get("organization_id") or ""),
+        "workspace_id": str(token_dict.get("workspace_id") or ""),
+        "codex_register_role": str(token_dict.get("codex_register_role") or ""),
         "created_at": created_at,
+        "updated_at": updated_at,
         "source": "gpt-team-new",
     }
 
@@ -1888,6 +1893,9 @@ def register_one_account(proxy=""):
     token_dict = build_token_dict(email, tokens)
     if plan_type:
         token_dict["plan_type"] = plan_type
+    if org_id_chatgpt:
+        token_dict["organization_id"] = org_id_chatgpt
+    token_dict["codex_register_role"] = "child" if invited else "parent"
     save_to_txt(
         email,
         password,
@@ -1895,7 +1903,7 @@ def register_one_account(proxy=""):
         str(token_dict.get("refresh_token") or ""),
     )
 
-    local_dir = "output_tokens"
+    local_dir = OUTPUT_TOKENS_DIR
     os.makedirs(local_dir, exist_ok=True)
     token_file = os.path.join(local_dir, f"{email}.json")
     token_saved = False

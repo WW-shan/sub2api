@@ -33,6 +33,10 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.getenv("CODEX_REGISTER_DATA_DIR", SCRIPT_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
+
 # ============================================================
 # 固定常量配置（无 config.yaml）
 # ============================================================
@@ -42,8 +46,8 @@ MAIL_WORKER_TOKEN: str = "7BwPEFa1NGMTjUVpdf1w"
 MAIL_DOMAIN: str = "wwcloud.me"
 MAIL_POLL_SECONDS: int = 3
 MAIL_POLL_MAX_ATTEMPTS: int = 40
-RESULTS_FILE: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.txt")
-ACCOUNTS_JSONL_FILE: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts.jsonl")
+RESULTS_FILE: str = os.path.join(DATA_DIR, "results.txt")
+ACCOUNTS_JSONL_FILE: str = os.path.join(DATA_DIR, "accounts.jsonl")
 
 # OAuth 常量
 OPENAI_AUTH_BASE = "https://auth.openai.com"

@@ -7,7 +7,7 @@
 #
 # Quick Start:
 #   1. Copy .env.example to .env and configure
-#   2. mkdir -p data postgres_data redis_data
+#   2. mkdir -p data postgres_data redis_data codex_register_data
 #   3. docker-compose -f docker-compose.local.yml up -d
 #   4. Check logs: docker-compose -f docker-compose.local.yml logs -f sub2api
 #   5. Access: http://localhost:8080
@@ -117,6 +117,8 @@ services:
       # Common values: Asia/Shanghai, America/New_York, Europe/London, UTC
       # =======================================================================
       - TZ=${TZ:-Asia/Shanghai}
+      - CODEX_REGISTER_BASE_URL=${CODEX_REGISTER_BASE_URL:-http://codex-register:5000}
+      - CODEX_REGISTER_CONTROL_TOKEN=${CODEX_REGISTER_CONTROL_TOKEN:-}
 
       # =======================================================================
       # Gemini OAuth Configuration (for Gemini accounts)
@@ -177,7 +179,11 @@ services:
       dockerfile: sub2api/tools/codex_register/Dockerfile
     container_name: sub2api-codex-register
     restart: unless-stopped
+    volumes:
+      - ./codex_register_data:/data/codex_register
     environment:
+      - CODEX_REGISTER_DATA_DIR=/data/codex_register
+      - CODEX_REGISTER_CONTROL_TOKEN=${CODEX_REGISTER_CONTROL_TOKEN:-}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER:-sub2api}

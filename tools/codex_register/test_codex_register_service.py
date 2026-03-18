@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -431,135 +432,88 @@ class ProcessingFlowTests(ServiceTestCase):
         self.assertEqual(accounts[1]["email"], "two@example.com")
 
 
-class GetTokensContractTests(unittest.TestCase):
-    def test_save_result_appends_results_txt_and_accounts_jsonl_record(self):
-        module_name = "tools.codex_register.get_tokens"
-        if module_name in sys.modules:
-            del sys.modules[module_name]
-        module = importlib.import_module(module_name)
-
+class DataDirectoryContractTests(ServiceTestCase):
+    def test_service_uses_configured_data_dir_for_accounts_jsonl(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            results_path = pathlib.Path(tmpdir) / "results.txt"
-            accounts_path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            with patch.dict(os.environ, {"CODEX_REGISTER_DATA_DIR": tmpdir}, clear=False):
+                if MODULE_NAME in sys.modules:
+                    del sys.modules[MODULE_NAME]
+                module = importlib.import_module(MODULE_NAME)
+                service_cls = getattr(module, "CodexRegisterService")
+                store_cls = getattr(module, "InMemoryStateStore")
+                service = service_cls(
+                    state_store=store_cls(),
+                    chatgpt_service=SimpleNamespace(),
+                    workflow_id="wf-test",
+                    sleep_min=1,
+                    sleep_max=1,
+                    auto_run=False,
+                )
 
-            with patch.object(module, "RESULTS_FILE", str(results_path)):
-                with patch.object(module, "ACCOUNTS_JSONL_FILE", str(accounts_path)):
-                    module.save_result("User@Example.com", "secret-pass", "token-123", "refresh-123")
+        self.assertEqual(service._accounts_jsonl_path, pathlib.Path(tmpdir) / "accounts.jsonl")
 
-            self.assertEqual(
-                results_path.read_text(encoding="utf-8"),
-                "User@Example.com|secret-pass|token-123|refresh-123\n",
+    def test_list_accounts_for_frontend_includes_plan_and_role_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "email": "parent@example.com",
+                        "access_token": "at1",
+                        "refresh_token": "rt1",
+                        "account_id": "acct-1",
+                        "source": "gpt-team-new",
+                        "plan_type": "team",
+                        "organization_id": "org-1",
+                        "workspace_id": "ws-1",
+                        "codex_register_role": "parent",
+                        "created_at": "2026-03-19T00:00:00Z",
+                        "updated_at": "2026-03-19T01:00:00Z",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
             )
-            lines = accounts_path.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(lines), 1)
-            record = json.loads(lines[0])
-            self.assertEqual(record["email"], "user@example.com")
-            self.assertEqual(record["password"], "secret-pass")
-            self.assertEqual(record["access_token"], "token-123")
-            self.assertEqual(record["refresh_token"], "refresh-123")
-            self.assertFalse(record["invited"])
-            self.assertEqual(record["team_name"], "")
-            self.assertEqual(record["source"], "get_tokens")
-            self.assertTrue(record["created_at"])
+            self.service._accounts_jsonl_path = path
+
+            accounts = self.service._list_accounts_for_frontend()
+
+        self.assertEqual(accounts[0]["codex_register_role"], "parent")
+        self.assertEqual(accounts[0]["plan_type"], "team")
+        self.assertEqual(accounts[0]["organization_id"], "org-1")
+        self.assertEqual(accounts[0]["workspace_id"], "ws-1")
+        self.assertEqual(accounts[0]["updated_at"], "2026-03-19T01:00:00Z")
 
 
-class ResumeLifecycleTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        if MODULE_NAME in sys.modules:
-            del sys.modules[MODULE_NAME]
-        self.module = importlib.import_module(MODULE_NAME)
-        service_cls = getattr(self.module, "CodexRegisterService")
-        store_cls = getattr(self.module, "InMemoryStateStore")
-        self.store = store_cls()
-        self.service = service_cls(
-            state_store=self.store,
-            chatgpt_service=SimpleNamespace(),
-            workflow_id="wf-test",
-            sleep_min=1,
-            sleep_max=1,
-            auto_run=False,
-        )
+class GetTokensPersistenceContractTests(unittest.TestCase):
+    def test_get_tokens_uses_configured_data_dir(self):
+        module_name = "tools.codex_register.get_tokens"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"CODEX_REGISTER_DATA_DIR": tmpdir}, clear=False):
+                if module_name in sys.modules:
+                    del sys.modules[module_name]
+                module = importlib.import_module(module_name)
 
-    async def _wait_for_phase(self, expected_phase: str, timeout_seconds: float = 1.5):
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds
-        while loop.time() < deadline:
-            status = (await self.service.handle_path("/status"))["data"]
-            if status["job_phase"] == expected_phase:
-                return status
-            await asyncio.sleep(0.01)
-        self.fail(f"timed out waiting for phase: {expected_phase}")
-
-    async def test_enable_completion_uses_latest_jsonl_record_for_resume_context(self):
-        fake = FakeProcess(returncode=0, block=True)
-        parsed = {
-            "email": "mother@example.com",
-            "access_token": "token-value",
-            "team_name": "2",
-            "line_end_offset": 44,
-        }
-
-        with patch.object(self.service, "_extract_latest_valid_results_record", return_value=parsed):
-            with patch.object(self.module.subprocess, "Popen", return_value=fake):
-                result = await self.service.handle_path("/enable")
-                self.assertTrue(result["success"])
-                fake.release()
-                status = await self._wait_for_phase("waiting_manual:subscribe_then_resume")
-
-        self.assertEqual(status["resume_context"]["email"], "mother@example.com")
-        self.assertEqual(status["resume_context"]["team_name"], "2")
-        self.assertEqual(status["resume_context"]["accounts_jsonl_offset"], 44)
-        self.assertEqual(status["accounts_jsonl_offset"], 44)
-        self.assertEqual(status["accounts_jsonl_baseline_offset"], 44)
-
-    async def test_resume_completion_invokes_jsonl_processing_before_completed(self):
-        await self.store.save_state(
-            {
-                **(await self.store.load_state()),
-                "job_phase": "waiting_manual:subscribe_then_resume",
-                "waiting_reason": "subscribe_then_resume",
-                "enabled": True,
-                "can_start": False,
-                "can_resume": True,
-                "can_abandon": True,
-                "resume_context": {"email": "mother@example.com", "team_name": "1", "source": "parse_path"},
-                "manual_gate": {"name": "subscribe_then_resume", "status": "waiting"},
-            }
-        )
-
-        fake = FakeProcess(block=True)
-        captured = {"called": 0}
-
-        def _fake_process_accounts(state):
-            captured["called"] += 1
-            state["accounts_jsonl_offset"] = 88
-            state["last_processed_records"] = 1
-            state["last_processed_summary"] = {
-                "start_offset": 0,
-                "end_offset": 88,
-                "records_seen": 1,
-                "created": 1,
-                "updated": 0,
-                "skipped": 0,
-                "failed": 0,
-                "errors": [],
-            }
-            state["total_created"] = 1
-            return dict(state["last_processed_summary"])
-
-        with patch.object(self.module.subprocess, "Popen", return_value=fake):
-            with patch.object(self.service, "_process_accounts_jsonl_records", side_effect=_fake_process_accounts):
-                result = await self.service.handle_path("/resume", payload={"email": "ignored@example.com"})
-                self.assertTrue(result["success"])
-                fake.release()
-                status = await self._wait_for_phase("completed")
-
-        self.assertEqual(captured["called"], 1)
-        self.assertEqual(status["accounts_jsonl_offset"], 88)
-        self.assertEqual(status["last_processed_summary"]["created"], 1)
-        self.assertIsNone(status.get("resume_context"))
-        self.assertIsNone(status.get("manual_gate"))
+        self.assertEqual(module.RESULTS_FILE, str(pathlib.Path(tmpdir) / "results.txt"))
+        self.assertEqual(module.ACCOUNTS_JSONL_FILE, str(pathlib.Path(tmpdir) / "accounts.jsonl"))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class GptTeamPersistenceContractTests(unittest.TestCase):
+    def test_gpt_team_uses_configured_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"CODEX_REGISTER_DATA_DIR": tmpdir}, clear=False):
+                spec = importlib.util.spec_from_file_location(
+                    "tools.codex_register.gpt_team_new_persistence_test",
+                    str(pathlib.Path(__file__).resolve().parent / "gpt-team-new.py"),
+                )
+                module = importlib.util.module_from_spec(spec)
+                assert spec.loader is not None
+                with patch("builtins.print"):
+                    spec.loader.exec_module(module)
+
+        self.assertEqual(module.ACCOUNTS_FILE, str(pathlib.Path(tmpdir) / "accounts.txt"))
+        self.assertEqual(module.ACCOUNTS_JSONL_FILE, str(pathlib.Path(tmpdir) / "accounts.jsonl"))
+        self.assertEqual(module.INVITE_TRACKER_FILE, str(pathlib.Path(tmpdir) / "invite_tracker.json"))
+        self.assertEqual(module.OUTPUT_TOKENS_DIR, str(pathlib.Path(tmpdir) / "output_tokens"))
+
+

@@ -6,6 +6,7 @@
 data/
 postgres_data/
 redis_data/
+codex_register_data/
 
 # Environment configuration (contains sensitive information)
 .env
