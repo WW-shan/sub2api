@@ -454,6 +454,7 @@ class CodexRegisterService:
             next_id += 1
         return accounts
 
+    def _capture_accounts_jsonl_offset(self) -> int:
         try:
             return int(self._accounts_jsonl_path.stat().st_size)
         except Exception:
