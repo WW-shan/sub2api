@@ -1139,6 +1139,27 @@ class CodexRegisterService:
         LOGGER.info(json.dumps({"event": event, **payload}, ensure_ascii=False, default=str))
 
 
+    async def _list_logs(self) -> List[Dict[str, Any]]:
+        list_logs = getattr(self.state_store, "list_logs", None)
+        if callable(list_logs):
+            maybe_logs = list_logs()
+            if asyncio.iscoroutine(maybe_logs):
+                resolved = await maybe_logs
+            else:
+                resolved = maybe_logs
+            if isinstance(resolved, list):
+                return [dict(item) if isinstance(item, dict) else {"message": str(item)} for item in resolved]
+
+        logs = getattr(self.state_store, "logs", None)
+        if isinstance(logs, list):
+            return [dict(item) if isinstance(item, dict) else {"message": str(item)} for item in logs]
+
+        state = await self._load_state()
+        tail = state.get("recent_logs_tail") or []
+        if isinstance(tail, list):
+            return [dict(item) if isinstance(item, dict) else {"message": str(item)} for item in tail]
+        return []
+
     def _set_phase(
         self,
         state: Dict[str, Any],

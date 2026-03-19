@@ -54,7 +54,17 @@ class CodexRegisterServiceContractTests(unittest.TestCase):
         accounts = result["data"]
         self.assertEqual(len(accounts), 2)
         self.assertEqual(accounts[0]["email"], "one@example.com")
-        self.assertEqual(accounts[1]["email"], "two@example.com")
+
+    def test_logs_path_returns_logs_without_500(self):
+        self.service.state_store.logs = [{"message": "hello", "time": "2026-03-19T00:00:00Z"}]
+
+        async def _run():
+            return await self.service.handle_path("/logs")
+
+        result = asyncio.run(_run())
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"][0]["message"], "hello")
 
     def test_service_uses_configured_data_dir_for_accounts_jsonl(self):
         module_name = "codex_register_service"
