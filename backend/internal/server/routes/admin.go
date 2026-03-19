@@ -298,13 +298,15 @@ func registerCodexRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		codex.GET("/status", h.Admin.Codex.GetStatus)
 		codex.GET("/logs", h.Admin.Codex.GetLogs)
 		codex.GET("/accounts", h.Admin.Codex.GetAccounts)
+		codex.GET("/loop/status", h.Admin.Codex.GetLoopStatus)
 		codex.POST("/enable", h.Admin.Codex.Enable)
 		codex.POST("/disable", h.Admin.Codex.Disable)
 		codex.POST("/resume", h.Admin.Codex.Resume)
 		codex.POST("/retry", h.Admin.Codex.Retry)
+		codex.POST("/loop/start", h.Admin.Codex.StartLoop)
+		codex.POST("/loop/stop", h.Admin.Codex.StopLoop)
 	}
 }
-
 
 func registerAnnouncementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	announcements := admin.Group("/announcements")

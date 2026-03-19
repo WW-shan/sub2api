@@ -100,3 +100,15 @@ func (h *CodexHandler) Resume(c *gin.Context) {
 func (h *CodexHandler) Retry(c *gin.Context) {
 	h.proxyPost(c, "/retry")
 }
+
+func (h *CodexHandler) GetLoopStatus(c *gin.Context) {
+	h.proxyGet(c, "/loop/status")
+}
+
+func (h *CodexHandler) StartLoop(c *gin.Context) {
+	h.proxyPost(c, "/loop/start")
+}
+
+func (h *CodexHandler) StopLoop(c *gin.Context) {
+	h.proxyPost(c, "/loop/stop")
+}

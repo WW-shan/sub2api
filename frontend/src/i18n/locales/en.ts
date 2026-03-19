@@ -1094,6 +1094,52 @@ export default {
         email: 'Target Email',
         missingResumeContextHint: 'Missing resume_context.email or resume_context.access_token_raw.'
       },
+      loop: {
+        title: 'Loop Control',
+        actions: {
+          start: 'Start Loop',
+          starting: 'Starting…',
+          stop: 'Stop Loop',
+          stopping: 'Stopping…'
+        },
+        status: {
+          idle: 'Not running',
+          running: 'Loop running',
+          stopping: 'Stopping'
+        },
+        summary: {
+          idle: 'Start the standalone loop when needed.',
+          idleWithHistory: '{count} recent loop runs retained.',
+          running: 'Running loop round {round}.',
+          stopping: 'Stop requested for the current loop. Please wait.'
+        },
+        fields: {
+          status: 'Loop Status',
+          currentRound: 'Current Round',
+          totalCreated: 'Loop Total Created',
+          committedOffset: 'Committed Offset',
+          startedAt: 'Started At',
+          lastFinishedAt: 'Last Finished At',
+          lastRoundSummary: 'Last Round Result',
+          lastError: 'Latest Loop Error'
+        },
+        lastRoundSummary: 'Created {created} / Updated {updated} / Skipped {skipped} / Failed {failed}',
+        noError: 'No loop errors',
+        history: {
+          title: 'Recent Loop History',
+          count: '{count} records',
+          empty: 'No loop history yet',
+          round: 'Round {round}',
+          summary: 'Created {created} / Updated {updated} / Skipped {skipped} / Failed {failed}',
+          timeRange: 'Start: {startedAt} · End: {finishedAt}',
+          status: {
+            running: 'Running',
+            success: 'Success',
+            failed: 'Failed',
+            stopped: 'Stopped'
+          }
+        }
+      },
       debug: {
         snapshotTitle: 'Debug Snapshot',
         phaseLabel: 'Current Phase',

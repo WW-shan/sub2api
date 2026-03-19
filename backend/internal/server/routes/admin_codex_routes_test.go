@@ -94,3 +94,102 @@ func TestRegisterCodexRoutesIncludesRetryEndpoint(t *testing.T) {
 	require.NotEqual(t, http.StatusNotFound, w.Code)
 	require.Equal(t, http.StatusOK, w.Code)
 }
+
+func TestRegisterCodexRoutesIncludesLoopStatusEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/loop/status" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"running":true,"interval_seconds":30}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{
+			Codex: adminhandler.NewCodexHandler(),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/codex/loop/status", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.NotEqual(t, http.StatusNotFound, w.Code)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRegisterCodexRoutesIncludesLoopStartEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/loop/start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"running":true,"started":true}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{
+			Codex: adminhandler.NewCodexHandler(),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/codex/loop/start", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.NotEqual(t, http.StatusNotFound, w.Code)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRegisterCodexRoutesIncludesLoopStopEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/loop/stop" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"running":false,"stopped":true}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{
+			Codex: adminhandler.NewCodexHandler(),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/codex/loop/stop", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.NotEqual(t, http.StatusNotFound, w.Code)
+	require.Equal(t, http.StatusOK, w.Code)
+}
