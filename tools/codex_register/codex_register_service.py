@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -671,6 +672,13 @@ class CodexRegisterService:
             if return_code == 0 and mode == "resume":
                 try:
                     processing_summary = self._process_accounts_jsonl_records(state)
+                    state["last_parent_persist_action"] = ""
+                    normalized_state = await self._normalize_parent_record_after_resume(
+                        state,
+                        email=str(context.get("email") or "").strip().lower(),
+                    )
+                    if isinstance(normalized_state, dict):
+                        state.update(normalized_state)
                 except Exception as exc:
                     self._set_phase(
                         state,
@@ -687,6 +695,14 @@ class CodexRegisterService:
                     await self._save_state(state)
                     await self._append_log("accounts_processing_failed", error=str(exc))
                     return
+
+                parent_action = str(state.get("last_parent_persist_action") or "").strip().lower()
+                parent_created_delta = 1 if parent_action == "created" else 0
+                state["codex_total_persisted_accounts"] = (
+                    int(state.get("codex_total_persisted_accounts") or 0)
+                    + int(processing_summary.get("created") or 0)
+                    + parent_created_delta
+                )
 
                 self._set_phase(
                     state,
@@ -1075,6 +1091,30 @@ class CodexRegisterService:
 
         source = str(record.get("source") or credentials.get("source") or "codex-auto-register").strip()
         credentials["source"] = source or "codex-auto-register"
+
+        plan_type = str(record.get("plan_type") or credentials.get("plan_type") or "").strip()
+        if plan_type:
+            credentials["plan_type"] = plan_type
+        else:
+            credentials.pop("plan_type", None)
+
+        organization_id = str(record.get("organization_id") or credentials.get("organization_id") or "").strip()
+        if organization_id:
+            credentials["organization_id"] = organization_id
+        else:
+            credentials.pop("organization_id", None)
+
+        workspace_id = str(record.get("workspace_id") or credentials.get("workspace_id") or "").strip()
+        if workspace_id:
+            credentials["workspace_id"] = workspace_id
+        else:
+            credentials.pop("workspace_id", None)
+
+        codex_register_role = str(record.get("codex_register_role") or credentials.get("codex_register_role") or "").strip()
+        if codex_register_role:
+            credentials["codex_register_role"] = codex_register_role
+        else:
+            credentials.pop("codex_register_role", None)
         return credentials
 
     def _build_account_extra(self, existing: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
@@ -1197,6 +1237,217 @@ class CodexRegisterService:
         created_id = int(created_row[0])
         self._bind_account_groups(cur, created_id, group_ids)
         return "created"
+
+    def _build_parent_replacement_record(
+        self,
+        *,
+        resume_context: Dict[str, Any],
+        existing_credentials: Dict[str, Any],
+        existing_extra: Dict[str, Any],
+        old_parent_record: Optional[Dict[str, Any]],
+        existing_parent_jsonl_record: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        old_parent_record = old_parent_record or {}
+        existing_parent_jsonl_record = existing_parent_jsonl_record or {}
+        normalized_email = str(
+            resume_context.get("email")
+            or existing_credentials.get("email")
+            or old_parent_record.get("email")
+            or existing_parent_jsonl_record.get("email")
+            or ""
+        ).strip().lower()
+        created_at = str(
+            old_parent_record.get("created_at")
+            or existing_parent_jsonl_record.get("created_at")
+            or existing_extra.get("created_at")
+            or existing_credentials.get("created_at")
+            or self._now_iso()
+        ).strip()
+        return {
+            "email": normalized_email,
+            "password": str(
+                old_parent_record.get("password")
+                or existing_parent_jsonl_record.get("password")
+                or ""
+            ).strip(),
+            "access_token": str(
+                existing_credentials.get("access_token")
+                or existing_parent_jsonl_record.get("access_token")
+                or old_parent_record.get("access_token")
+                or ""
+            ).strip(),
+            "refresh_token": str(
+                existing_credentials.get("refresh_token")
+                or existing_parent_jsonl_record.get("refresh_token")
+                or old_parent_record.get("refresh_token")
+                or ""
+            ).strip(),
+            "id_token": str(
+                existing_credentials.get("id_token")
+                or existing_parent_jsonl_record.get("id_token")
+                or old_parent_record.get("id_token")
+                or ""
+            ).strip(),
+            "account_id": str(
+                existing_credentials.get("account_id")
+                or existing_parent_jsonl_record.get("account_id")
+                or old_parent_record.get("account_id")
+                or ""
+            ).strip(),
+            "auth_file": str(
+                existing_credentials.get("codex_auth_file")
+                or existing_extra.get("codex_auth_file")
+                or existing_parent_jsonl_record.get("auth_file")
+                or old_parent_record.get("auth_file")
+                or ""
+            ).strip(),
+            "expires_at": str(
+                existing_credentials.get("expires_at")
+                or existing_parent_jsonl_record.get("expires_at")
+                or old_parent_record.get("expires_at")
+                or old_parent_record.get("expired")
+                or ""
+            ).strip(),
+            "invited": False,
+            "team_name": str(
+                resume_context.get("team_name")
+                or existing_parent_jsonl_record.get("team_name")
+                or old_parent_record.get("team_name")
+                or existing_extra.get("team_name")
+                or ""
+            ).strip(),
+            "plan_type": str(
+                existing_credentials.get("plan_type")
+                or existing_parent_jsonl_record.get("plan_type")
+                or old_parent_record.get("plan_type")
+                or ""
+            ).strip(),
+            "organization_id": str(
+                existing_credentials.get("organization_id")
+                or existing_parent_jsonl_record.get("organization_id")
+                or old_parent_record.get("organization_id")
+                or ""
+            ).strip(),
+            "workspace_id": str(
+                existing_credentials.get("workspace_id")
+                or existing_parent_jsonl_record.get("workspace_id")
+                or old_parent_record.get("workspace_id")
+                or ""
+            ).strip(),
+            "codex_register_role": "parent",
+            "created_at": created_at,
+            "updated_at": self._now_iso(),
+            "source": "gpt-team-new",
+        }
+
+    def _replace_parent_record_after_resume(self, state: Dict[str, Any]) -> None:
+        resume_context = state.get("resume_context")
+        if not isinstance(resume_context, dict):
+            raise RuntimeError("resume_context_missing")
+
+        resume_email = str(resume_context.get("email") or "").strip().lower()
+        if not resume_email:
+            raise RuntimeError("resume_context_missing")
+
+        existing_records, _next_offset = self._read_accounts_jsonl_records(start_offset=0)
+        old_parent_record = next(
+            (
+                record for record in existing_records
+                if str(record.get("email") or "").strip().lower() == resume_email
+                and str(record.get("source") or "").strip() == "get_tokens"
+            ),
+            None,
+        )
+        existing_parent_jsonl_record = next(
+            (
+                record for record in existing_records
+                if str(record.get("email") or "").strip().lower() == resume_email
+                and str(record.get("source") or "").strip() == "gpt-team-new"
+                and str(record.get("codex_register_role") or "").strip() == "parent"
+            ),
+            None,
+        )
+
+        conn = self._create_db_connection()
+        cur = conn.cursor()
+        try:
+            existing = self._get_existing_account(cur, resume_email, str((old_parent_record or {}).get("account_id") or "").strip())
+            if existing is None:
+                raise RuntimeError("parent_account_missing")
+            _existing_id, _existing_name, existing_credentials_raw, existing_extra_raw = existing
+            existing_credentials = self._ensure_dict(existing_credentials_raw)
+            existing_extra = self._ensure_dict(existing_extra_raw)
+            replacement_record = self._build_parent_replacement_record(
+                resume_context=resume_context,
+                existing_credentials=existing_credentials,
+                existing_extra=existing_extra,
+                old_parent_record=old_parent_record,
+                existing_parent_jsonl_record=existing_parent_jsonl_record,
+            )
+            parent_persist_action = self._upsert_account(cur, replacement_record)
+        finally:
+            self._safe_close(cur)
+            self._safe_close(conn)
+
+        preserved_lines: List[str] = []
+        replacement_written = False
+        try:
+            raw_lines = self._accounts_jsonl_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            raw_lines = []
+
+        for raw_line in raw_lines:
+            parsed = self._parse_account_jsonl_line(raw_line)
+            if parsed is None:
+                preserved_lines.append(raw_line)
+                continue
+
+            email = str(parsed.get("email") or "").strip().lower()
+            source = str(parsed.get("source") or "").strip()
+            role = str(parsed.get("codex_register_role") or "").strip()
+            if email == resume_email and (
+                source == "get_tokens" or (source == "gpt-team-new" and role == "parent")
+            ):
+                if not replacement_written:
+                    preserved_lines.append(json.dumps(replacement_record, ensure_ascii=False))
+                    replacement_written = True
+                continue
+            preserved_lines.append(raw_line)
+
+        if not replacement_written:
+            preserved_lines.append(json.dumps(replacement_record, ensure_ascii=False))
+
+        content = "\n".join(preserved_lines)
+        if content:
+            content += "\n"
+
+        fd, temp_path = tempfile.mkstemp(dir=str(self._accounts_jsonl_path.parent), prefix="accounts.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(content)
+                handle.flush()
+                try:
+                    os.fsync(handle.fileno())
+                except OSError:
+                    pass
+            os.replace(temp_path, self._accounts_jsonl_path)
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
+
+        final_offset = self._capture_accounts_jsonl_offset()
+        state["accounts_jsonl_offset"] = final_offset
+        state["accounts_jsonl_baseline_offset"] = final_offset
+        state["last_processed_offset"] = final_offset
+        state["last_parent_persist_action"] = str(parent_persist_action or "").strip().lower()
+
+    async def _normalize_parent_record_after_resume(self, state: Dict[str, Any], *, email: str) -> Dict[str, Any]:
+        del email
+        self._replace_parent_record_after_resume(state)
+        return state
 
     def _process_accounts_jsonl_records(self, state: Dict[str, Any]) -> Dict[str, Any]:
         start_offset = int(state.get("accounts_jsonl_offset") or 0)
@@ -1332,6 +1583,7 @@ class CodexRegisterService:
                 state["loop_last_round_skipped"] = int(summary.get("skipped") or 0)
                 state["loop_last_round_failed"] = int(summary.get("failed") or 0)
                 state["loop_total_created"] = int(state.get("loop_total_created") or 0) + int(summary.get("created") or 0)
+                state["codex_total_persisted_accounts"] = int(state.get("codex_total_persisted_accounts") or 0) + int(summary.get("created") or 0)
 
             history_entry["created"] = int(summary.get("created") or 0)
             history_entry["updated"] = int(summary.get("updated") or 0)
@@ -1425,6 +1677,7 @@ class CodexRegisterService:
             "total_updated": int(state.get("total_updated") or 0),
             "total_skipped": int(state.get("total_skipped") or 0),
             "total_failed": int(state.get("total_failed") or 0),
+            "codex_total_persisted_accounts": int(state.get("codex_total_persisted_accounts") or 0),
             "last_processed_summary": dict(summary) if isinstance(summary, dict) else None,
         }
 
@@ -1527,6 +1780,7 @@ class CodexRegisterService:
             "total_updated": 0,
             "total_skipped": 0,
             "total_failed": 0,
+            "codex_total_persisted_accounts": 0,
             "last_success": "",
             "last_error": "",
             "proxy": "",
