@@ -351,11 +351,31 @@ class UpsertHelperTests(ServiceTestCase):
         self.assertTrue(any(query.startswith("INSERT INTO accounts") for query in queries))
         self.assertTrue(any("INSERT INTO account_groups" in query for query in queries))
         insert_account_params = next(params for query, params in cursor.executed if query.startswith("INSERT INTO accounts"))
-        self.assertEqual(insert_account_params[0], "codex-acct-free")
+        self.assertEqual(insert_account_params[0], "free@example.com")
         credentials = insert_account_params[1]
         extra = insert_account_params[2]
+        expected_model_mapping = {
+            "gpt-5.4": "gpt-5.4",
+            "gpt-5.4-mini": "gpt-5.4-mini",
+            "gpt-5.4-nano": "gpt-5.4-nano",
+            "gpt-5.4-pro": "gpt-5.4-pro",
+            "gpt-5": "gpt-5",
+            "gpt-5-mini": "gpt-5-mini",
+            "gpt-5-nano": "gpt-5-nano",
+            "gpt-5-codex": "gpt-5-codex",
+            "gpt-5.3-codex": "gpt-5.3-codex",
+            "gpt-5.2-codex": "gpt-5.2-codex",
+            "gpt-5.1-codex": "gpt-5.1-codex",
+            "gpt-5.1-codex-max": "gpt-5.1-codex-max",
+            "gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
+            "codex-mini-latest": "codex-mini-latest",
+            "claude-opus*": "gpt-5.4",
+            "claude-sonnet*": "gpt-5.3-codex",
+            "claude-haiku*": "gpt-5.4-mini",
+        }
         self.assertEqual(credentials["email"], "free@example.com")
         self.assertEqual(credentials["account_id"], "acct-free")
+        self.assertEqual(credentials["model_mapping"], expected_model_mapping)
         self.assertFalse(extra["invited"])
 
     def test_upsert_account_updates_existing_when_values_change(self):
@@ -382,6 +402,154 @@ class UpsertHelperTests(ServiceTestCase):
         queries = [query for query, _params in cursor.executed]
         self.assertTrue(any(query.startswith("UPDATE accounts SET credentials") for query in queries))
         self.assertTrue(any("INSERT INTO account_groups" in query for query in queries))
+
+    def test_upsert_account_updates_existing_when_values_change_preserves_name_and_model_mapping(self):
+        existing_model_mapping = {
+            "gpt-4.1": "gpt-4.1",
+            "custom-model": "custom-target",
+        }
+        existing = (
+            55,
+            "existing-account",
+            {
+                "email": "user@example.com",
+                "access_token": "old-token",
+                "refresh_token": "old-refresh",
+                "model_mapping": existing_model_mapping,
+            },
+            {"codex_auto_register": True, "invited": False},
+        )
+        cursor = FakeCursor(existing_accounts={"user@example.com": existing}, current_groups=[])
+        record = {
+            "email": "user@example.com",
+            "access_token": "new-token",
+            "refresh_token": "new-refresh",
+            "invited": True,
+            "source": "accounts_jsonl",
+        }
+
+        with patch.dict(os.environ, {"CODEX_GROUP_IDS_TEAM": "21"}, clear=False):
+            with patch.object(self.service, "_pg_json", side_effect=lambda value: value):
+                action = self.service._upsert_account(cursor, record)
+
+        self.assertEqual(action, "updated")
+        update_account_statements = [
+            (query, params)
+            for query, params in cursor.executed
+            if query.startswith("UPDATE accounts")
+        ]
+        self.assertEqual(len(update_account_statements), 1)
+        update_query, update_params = update_account_statements[0]
+        update_set_clause = update_query.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+        self.assertNotRegex(update_set_clause, r"\bname\s*=")
+        updated_credentials = update_params[0]
+        self.assertEqual(updated_credentials["access_token"], "new-token")
+        self.assertEqual(updated_credentials["refresh_token"], "new-refresh")
+        self.assertEqual(updated_credentials["model_mapping"], existing_model_mapping)
+
+    def test_upsert_account_skips_create_when_email_missing(self):
+        cursor = FakeCursor(insert_ids=[501])
+        record = {
+            "account_id": "acct-only",
+            "access_token": "token-only",
+        }
+
+        action = self.service._upsert_account(cursor, record)
+
+        self.assertEqual(action, "skipped")
+        self.assertFalse(any(query.startswith("INSERT INTO accounts") for query, _ in cursor.executed))
+
+    def test_upsert_account_skips_create_when_email_invalid_and_does_not_fallback_to_account_id_name(self):
+        cursor = FakeCursor(insert_ids=[501])
+        record = {
+            "email": "not-an-email",
+            "account_id": "acct-fallback",
+            "access_token": "token-fallback",
+            "refresh_token": "refresh-fallback",
+        }
+
+        action = self.service._upsert_account(cursor, record)
+
+        self.assertEqual(action, "skipped")
+        self.assertFalse(any(query.startswith("INSERT INTO accounts") for query, _ in cursor.executed))
+
+    def test_upsert_account_updates_existing_when_email_malformed_but_account_id_matches(self):
+        existing = (
+            57,
+            "existing-by-account-id",
+            {
+                "email": "valid@example.com",
+                "access_token": "old-token",
+                "refresh_token": "old-refresh",
+                "account_id": "acct-existing",
+            },
+            {"codex_auto_register": True, "invited": False},
+        )
+        cursor = FakeCursor(existing_accounts={"acct-existing": existing}, current_groups=[])
+        record = {
+            "email": "not-an-email",
+            "account_id": "acct-existing",
+            "access_token": "new-token",
+            "refresh_token": "new-refresh",
+            "invited": False,
+            "source": "accounts_jsonl",
+        }
+
+        with patch.dict(os.environ, {"CODEX_GROUP_IDS_FREE": "21"}, clear=False):
+            with patch.object(self.service, "_pg_json", side_effect=lambda value: value):
+                action = self.service._upsert_account(cursor, record)
+
+        self.assertEqual(action, "updated")
+        self.assertFalse(any(query.startswith("INSERT INTO accounts") for query, _ in cursor.executed))
+        update_account_statements = [
+            (query, params)
+            for query, params in cursor.executed
+            if query.startswith("UPDATE accounts")
+        ]
+        self.assertEqual(len(update_account_statements), 1)
+        _update_query, update_params = update_account_statements[0]
+        updated_credentials = update_params[0]
+        self.assertEqual(updated_credentials["email"], "not-an-email")
+        self.assertEqual(updated_credentials["account_id"], "acct-existing")
+
+    def test_upsert_account_updates_existing_without_adding_model_mapping_when_missing(self):
+        existing = (
+            56,
+            "existing-account-no-mapping",
+            {
+                "email": "nomap@example.com",
+                "access_token": "old-token",
+                "refresh_token": "old-refresh",
+            },
+            {"codex_auto_register": True, "invited": False},
+        )
+        cursor = FakeCursor(existing_accounts={"nomap@example.com": existing}, current_groups=[])
+        record = {
+            "email": "nomap@example.com",
+            "access_token": "new-token",
+            "refresh_token": "new-refresh",
+            "invited": True,
+            "source": "accounts_jsonl",
+        }
+
+        with patch.dict(os.environ, {"CODEX_GROUP_IDS_TEAM": "21"}, clear=False):
+            with patch.object(self.service, "_pg_json", side_effect=lambda value: value):
+                action = self.service._upsert_account(cursor, record)
+
+        self.assertEqual(action, "updated")
+        update_account_statements = [
+            (query, params)
+            for query, params in cursor.executed
+            if query.startswith("UPDATE accounts")
+        ]
+        self.assertEqual(len(update_account_statements), 1)
+        update_query, update_params = update_account_statements[0]
+        update_set_clause = update_query.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+        self.assertNotRegex(update_set_clause, r"\bname\s*=")
+        updated_credentials = update_params[0]
+        self.assertEqual(updated_credentials["access_token"], "new-token")
+        self.assertEqual(updated_credentials["refresh_token"], "new-refresh")
+        self.assertNotIn("model_mapping", updated_credentials)
 
 
     def test_upsert_account_persists_plan_and_role_metadata(self):
@@ -732,9 +900,236 @@ class UpsertHelperTests(ServiceTestCase):
         self.assertEqual(accounts[0]["updated_at"], "2026-03-19T03:30:00+00:00")
 
 
+class ProcessingFlowTests(ServiceTestCase):
+    def test_process_accounts_jsonl_records_updates_state_counters_and_offset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"email": "one@example.com", "access_token": "t1", "invited": False}),
+                        "not-json",
+                        json.dumps({"email": "two@example.com", "access_token": "t2", "invited": True}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.service._accounts_jsonl_path = path
+            cursor = FakeCursor(insert_ids=[1001, 1002])
+            conn = FakeConnection(cursor)
+            state = self.service._default_state()
+
+            with patch.dict(os.environ, {"CODEX_GROUP_IDS_FREE": "1", "CODEX_GROUP_IDS_TEAM": "2"}, clear=False):
+                with patch.object(self.service, "_create_db_connection", return_value=conn):
+                    with patch.object(self.service, "_pg_json", side_effect=lambda value: value):
+                        summary = self.service._process_accounts_jsonl_records(state)
+
+        self.assertEqual(summary["records_seen"], 2)
+        self.assertEqual(summary["created"], 2)
+        self.assertEqual(summary["updated"], 0)
+        self.assertEqual(summary["skipped"], 0)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(state["total_created"], 2)
+        self.assertEqual(state["last_processed_records"], 2)
+        self.assertEqual(state["accounts_jsonl_offset"], summary["end_offset"])
+        self.assertEqual(state["last_processed_summary"]["created"], 2)
+        self.assertTrue(cursor.closed)
+        self.assertTrue(conn.closed)
+
+    def test_process_accounts_jsonl_records_stops_at_failed_upsert_and_preserves_offset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            line1 = json.dumps({"email": "one@example.com", "access_token": "t1", "invited": False}) + "\n"
+            line2 = json.dumps({"email": "two@example.com", "access_token": "t2", "invited": True}) + "\n"
+            path.write_text(line1 + line2, encoding="utf-8")
+            self.service._accounts_jsonl_path = path
+            conn = FakeConnection(FakeCursor())
+            state = self.service._default_state()
+
+            records, _next_offset = self.service._read_accounts_jsonl_records(start_offset=0)
+            first_end_offset = records[0]["line_end_offset"]
+            second_end_offset = records[1]["line_end_offset"]
+
+            with patch.object(self.service, "_create_db_connection", return_value=conn):
+                with patch.object(self.service, "_upsert_account", side_effect=["created", RuntimeError("db write failed")]):
+                    summary = self.service._process_accounts_jsonl_records(state)
+
+        self.assertEqual(summary["records_seen"], 2)
+        self.assertEqual(summary["created"], 1)
+        self.assertEqual(summary["updated"], 0)
+        self.assertEqual(summary["skipped"], 0)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["end_offset"], first_end_offset)
+        self.assertNotEqual(summary["end_offset"], second_end_offset)
+        self.assertEqual(state["accounts_jsonl_offset"], first_end_offset)
+        self.assertEqual(state["last_processed_offset"], first_end_offset)
+        self.assertEqual(state["last_processed_records"], 1)
+        self.assertEqual(state["total_created"], 1)
+        self.assertEqual(state["total_failed"], 1)
+        self.assertEqual(state["last_processed_summary"]["errors"], ["two@example.com:db write failed"])
+        self.assertTrue(conn.closed)
+
+    def test_process_accounts_jsonl_records_updates_existing_when_email_malformed_but_account_id_matches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "email": "not-an-email",
+                        "account_id": "acct-existing",
+                        "access_token": "new-token",
+                        "refresh_token": "new-refresh",
+                        "invited": False,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.service._accounts_jsonl_path = path
+
+            existing = (
+                57,
+                "existing-by-account-id",
+                {
+                    "email": "valid@example.com",
+                    "access_token": "old-token",
+                    "refresh_token": "old-refresh",
+                    "account_id": "acct-existing",
+                },
+                {"codex_auto_register": True, "invited": False},
+            )
+            cursor = FakeCursor(existing_accounts={"acct-existing": existing}, current_groups=[])
+            conn = FakeConnection(cursor)
+            state = self.service._default_state()
+
+            with patch.dict(os.environ, {"CODEX_GROUP_IDS_FREE": "21"}, clear=False):
+                with patch.object(self.service, "_create_db_connection", return_value=conn):
+                    with patch.object(self.service, "_pg_json", side_effect=lambda value: value):
+                        summary = self.service._process_accounts_jsonl_records(state)
+
+        self.assertEqual(summary["records_seen"], 1)
+        self.assertEqual(summary["created"], 0)
+        self.assertEqual(summary["updated"], 1)
+        self.assertEqual(summary["skipped"], 0)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(state["total_updated"], 1)
+        self.assertFalse(any(query.startswith("INSERT INTO accounts") for query, _ in cursor.executed))
+        update_account_statements = [
+            (query, params)
+            for query, params in cursor.executed
+            if query.startswith("UPDATE accounts")
+        ]
+        self.assertEqual(len(update_account_statements), 1)
+
+    def test_process_accounts_jsonl_records_skips_create_when_email_malformed_and_no_existing_match(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "email": "not-an-email",
+                        "account_id": "acct-no-match",
+                        "access_token": "token-only",
+                        "refresh_token": "refresh-only",
+                        "invited": False,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.service._accounts_jsonl_path = path
+            conn = FakeConnection(FakeCursor())
+            state = self.service._default_state()
+
+            with patch.dict(os.environ, {"CODEX_GROUP_IDS_FREE": "21"}, clear=False):
+                with patch.object(self.service, "_create_db_connection", return_value=conn):
+                    with patch.object(self.service, "_pg_json", side_effect=lambda value: value):
+                        summary = self.service._process_accounts_jsonl_records(state)
+
+        self.assertEqual(summary["records_seen"], 1)
+
+    def test_resume_success_normalizes_parent_record_before_completed_state(self):
+        state = self.service._default_state()
+        state.update(
+            {
+                "job_phase": "running:gpt_team_batch",
+                "enabled": True,
+                "resume_context": {"email": "parent@example.com", "team_name": "1"},
+            }
+        )
+        asyncio.run(self.service._save_state(state))
+
+        process = SimpleNamespace()
+        self.service._active_process = process
+        self.service._active_context = {"mode": "resume", "name": "gpt_team_batch", "email": "parent@example.com"}
+
+        calls = []
+
+        async def fake_normalize(state_arg, *, email):
+            calls.append((dict(state_arg), email))
+            latest = dict(state_arg)
+            latest["normalized_parent"] = True
+            return latest
+
+        with patch.object(self.service, "_process_accounts_jsonl_records", return_value={"failed": 0}), \
+             patch.object(self.service, "_normalize_parent_record_after_resume", side_effect=fake_normalize):
+            asyncio.run(
+                self.service._handle_process_exit(
+                    process,
+                    {"mode": "resume", "name": "gpt_team_batch", "email": "parent@example.com"},
+                    0,
+                )
+            )
+
+
+    def test_normalize_parent_record_after_resume_uses_explicit_email_without_resume_context(self):
+        state = self.service._default_state()
+        state["resume_context"] = None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            path.write_text(
+                json.dumps({"email": "parent@example.com", "password": "pw", "access_token": "old-at", "source": "get_tokens"}) + "\n",
+                encoding="utf-8",
+            )
+            self.service._accounts_jsonl_path = path
+
+            with patch.object(self.service, "_create_db_connection", return_value=FakeConnection(FakeCursor())), \
+                 patch.object(self.service, "_pg_json", side_effect=lambda value: value), \
+                 patch.object(self.service, "_now_iso", return_value="2026-03-19T09:00:00Z"):
+                latest = asyncio.run(self.service._normalize_parent_record_after_resume(state, email="parent@example.com"))
+
+            parsed = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+        self.assertEqual(latest["last_parent_persist_action"], "created")
+        self.assertEqual(parsed[0]["email"], "parent@example.com")
+        self.assertEqual(parsed[0]["source"], "gpt-team-new")
+
+    def test_normalize_parent_record_after_resume_creates_parent_when_db_row_missing(self):
+        state = self.service._default_state()
+        state["resume_context"] = {"email": "parent@example.com", "team_name": "1"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            path.write_text(
+                json.dumps({"email": "parent@example.com", "password": "pw", "access_token": "old-at", "source": "get_tokens"}) + "\n",
+                encoding="utf-8",
+            )
+            self.service._accounts_jsonl_path = path
+            cursor = FakeCursor(existing_accounts={}, insert_ids=[901])
+            conn = FakeConnection(cursor)
+
+            with patch.object(self.service, "_create_db_connection", return_value=conn), \
+                 patch.object(self.service, "_pg_json", side_effect=lambda value: value), \
+                 patch.object(self.service, "_now_iso", return_value="2026-03-19T09:00:00Z"):
+                latest = asyncio.run(self.service._normalize_parent_record_after_resume(state, email="parent@example.com"))
+
+        self.assertEqual(latest["last_parent_persist_action"], "created")
+        self.assertTrue(any(query.startswith("INSERT INTO accounts") for query, _ in cursor.executed))
+
+
 class LoopStateTests(ServiceTestCase):
-
-
     def test_status_includes_cumulative_codex_persisted_accounts(self):
         async def _run():
             return await self.service.handle_path("/status")
@@ -748,7 +1143,6 @@ class LoopStateTests(ServiceTestCase):
 
         self.assertTrue(result["success"], result.get("error"))
         self.assertFalse(result["data"]["loop_running"])
-
 
     def test_resume_child_created_count_increments_cumulative_persisted_total(self):
         state = self.service._default_state()
