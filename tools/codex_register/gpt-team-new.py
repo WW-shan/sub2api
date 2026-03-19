@@ -1899,7 +1899,7 @@ def register_one_account(proxy=""):
         token_dict["plan_type"] = plan_type
     if org_id_chatgpt:
         token_dict["organization_id"] = org_id_chatgpt
-    token_dict["codex_register_role"] = "child" if invited else "parent"
+    token_dict["codex_register_role"] = "child" if invited else "none"
     save_to_txt(
         email,
         password,
