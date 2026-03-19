@@ -360,6 +360,10 @@ class CodexRegisterService:
             if return_code == 0 and mode == "resume":
                 try:
                     processing_summary = self._process_accounts_jsonl_records(state)
+                    state = await self._normalize_parent_record_after_resume(
+                        state,
+                        email=str(context.get("email") or ""),
+                    )
                 except Exception as exc:
                     self._set_phase(
                         state,
@@ -976,6 +980,149 @@ class CodexRegisterService:
     async def _save_state(self, state: Dict[str, Any]) -> None:
         await self.state_store.save_state(state)
 
+    def _build_parent_record_after_resume(
+        self,
+        *,
+        old_parent_record: Dict[str, Any],
+        latest_parent_record: Dict[str, Any],
+        resume_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        old_parent_record = dict(old_parent_record or {})
+        latest_parent_record = dict(latest_parent_record or {})
+        resume_context = dict(resume_context or {})
+
+        def _latest_then_old(key: str) -> str:
+            latest_value = str(latest_parent_record.get(key) or "").strip()
+            if latest_value:
+                return latest_value
+            return str(old_parent_record.get(key) or "").strip()
+
+        normalized_email = str(
+            resume_context.get("email")
+            or latest_parent_record.get("email")
+            or old_parent_record.get("email")
+            or ""
+        ).strip().lower()
+        created_at = str(old_parent_record.get("created_at") or "").strip() or self._now_iso()
+
+        return {
+            "email": normalized_email,
+            "password": str(old_parent_record.get("password") or "").strip(),
+            "access_token": _latest_then_old("access_token"),
+            "refresh_token": _latest_then_old("refresh_token"),
+            "id_token": _latest_then_old("id_token"),
+            "account_id": _latest_then_old("account_id"),
+            "auth_file": _latest_then_old("auth_file"),
+            "expires_at": _latest_then_old("expires_at"),
+            "invited": False,
+            "team_name": str(resume_context.get("team_name") or "").strip(),
+            "plan_type": str(latest_parent_record.get("plan_type") or "").strip(),
+            "organization_id": str(latest_parent_record.get("organization_id") or "").strip(),
+            "workspace_id": str(latest_parent_record.get("workspace_id") or "").strip(),
+            "codex_register_role": "parent",
+            "created_at": created_at,
+            "updated_at": self._now_iso(),
+            "source": "gpt-team-new",
+        }
+
+    def _persist_single_parent_record(self, record: Dict[str, Any]) -> str:
+        conn = self._create_db_connection()
+        cur = conn.cursor()
+        try:
+            return self._upsert_account(cur, record)
+        finally:
+            self._safe_close(cur)
+            self._safe_close(conn)
+
+    def _rewrite_accounts_jsonl_with_parent_record(self, *, normalized_email: str, parent_record: Dict[str, Any]) -> Dict[str, Any]:
+        lines: List[str] = []
+        try:
+            if self._accounts_jsonl_path.exists():
+                lines = self._accounts_jsonl_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            lines = []
+
+        kept_lines: List[str] = []
+        inserted_parent = False
+        for raw_line in lines:
+            stripped = str(raw_line).strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                kept_lines.append(raw_line)
+                continue
+
+            if not isinstance(parsed, dict):
+                kept_lines.append(raw_line)
+                continue
+
+            email = str(parsed.get("email") or "").strip().lower()
+            source = str(parsed.get("source") or "").strip()
+            role = str(parsed.get("codex_register_role") or "").strip()
+            if email == normalized_email and source == "get_tokens":
+                continue
+            if email == normalized_email and source == "gpt-team-new" and role == "parent":
+                continue
+            kept_lines.append(raw_line)
+
+        kept_lines.append(json.dumps(parent_record, ensure_ascii=False))
+        content = "\n".join(kept_lines) + ("\n" if kept_lines else "")
+        tmp_path = self._accounts_jsonl_path.with_name(f"{self._accounts_jsonl_path.name}.tmp")
+        with tmp_path.open("w", encoding="utf-8", newline="") as f:
+            f.write(content)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp_path, self._accounts_jsonl_path)
+        return {"end_offset": int(self._accounts_jsonl_path.stat().st_size)}
+
+    def _recalculate_offsets_after_parent_rewrite(self, state: Dict[str, Any], rewrite_summary: Dict[str, Any]) -> None:
+        end_offset = int((rewrite_summary or {}).get("end_offset") or 0)
+        state["accounts_jsonl_offset"] = end_offset
+        state["accounts_jsonl_baseline_offset"] = end_offset
+        state["last_processed_offset"] = end_offset
+
+    async def _normalize_parent_record_after_resume(self, state: Dict[str, Any], *, email: str) -> Dict[str, Any]:
+        normalized_email = str(email or "").strip().lower()
+        resume_context = dict(state.get("resume_context") or {})
+        records, _next_offset = self._read_accounts_jsonl_records(start_offset=0)
+        old_parent_record: Dict[str, Any] = {}
+        latest_parent_record: Dict[str, Any] = {}
+        for record in records:
+            record_email = str(record.get("email") or "").strip().lower()
+            if record_email != normalized_email:
+                continue
+            source = str(record.get("source") or "").strip()
+            role = str(record.get("codex_register_role") or "").strip()
+            if source == "get_tokens" and not old_parent_record:
+                old_parent_record = dict(record)
+            if source == "gpt-team-new":
+                latest_parent_record = dict(record)
+                if role == "parent":
+                    latest_parent_record = dict(record)
+
+        parent_record = self._build_parent_record_after_resume(
+            old_parent_record=old_parent_record,
+            latest_parent_record=latest_parent_record,
+            resume_context=resume_context,
+        )
+        persist_action = self._persist_single_parent_record(parent_record)
+        rewrite_summary = self._rewrite_accounts_jsonl_with_parent_record(
+            normalized_email=normalized_email,
+            parent_record=parent_record,
+        )
+        state["accounts_jsonl_offset"] = int(rewrite_summary.get("end_offset") or 0)
+        state["accounts_jsonl_baseline_offset"] = int(rewrite_summary.get("end_offset") or 0)
+        state["last_processed_offset"] = int(rewrite_summary.get("end_offset") or 0)
+        self._recalculate_offsets_after_parent_rewrite(state, rewrite_summary)
+        state["last_parent_persist_action"] = persist_action
+        return state
+
+
     async def _append_log(self, event: str, **fields: Any) -> None:
         payload = {
             "time": self._now_iso(),
@@ -991,26 +1138,6 @@ class CodexRegisterService:
 
         LOGGER.info(json.dumps({"event": event, **payload}, ensure_ascii=False, default=str))
 
-    async def _list_logs(self) -> List[Dict[str, Any]]:
-        list_logs = getattr(self.state_store, "list_logs", None)
-        if callable(list_logs):
-            maybe_logs = list_logs()
-            if asyncio.iscoroutine(maybe_logs):
-                resolved = await maybe_logs
-            else:
-                resolved = maybe_logs
-            if isinstance(resolved, list):
-                return [dict(item) if isinstance(item, dict) else {"message": str(item)} for item in resolved]
-
-        logs = getattr(self.state_store, "logs", None)
-        if isinstance(logs, list):
-            return [dict(item) if isinstance(item, dict) else {"message": str(item)} for item in logs]
-
-        state = await self._load_state()
-        tail = state.get("recent_logs_tail") or []
-        if isinstance(tail, list):
-            return [dict(item) if isinstance(item, dict) else {"message": str(item)} for item in tail]
-        return []
 
     def _set_phase(
         self,

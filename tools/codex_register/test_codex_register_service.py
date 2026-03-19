@@ -76,37 +76,248 @@ class CodexRegisterServiceContractTests(unittest.TestCase):
 
         self.assertEqual(service._accounts_jsonl_path, pathlib.Path(tmpdir) / "accounts.jsonl")
 
-    def test_list_accounts_for_frontend_includes_plan_and_role_fields(self):
+
+    def test_resume_success_normalizes_parent_record_before_completed_state(self):
+        state = self.service._default_state()
+        state.update(
+            {
+                "job_phase": "running:gpt_team_batch",
+                "enabled": True,
+                "resume_context": {"email": "parent@example.com", "team_name": "1"},
+            }
+        )
+        asyncio.run(self.service._save_state(state))
+
+        process = SimpleNamespace()
+        self.service._active_process = process
+        self.service._active_context = {"mode": "resume", "name": "gpt_team_batch", "email": "parent@example.com"}
+
+        calls = []
+
+        async def fake_normalize(state_arg, *, email):
+            calls.append((dict(state_arg), email))
+            latest = dict(state_arg)
+            latest["normalized_parent"] = True
+            return latest
+
+        with patch.object(self.service, "_process_accounts_jsonl_records", return_value={"failed": 0}), \
+             patch.object(self.service, "_normalize_parent_record_after_resume", side_effect=fake_normalize):
+            asyncio.run(
+                self.service._handle_process_exit(
+                    process,
+                    {"mode": "resume", "name": "gpt_team_batch", "email": "parent@example.com"},
+                    0,
+                )
+            )
+
+        latest = asyncio.run(self.service._load_state())
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], "parent@example.com")
+        self.assertTrue(latest.get("normalized_parent"))
+
+    def test_build_parent_record_after_resume_applies_spec_field_precedence(self):
+        old_parent = {
+            "email": " Parent@Example.com ",
+            "password": "pw-old",
+            "access_token": "old-at",
+            "refresh_token": "old-rt",
+            "id_token": "old-id",
+            "account_id": "old-acct",
+            "auth_file": "",
+            "expires_at": "old-exp",
+            "created_at": "2026-03-19T00:00:00Z",
+        }
+        latest_parent = {
+            "access_token": "new-at",
+            "refresh_token": "new-rt",
+            "id_token": "new-id",
+            "account_id": "new-acct",
+            "auth_file": "auth.json",
+            "expires_at": "new-exp",
+            "plan_type": "team",
+            "organization_id": "org-1",
+        }
+        resume_context = {"email": "Parent@Example.com", "team_name": "1"}
+
+        record = self.service._build_parent_record_after_resume(
+            old_parent_record=old_parent,
+            latest_parent_record=latest_parent,
+            resume_context=resume_context,
+        )
+
+        self.assertEqual(record["email"], "parent@example.com")
+        self.assertEqual(record["password"], "pw-old")
+        self.assertEqual(record["access_token"], "new-at")
+        self.assertEqual(record["refresh_token"], "new-rt")
+        self.assertEqual(record["id_token"], "new-id")
+        self.assertEqual(record["account_id"], "new-acct")
+        self.assertEqual(record["auth_file"], "auth.json")
+        self.assertEqual(record["expires_at"], "new-exp")
+        self.assertEqual(record["plan_type"], "team")
+        self.assertEqual(record["organization_id"], "org-1")
+        self.assertEqual(record["workspace_id"], "")
+        self.assertEqual(record["team_name"], "1")
+        self.assertEqual(record["source"], "gpt-team-new")
+        self.assertEqual(record["codex_register_role"], "parent")
+        self.assertFalse(record["invited"])
+        self.assertEqual(record["created_at"], "2026-03-19T00:00:00Z")
+
+    def test_normalize_parent_record_persists_parent_before_rewrite(self):
+        state = self.service._default_state()
+        state["resume_context"] = {"email": "parent@example.com", "team_name": "1"}
+
+        calls = []
+        parent_record = {
+            "email": "parent@example.com",
+            "access_token": "new-at",
+            "source": "gpt-team-new",
+            "codex_register_role": "parent",
+        }
+
+        with patch.object(self.service, "_read_accounts_jsonl_records", return_value=(
+            [
+                {"email": "parent@example.com", "source": "get_tokens", "password": "pw", "created_at": "2026-03-19T00:00:00Z"},
+                {"email": "parent@example.com", "source": "gpt-team-new", "access_token": "new-at", "plan_type": "team"},
+            ],
+            999,
+        )), \
+             patch.object(self.service, "_build_parent_record_after_resume", return_value=parent_record), \
+             patch.object(self.service, "_persist_single_parent_record", side_effect=lambda record: calls.append(("persist", dict(record))) or "updated"), \
+             patch.object(self.service, "_rewrite_accounts_jsonl_with_parent_record", side_effect=lambda **kwargs: calls.append(("rewrite", dict(kwargs["parent_record"]))) or {"end_offset": 555}), \
+             patch.object(self.service, "_recalculate_offsets_after_parent_rewrite", side_effect=lambda state_arg, rewrite_summary: calls.append(("offsets", dict(rewrite_summary)))):
+            latest = asyncio.run(self.service._normalize_parent_record_after_resume(state, email="parent@example.com"))
+
+        self.assertEqual([item[0] for item in calls], ["persist", "rewrite", "offsets"])
+        self.assertEqual(latest["accounts_jsonl_offset"], 555)
+        self.assertEqual(latest["last_processed_offset"], 555)
+
+    def test_normalize_parent_record_keeps_old_row_when_persist_fails(self):
+        state = self.service._default_state()
+        state["resume_context"] = {"email": "parent@example.com", "team_name": "1"}
+
+        with patch.object(self.service, "_read_accounts_jsonl_records", return_value=(
+            [
+                {"email": "parent@example.com", "source": "get_tokens", "password": "pw", "created_at": "2026-03-19T00:00:00Z"},
+                {"email": "parent@example.com", "source": "gpt-team-new", "access_token": "new-at", "plan_type": "team"},
+            ],
+            999,
+        )), \
+             patch.object(self.service, "_build_parent_record_after_resume", return_value={"email": "parent@example.com", "access_token": "new-at"}), \
+             patch.object(self.service, "_persist_single_parent_record", side_effect=RuntimeError("parent_record_rewrite_failed:db fail")), \
+             patch.object(self.service, "_rewrite_accounts_jsonl_with_parent_record") as rewrite_mock:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(self.service._normalize_parent_record_after_resume(state, email="parent@example.com"))
+
+        rewrite_mock.assert_not_called()
+
+    def test_rewrite_accounts_jsonl_with_parent_record_preserves_invalid_lines_and_dedupes_parent_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = pathlib.Path(tmpdir) / "accounts.jsonl"
             path.write_text(
-                json.dumps(
-                    {
-                        "email": "parent@example.com",
-                        "access_token": "at1",
-                        "refresh_token": "rt1",
-                        "account_id": "acct-1",
-                        "source": "gpt-team-new",
-                        "plan_type": "team",
-                        "organization_id": "org-1",
-                        "workspace_id": "ws-1",
-                        "codex_register_role": "parent",
-                        "created_at": "2026-03-19T00:00:00Z",
-                        "updated_at": "2026-03-19T01:00:00Z",
-                    }
-                )
-                + "\n",
+                "\n".join(
+                    [
+                        json.dumps({"email": "parent@example.com", "access_token": "old-at", "source": "get_tokens"}),
+                        "{bad-json",
+                        json.dumps({"email": "parent@example.com", "access_token": "older-parent", "source": "gpt-team-new", "codex_register_role": "parent"}),
+                        json.dumps({"email": "child@example.com", "access_token": "child-at", "source": "gpt-team-new", "codex_register_role": "child"}),
+                    ]
+                ) + "\n",
                 encoding="utf-8",
             )
             self.service._accounts_jsonl_path = path
 
-            accounts = self.service._list_accounts_for_frontend()
+            summary = self.service._rewrite_accounts_jsonl_with_parent_record(
+                normalized_email="parent@example.com",
+                parent_record={
+                    "email": "parent@example.com",
+                    "access_token": "new-at",
+                    "source": "gpt-team-new",
+                    "codex_register_role": "parent",
+                },
+            )
 
-        self.assertEqual(accounts[0]["codex_register_role"], "parent")
-        self.assertEqual(accounts[0]["plan_type"], "team")
-        self.assertEqual(accounts[0]["organization_id"], "org-1")
-        self.assertEqual(accounts[0]["workspace_id"], "ws-1")
-        self.assertEqual(accounts[0]["updated_at"], "2026-03-19T01:00:00Z")
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[0], "{bad-json")
+            parsed = [json.loads(line) for line in lines[1:]]
+            self.assertEqual(len([row for row in parsed if row.get("email") == "parent@example.com"]), 1)
+            self.assertFalse(any(row.get("source") == "get_tokens" and row.get("email") == "parent@example.com" for row in parsed))
+            self.assertTrue(any(row.get("email") == "child@example.com" for row in parsed))
+            self.assertTrue(summary["end_offset"] > 0)
+
+    def test_recalculate_offsets_after_parent_rewrite_uses_rewritten_file_positions(self):
+        state = self.service._default_state()
+        self.service._recalculate_offsets_after_parent_rewrite(state, {"end_offset": 123})
+        self.assertEqual(state["accounts_jsonl_offset"], 123)
+        self.assertEqual(state["accounts_jsonl_baseline_offset"], 123)
+        self.assertEqual(state["last_processed_offset"], 123)
+
+    def test_resume_success_parent_normalization_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({
+                            "email": "parent@example.com",
+                            "password": "pw",
+                            "access_token": "old-at",
+                            "source": "get_tokens",
+                            "created_at": "2026-03-19T00:00:00Z",
+                        }),
+                        json.dumps({
+                            "email": "parent@example.com",
+                            "access_token": "new-at",
+                            "refresh_token": "new-rt",
+                            "plan_type": "team",
+                            "organization_id": "org-1",
+                            "source": "gpt-team-new",
+                            "codex_register_role": "parent",
+                        }),
+                        json.dumps({
+                            "email": "child@example.com",
+                            "access_token": "child-at",
+                            "source": "gpt-team-new",
+                            "codex_register_role": "child",
+                        }),
+                    ]
+                ) + "\n",
+                encoding="utf-8",
+            )
+            self.service._accounts_jsonl_path = path
+
+            state = self.service._default_state()
+            state.update(
+                {
+                    "job_phase": "running:gpt_team_batch",
+                    "enabled": True,
+                    "resume_context": {"email": "parent@example.com", "team_name": "1"},
+                }
+            )
+            asyncio.run(self.service._save_state(state))
+
+            process = SimpleNamespace()
+            self.service._active_process = process
+            self.service._active_context = {"mode": "resume", "name": "gpt_team_batch", "email": "parent@example.com"}
+
+            calls = []
+
+            with patch.object(self.service, "_process_accounts_jsonl_records", return_value={"failed": 0}), \
+                 patch.object(self.service, "_persist_single_parent_record", side_effect=lambda record: calls.append(("persist", record.get("email"))) or "updated"):
+                asyncio.run(
+                    self.service._handle_process_exit(
+                        process,
+                        {"mode": "resume", "name": "gpt_team_batch", "email": "parent@example.com"},
+                        0,
+                    )
+                )
+
+            latest = asyncio.run(self.service._load_state())
+            parsed = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(calls[0][0], "persist")
+            self.assertEqual(len([row for row in parsed if row.get("email") == "parent@example.com" and row.get("codex_register_role") == "parent"]), 1)
+            self.assertFalse(any(row.get("email") == "parent@example.com" and row.get("source") == "get_tokens" for row in parsed))
+            self.assertTrue(any(row.get("email") == "child@example.com" for row in parsed))
+            self.assertEqual(latest["job_phase"], "completed")
 
 
 class GetTokensPersistenceContractTests(unittest.TestCase):
