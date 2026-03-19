@@ -9,7 +9,7 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -63,10 +63,11 @@ class FakeProcess:
 
 
 class FakeCursor:
-    def __init__(self, *, existing_accounts=None, current_groups=None, insert_ids=None):
+    def __init__(self, *, existing_accounts=None, current_groups=None, insert_ids=None, list_account_rows=None):
         self.existing_accounts = existing_accounts or {}
         self.current_groups = list(current_groups or [])
         self.insert_ids = list(insert_ids or [101])
+        self.list_account_rows = list(list_account_rows or [])
         self.executed = []
         self._fetchone_value = None
         self._fetchall_value = []
@@ -76,7 +77,9 @@ class FakeCursor:
         params = tuple(params or ())
         self.executed.append((query, params))
 
-        if query.startswith("SELECT id, name, credentials, extra FROM accounts"):
+        if query.startswith("SELECT id, credentials, extra, created_at, updated_at FROM accounts"):
+            self._fetchall_value = list(self.list_account_rows)
+        elif query.startswith("SELECT id, name, credentials, extra FROM accounts"):
             result = None
             for param in params:
                 result = self.existing_accounts.get(param)
@@ -111,6 +114,37 @@ class FakeConnection:
 
     def close(self):
         self.closed = True
+
+
+class FakeWorker:
+    def __init__(self, alive=True):
+        self._alive = alive
+
+    def is_alive(self):
+        return self._alive
+
+
+class GenerationAwareWorker:
+    def __init__(self, service, generation, active=True):
+        self._service = service
+        self.generation = generation
+        self._active = active
+
+    def is_alive(self):
+        return self._active and self._service._loop_worker_generation == self.generation
+
+
+class ControllableStartLoopWorker:
+    def __init__(self, service):
+        self.service = service
+        self.calls = []
+        self.created = []
+
+    def __call__(self, generation):
+        self.calls.append(generation)
+        worker = GenerationAwareWorker(self.service, generation)
+        self.created.append(worker)
+        return worker, ""
 
 
 class ServiceTestCase(unittest.TestCase):
@@ -194,39 +228,91 @@ class JsonlParsingTests(ServiceTestCase):
             self.assertTrue(record["invited"])
             self.assertGreater(record["line_end_offset"], baseline)
 
-    def test_list_accounts_for_frontend_normalizes_jsonl_records(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = pathlib.Path(tmpdir) / "accounts.jsonl"
-            line1 = json.dumps(
-                {
-                    "email": "user1@example.com",
-                    "access_token": "at1",
-                    "refresh_token": "rt1",
-                    "account_id": "acct-1",
-                    "source": "gpt-team-new",
-                    "created_at": "2026-03-19T00:00:00Z",
-                }
-            ) + "\n"
-            line2 = json.dumps(
-                {
-                    "email": "user2@example.com",
-                    "access_token": "at2",
-                }
-            ) + "\n"
-            path.write_text(line1 + "not-json\n" + line2, encoding="utf-8")
-            self.service._accounts_jsonl_path = path
+    def test_list_accounts_for_frontend_reads_persisted_codex_accounts_from_db(self):
+        cursor = FakeCursor(
+            list_account_rows=[
+                (
+                    17,
+                    {
+                        "email": "Parent@Example.com",
+                        "access_token": "at-parent",
+                        "refresh_token": "rt-parent",
+                        "account_id": "acct-parent",
+                        "source": "gpt-team-new",
+                        "plan_type": "team",
+                        "organization_id": "org-1",
+                        "workspace_id": "ws-1",
+                        "codex_register_role": "parent",
+                    },
+                    {
+                        "codex_auto_register": True,
+                        "source": "gpt-team-new",
+                        "created_at": "2026-03-19T00:00:00Z",
+                    },
+                    "2026-03-18T12:00:00+00:00",
+                    "2026-03-19T01:00:00+00:00",
+                ),
+                (
+                    18,
+                    {
+                        "email": "child@example.com",
+                        "access_token": "at-child",
+                    },
+                    {
+                        "codex_auto_register": True,
+                        "source": "accounts_jsonl",
+                        "updated_at": "2026-03-19T02:00:00Z",
+                    },
+                    "2026-03-19T00:30:00+00:00",
+                    "2026-03-19T01:30:00+00:00",
+                ),
+                (
+                    19,
+                    {
+                        "access_token": "missing-email",
+                    },
+                    {
+                        "codex_auto_register": True,
+                    },
+                    "2026-03-19T00:45:00+00:00",
+                    "2026-03-19T01:45:00+00:00",
+                ),
+            ]
+        )
+        conn = FakeConnection(cursor)
 
+        with patch.object(self.service, "_create_db_connection", return_value=conn):
             accounts = self.service._list_accounts_for_frontend()
 
         self.assertEqual(len(accounts), 2)
-        self.assertEqual(accounts[0]["id"], 1)
-        self.assertEqual(accounts[0]["email"], "user1@example.com")
-        self.assertEqual(accounts[0]["access_token"], "at1")
-        self.assertEqual(accounts[0]["account_id"], "acct-1")
+        self.assertEqual(accounts[0]["id"], 17)
+        self.assertEqual(accounts[0]["email"], "parent@example.com")
+        self.assertEqual(accounts[0]["refresh_token"], "rt-parent")
+        self.assertEqual(accounts[0]["access_token"], "at-parent")
+        self.assertEqual(accounts[0]["account_id"], "acct-parent")
         self.assertEqual(accounts[0]["source"], "gpt-team-new")
-        self.assertEqual(accounts[1]["id"], 2)
-        self.assertEqual(accounts[1]["email"], "user2@example.com")
-        self.assertEqual(accounts[1]["access_token"], "at2")
+        self.assertEqual(accounts[0]["codex_register_role"], "parent")
+        self.assertEqual(accounts[0]["plan_type"], "team")
+        self.assertEqual(accounts[0]["organization_id"], "org-1")
+        self.assertEqual(accounts[0]["workspace_id"], "ws-1")
+        self.assertEqual(accounts[0]["created_at"], "2026-03-19T00:00:00Z")
+        self.assertEqual(accounts[0]["updated_at"], "2026-03-19T01:00:00+00:00")
+        self.assertEqual(accounts[1]["id"], 18)
+        self.assertEqual(accounts[1]["email"], "child@example.com")
+        self.assertEqual(accounts[1]["refresh_token"], "")
+        self.assertEqual(accounts[1]["account_id"], None)
+        self.assertEqual(accounts[1]["source"], "accounts_jsonl")
+        self.assertIsNone(accounts[1]["codex_register_role"])
+        self.assertIsNone(accounts[1]["plan_type"])
+        self.assertIsNone(accounts[1]["organization_id"])
+        self.assertIsNone(accounts[1]["workspace_id"])
+        self.assertEqual(accounts[1]["created_at"], "2026-03-19T00:30:00+00:00")
+        self.assertEqual(accounts[1]["updated_at"], "2026-03-19T02:00:00Z")
+        self.assertTrue(cursor.closed)
+        self.assertTrue(conn.closed)
+        list_query, list_params = cursor.executed[0]
+        self.assertIn("COALESCE(extra ->> 'codex_auto_register', 'false') = 'true'", list_query)
+        self.assertEqual(list_params, ())
 
 
 class GroupRoutingTests(ServiceTestCase):
@@ -405,31 +491,609 @@ class ProcessingFlowTests(ServiceTestCase):
         self.assertEqual(state["last_processed_summary"]["errors"], ["two@example.com:db write failed"])
         self.assertTrue(conn.closed)
 
-    def test_accounts_path_returns_list_of_accounts_from_jsonl(self):
+    def test_accounts_path_returns_persisted_codex_accounts_from_db_not_jsonl(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = pathlib.Path(tmpdir) / "accounts.jsonl"
             path.write_text(
-                "\n".join(
-                    [
-                        json.dumps({"email": "one@example.com", "access_token": "t1", "source": "gpt-team-new"}),
-                        json.dumps({"email": "two@example.com", "access_token": "t2", "source": "get_tokens"}),
-                    ]
-                )
-                + "\n",
+                json.dumps({"email": "jsonl-only@example.com", "access_token": "jsonl-token", "source": "get_tokens"}) + "\n",
                 encoding="utf-8",
             )
             self.service._accounts_jsonl_path = path
 
+            cursor = FakeCursor(
+                list_account_rows=[
+                    (
+                        91,
+                        {
+                            "email": "db@example.com",
+                            "access_token": "db-token",
+                            "refresh_token": "db-refresh",
+                            "account_id": "acct-db",
+                            "source": "gpt-team-new",
+                            "codex_register_role": "child",
+                        },
+                        {
+                            "codex_auto_register": True,
+                            "source": "gpt-team-new",
+                        },
+                        "2026-03-19T03:00:00+00:00",
+                        "2026-03-19T03:30:00+00:00",
+                    )
+                ]
+            )
+            conn = FakeConnection(cursor)
+
             async def _run():
-                return await self.service.handle_path("/accounts")
+                with patch.object(self.service, "_create_db_connection", return_value=conn):
+                    return await self.service.handle_path("/accounts")
 
             result = asyncio.run(_run())
 
         self.assertTrue(result["success"])
         accounts = result["data"]
-        self.assertEqual(len(accounts), 2)
-        self.assertEqual(accounts[0]["email"], "one@example.com")
-        self.assertEqual(accounts[1]["email"], "two@example.com")
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["id"], 91)
+        self.assertEqual(accounts[0]["email"], "db@example.com")
+        self.assertEqual(accounts[0]["access_token"], "db-token")
+        self.assertEqual(accounts[0]["refresh_token"], "db-refresh")
+        self.assertEqual(accounts[0]["account_id"], "acct-db")
+        self.assertEqual(accounts[0]["source"], "gpt-team-new")
+        self.assertEqual(accounts[0]["codex_register_role"], "child")
+        self.assertEqual(accounts[0]["created_at"], "2026-03-19T03:00:00+00:00")
+        self.assertEqual(accounts[0]["updated_at"], "2026-03-19T03:30:00+00:00")
+
+
+class LoopStateTests(ServiceTestCase):
+
+    def test_loop_status_returns_default_loop_fields(self):
+        async def _run():
+            return await self.service.handle_path("/loop/status")
+
+        result = asyncio.run(_run())
+
+        self.assertTrue(result["success"], result.get("error"))
+        data = result["data"]
+        self.assertFalse(data["loop_running"])
+        self.assertEqual(data["loop_current_round"], 0)
+        self.assertEqual(data["loop_total_created"], 0)
+        self.assertEqual(data["loop_history"], [])
+
+    def test_loop_stop_is_idempotent_when_already_stopped(self):
+        async def _run():
+            return await self.service.handle_path("/loop/stop", payload={})
+
+        result = asyncio.run(_run())
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertFalse(result["data"]["loop_running"])
+
+    def test_loop_start_sets_running_state(self):
+        fake_worker = FakeWorker()
+        with patch.object(self.service, "_start_loop_worker", return_value=(fake_worker, ""), create=True):
+            result = asyncio.run(self.service.handle_path("/loop/start", payload={}))
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertTrue(result["data"]["loop_running"])
+
+    def test_loop_start_repairs_stale_running_state_before_starting(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        state["loop_started_at"] = "2026-03-19T00:00:00Z"
+        asyncio.run(self.service._save_state(state))
+
+        fake_worker = FakeWorker()
+        with patch.object(self.service, "_start_loop_worker", return_value=(fake_worker, ""), create=True):
+            result = asyncio.run(self.service.handle_path("/loop/start", payload={}))
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertTrue(result["data"]["loop_running"])
+        self.assertEqual(result["data"]["loop_last_error"], "")
+        self.assertNotEqual(result["data"]["loop_started_at"], "2026-03-19T00:00:00Z")
+
+    def test_loop_start_rejects_when_already_running(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        self.service._loop_worker_thread = FakeWorker(alive=True)
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(self.service.handle_path("/loop/start", payload={}))
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "already_running")
+
+    def test_loop_start_rejects_when_main_workflow_is_active(self):
+        self.service._active_process = FakeProcess(block=True)
+
+        result = asyncio.run(self.service.handle_path("/loop/start", payload={}))
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "main_workflow_running")
+
+    def test_loop_stop_repairs_stale_running_state(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        state["loop_started_at"] = "2026-03-19T00:00:00Z"
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(self.service.handle_path("/loop/stop", payload={}))
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertFalse(result["data"]["loop_running"])
+        self.assertEqual(result["data"]["loop_last_error"], "loop_worker_missing_after_restart")
+
+
+    def test_loop_start_rejects_while_previous_worker_is_still_stopping(self):
+        state = self.service._default_state()
+        state["loop_running"] = False
+        state["loop_stopping"] = True
+        self.service._loop_worker_thread = FakeWorker(alive=True)
+        self.service._loop_worker_generation = 1
+        self.service._loop_active_generation = 1
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(self.service.handle_path("/loop/start", payload={}))
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "loop_stopping")
+        self.assertTrue(result["data"]["loop_stopping"])
+
+    def test_loop_start_after_stale_finalizer_keeps_new_generation_state(self):
+        starter = ControllableStartLoopWorker(self.service)
+
+        with patch.object(self.service, "_start_loop_worker", side_effect=starter, create=True):
+            first_result = asyncio.run(self.service.handle_path("/loop/start", payload={}))
+        self.assertTrue(first_result["success"], first_result.get("error"))
+        first_generation = self.service._loop_active_generation
+        self.assertEqual(first_generation, 1)
+
+        first_worker = starter.created[0]
+        first_worker._active = True
+        stop_result = asyncio.run(self.service.handle_path("/loop/stop", payload={}))
+        self.assertTrue(stop_result["success"], stop_result.get("error"))
+        self.assertTrue(stop_result["data"]["loop_stopping"])
+        self.assertFalse(stop_result["data"]["loop_running"])
+
+        first_worker._active = False
+        asyncio.run(self.service._finalize_loop_worker_shutdown(first_generation))
+        state_after_finalize = asyncio.run(self.service._load_state())
+        self.assertFalse(state_after_finalize["loop_stopping"])
+        self.assertFalse(state_after_finalize["loop_running"])
+
+        with patch.object(self.service, "_start_loop_worker", side_effect=starter, create=True):
+            second_result = asyncio.run(self.service.handle_path("/loop/start", payload={}))
+        self.assertTrue(second_result["success"], second_result.get("error"))
+        second_generation = self.service._loop_active_generation
+        self.assertEqual(second_generation, 2)
+        self.assertTrue(second_result["data"]["loop_running"])
+        self.assertFalse(second_result["data"]["loop_stopping"])
+
+        asyncio.run(self.service._finalize_loop_worker_shutdown(first_generation))
+        latest_state = asyncio.run(self.service._load_state())
+        self.assertTrue(latest_state["loop_running"])
+        self.assertFalse(latest_state["loop_stopping"])
+        self.assertEqual(self.service._loop_active_generation, second_generation)
+        self.assertEqual(self.service._loop_worker_generation, second_generation)
+        self.assertIsNotNone(self.service._loop_worker_thread)
+
+    def test_loop_stop_terminates_loop_owned_process(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        asyncio.run(self.service._save_state(state))
+        process = FakeProcess(block=True)
+        self.service._loop_owned_process = process
+
+        result = asyncio.run(self.service.handle_path("/loop/stop", payload={}))
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertTrue(process._terminated)
+        self.assertFalse(result["data"]["loop_running"])
+
+    def test_loop_stop_during_stopping_still_terminates_registered_process(self):
+        state = self.service._default_state()
+        state["loop_running"] = False
+        state["loop_stopping"] = True
+        self.service._loop_active_generation = 1
+        self.service._loop_worker_generation = 1
+        self.service._loop_worker_thread = FakeWorker(alive=True)
+        process = FakeProcess(block=True)
+        self.service._loop_owned_process = process
+        self.service._loop_owned_process_generation = 1
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(self.service.handle_path("/loop/stop", payload={}))
+
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertTrue(process._terminated)
+        self.assertTrue(result["data"]["loop_stopping"])
+        self.assertFalse(result["data"]["loop_running"])
+
+    def test_run_loop_process_once_terminates_when_stop_requested_before_registration(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        asyncio.run(self.service._save_state(state))
+        self.service._loop_active_generation = 1
+        self.service._loop_worker_generation = 1
+        self.service._loop_worker_thread = FakeWorker(alive=True)
+        process = FakeProcess(block=True)
+
+        async def exercise():
+            await self.service._state_lock.acquire()
+            try:
+                stop_task = asyncio.create_task(self.service.handle_path("/loop/stop", payload={}))
+                await asyncio.sleep(0)
+                run_once_task = asyncio.create_task(self.service._run_loop_process_once(1))
+                await asyncio.sleep(0)
+            finally:
+                self.service._state_lock.release()
+
+            stop_result = await asyncio.wait_for(stop_task, timeout=1)
+            return_code = await asyncio.wait_for(run_once_task, timeout=1)
+            latest_state = await self.service._load_state()
+            return stop_result, return_code, latest_state
+
+        with patch.object(self.service, "_spawn_process", return_value=(process, "")):
+            stop_result, return_code, latest_state = asyncio.run(exercise())
+
+        self.assertTrue(stop_result["success"], stop_result.get("error"))
+        self.assertTrue(process._terminated)
+        self.assertEqual(return_code, -15)
+        self.assertTrue(stop_result["data"]["loop_stopping"])
+        self.assertFalse(stop_result["data"]["loop_running"])
+        self.assertIsNone(self.service._loop_owned_process)
+        self.assertFalse(latest_state["loop_running"])
+
+    def test_loop_worker_iteration_does_not_merge_stale_generation_round_state(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        state["loop_current_round"] = 2
+        state["loop_history"] = [{"round": 2, "status": "success"}]
+        self.service._loop_active_generation = 1
+        self.service._loop_worker_generation = 1
+        self.service._loop_worker_thread = GenerationAwareWorker(self.service, 1)
+        asyncio.run(self.service._save_state(state))
+
+        async def stale_round(round_state, generation=None):
+            round_state["loop_current_round"] = 3
+            round_state["loop_last_error"] = "stale-generation"
+            round_state["loop_history"] = [{"round": 3, "status": "failed", "error": "stale-generation"}]
+            self.service._loop_active_generation = 2
+            self.service._loop_worker_generation = 2
+            self.service._loop_worker_thread = GenerationAwareWorker(self.service, 2)
+            latest = await self.service._load_state()
+            latest["loop_running"] = True
+            latest["loop_current_round"] = 9
+            latest["loop_last_error"] = "new-generation"
+            latest["loop_history"] = [{"round": 9, "status": "success"}]
+            latest["loop_stopping"] = False
+            await self.service._save_state(latest)
+            return {"status": "success"}
+
+        with patch.object(self.service, "_run_loop_round", side_effect=stale_round):
+            asyncio.run(self.service._loop_worker_iteration(1))
+
+        latest_state = asyncio.run(self.service._load_state())
+        self.assertTrue(latest_state["loop_running"])
+        self.assertEqual(latest_state["loop_current_round"], 9)
+        self.assertEqual(latest_state["loop_last_error"], "new-generation")
+        self.assertEqual(latest_state["loop_history"], [{"round": 9, "status": "success"}])
+
+
+class LoopRoundTests(ServiceTestCase):
+    def _base_round_state(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        state["accounts_jsonl_offset"] = 10
+        state["loop_committed_accounts_jsonl_offset"] = 10
+        return state
+
+    def test_loop_round_updates_created_counts_and_committed_offset(self):
+        state = self._base_round_state()
+        summary = {
+            "start_offset": 10,
+            "end_offset": 25,
+            "records_seen": 3,
+            "created": 2,
+            "updated": 1,
+            "skipped": 0,
+            "failed": 0,
+            "errors": [],
+        }
+
+        with patch.object(
+            self.service,
+            "_process_loop_accounts_jsonl_round",
+            return_value=summary,
+            create=True,
+        ) as process_mock, patch.object(
+            self.service,
+            "_run_loop_process_once",
+            new=AsyncMock(return_value=0),
+            create=True,
+        ):
+            asyncio.run(self.service._run_loop_round(state))
+
+        process_mock.assert_called_once_with(state)
+        self.assertEqual(state["loop_current_round"], 1)
+        self.assertEqual(state["loop_last_round_created"], 2)
+        self.assertEqual(state["loop_last_round_updated"], 1)
+        self.assertEqual(state["loop_last_round_skipped"], 0)
+        self.assertEqual(state["loop_last_round_failed"], 0)
+        self.assertEqual(state["loop_total_created"], 2)
+        self.assertEqual(state["loop_committed_accounts_jsonl_offset"], 25)
+        self.assertEqual(state["loop_last_error"], "")
+        self.assertEqual(state["loop_history"][-1]["status"], "success")
+
+    def test_loop_round_failure_keeps_committed_offset(self):
+        state = self._base_round_state()
+
+        with patch.object(
+            self.service,
+            "_process_loop_accounts_jsonl_round",
+            side_effect=RuntimeError("db boom"),
+            create=True,
+        ), patch.object(
+            self.service,
+            "_run_loop_process_once",
+            new=AsyncMock(return_value=0),
+            create=True,
+        ):
+            asyncio.run(self.service._run_loop_round(state))
+
+        self.assertEqual(state["loop_current_round"], 1)
+        self.assertEqual(state["loop_committed_accounts_jsonl_offset"], 10)
+        self.assertEqual(state["loop_last_error"], "db boom")
+        self.assertEqual(state["loop_history"][-1]["status"], "failed")
+
+    def test_loop_round_stop_records_stopped_history_entry(self):
+        state = self._base_round_state()
+
+        stop_event = threading.Event()
+        stop_event.set()
+
+        with patch.object(self.service, "_loop_stop_event", stop_event, create=True), patch.object(
+            self.service,
+            "_run_loop_process_once",
+            new=AsyncMock(return_value=-15),
+            create=True,
+        ) as run_once_mock, patch.object(
+            self.service,
+            "_process_loop_accounts_jsonl_round",
+            create=True,
+        ) as process_mock:
+            asyncio.run(self.service._run_loop_round(state))
+
+        run_once_mock.assert_called_once()
+        process_mock.assert_not_called()
+        self.assertEqual(state["loop_current_round"], 1)
+        self.assertEqual(state["loop_committed_accounts_jsonl_offset"], 10)
+        self.assertEqual(state["loop_history"][-1]["status"], "stopped")
+
+    def test_process_loop_accounts_jsonl_round_restores_main_workflow_state(self):
+        state = self._base_round_state()
+        state["total_created"] = 9
+        state["total_updated"] = 8
+        state["total_skipped"] = 7
+        state["total_failed"] = 6
+        state["last_processed_records"] = 5
+        state["last_processed_offset"] = 4
+        state["last_processed_summary"] = {"created": 99}
+
+        summary = {
+            "start_offset": 10,
+            "end_offset": 30,
+            "records_seen": 1,
+            "created": 1,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "errors": [],
+        }
+
+        with patch.object(self.service, "_process_accounts_jsonl_records", return_value=summary) as process_mock:
+            result = self.service._process_loop_accounts_jsonl_round(state)
+
+        process_mock.assert_called_once_with(state)
+        self.assertEqual(result, summary)
+        self.assertEqual(state["accounts_jsonl_offset"], 10)
+        self.assertEqual(state["loop_committed_accounts_jsonl_offset"], 30)
+        self.assertEqual(state["total_created"], 9)
+        self.assertEqual(state["total_updated"], 8)
+        self.assertEqual(state["total_skipped"], 7)
+        self.assertEqual(state["total_failed"], 6)
+        self.assertEqual(state["last_processed_records"], 5)
+        self.assertEqual(state["last_processed_offset"], 4)
+        self.assertEqual(state["last_processed_summary"], {"created": 99})
+
+    def test_process_loop_accounts_jsonl_round_restores_main_workflow_state_on_exception(self):
+        state = self._base_round_state()
+        state["total_created"] = 9
+        state["total_updated"] = 8
+        state["total_skipped"] = 7
+        state["total_failed"] = 6
+        state["last_processed_records"] = 5
+        state["last_processed_offset"] = 4
+        state["last_processed_summary"] = {"created": 99}
+
+        def raising_process(current_state):
+            current_state["accounts_jsonl_offset"] = 22
+            current_state["total_created"] = 12
+            current_state["total_updated"] = 11
+            current_state["total_skipped"] = 10
+            current_state["total_failed"] = 9
+            current_state["last_processed_records"] = 8
+            current_state["last_processed_offset"] = 22
+            current_state["last_processed_summary"] = {"failed": 1}
+            raise RuntimeError("db boom")
+
+        with patch.object(self.service, "_process_accounts_jsonl_records", side_effect=raising_process):
+            with self.assertRaisesRegex(RuntimeError, "db boom"):
+                self.service._process_loop_accounts_jsonl_round(state)
+
+        self.assertEqual(state["accounts_jsonl_offset"], 10)
+        self.assertEqual(state["loop_committed_accounts_jsonl_offset"], 10)
+        self.assertEqual(state["total_created"], 9)
+        self.assertEqual(state["total_updated"], 8)
+        self.assertEqual(state["total_skipped"], 7)
+        self.assertEqual(state["total_failed"], 6)
+        self.assertEqual(state["last_processed_records"], 5)
+        self.assertEqual(state["last_processed_offset"], 4)
+        self.assertEqual(state["last_processed_summary"], {"created": 99})
+
+    def test_loop_round_partial_processing_failure_preserves_summary_counts(self):
+        state = self._base_round_state()
+        summary = {
+            "start_offset": 10,
+            "end_offset": 22,
+            "records_seen": 2,
+            "created": 1,
+            "updated": 0,
+            "skipped": 1,
+            "failed": 1,
+            "errors": ["db boom"],
+        }
+
+        with patch.object(
+            self.service,
+            "_process_loop_accounts_jsonl_round",
+            return_value=summary,
+            create=True,
+        ), patch.object(
+            self.service,
+            "_run_loop_process_once",
+            new=AsyncMock(return_value=0),
+            create=True,
+        ):
+            result = asyncio.run(self.service._run_loop_round(state))
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], "loop_accounts_processing_failed")
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["summary"], summary)
+        self.assertEqual(state["loop_committed_accounts_jsonl_offset"], 10)
+        self.assertEqual(state["loop_last_error"], "loop_accounts_processing_failed")
+        self.assertEqual(state["loop_last_round_created"], 1)
+        self.assertEqual(state["loop_last_round_updated"], 0)
+        self.assertEqual(state["loop_last_round_skipped"], 1)
+        self.assertEqual(state["loop_last_round_failed"], 1)
+        self.assertEqual(state["loop_history"][-1]["status"], "failed")
+        self.assertEqual(state["loop_history"][-1]["summary"], summary)
+
+
+    def test_loop_worker_iteration_releases_lock_during_active_round(self):
+        state = self._base_round_state()
+        state["loop_history"] = []
+        self.service._loop_worker_thread = FakeWorker(alive=True)
+        asyncio.run(self.service._save_state(state))
+
+        entered_round = asyncio.Event()
+        release_round = asyncio.Event()
+
+        async def blocking_round(round_state):
+            round_state["loop_last_error"] = ""
+            entered_round.set()
+            await release_round.wait()
+            round_state["loop_history"] = [{"round": 1, "status": "success"}]
+            round_state["loop_last_round_created"] = 0
+            round_state["loop_last_round_updated"] = 0
+            round_state["loop_last_round_skipped"] = 0
+            round_state["loop_last_round_failed"] = 0
+            round_state["loop_last_round_finished_at"] = "done"
+            return {"status": "success"}
+
+        async def exercise():
+            with patch.object(self.service, "_run_loop_round", side_effect=blocking_round):
+                iteration_task = asyncio.create_task(self.service._loop_worker_iteration())
+                await asyncio.wait_for(entered_round.wait(), timeout=1)
+
+                status_task = asyncio.create_task(self.service.handle_path("/loop/status"))
+                status_result = await asyncio.wait_for(status_task, timeout=1)
+                self.assertTrue(status_result["success"])
+                self.assertTrue(status_result["data"]["loop_running"])
+
+                stop_task = asyncio.create_task(self.service.handle_path("/loop/stop", payload={}))
+                stop_result = await asyncio.wait_for(stop_task, timeout=1)
+                self.assertTrue(stop_result["success"])
+                self.assertFalse(stop_result["data"]["loop_running"])
+                self.assertTrue(self.service._loop_stop_event.is_set())
+
+                release_round.set()
+                await asyncio.wait_for(iteration_task, timeout=1)
+
+        asyncio.run(exercise())
+
+    def test_run_loop_process_once_waits_without_blocking_event_loop(self):
+        process = FakeProcess(block=True)
+
+        async def exercise():
+            wait_task = asyncio.create_task(self.service._run_loop_process_once())
+            await asyncio.sleep(0)
+
+            status_task = asyncio.create_task(self.service.handle_path("/loop/status"))
+            status_result = await asyncio.wait_for(status_task, timeout=1)
+            self.assertTrue(status_result["success"])
+            self.assertIs(self.service._loop_owned_process, process)
+
+            process.release()
+            return_code = await asyncio.wait_for(wait_task, timeout=1)
+            self.assertEqual(return_code, 0)
+            self.assertIsNone(self.service._loop_owned_process)
+
+        with patch.object(self.service, "_spawn_process", return_value=(process, "")):
+            asyncio.run(exercise())
+
+    def test_loop_history_keeps_latest_twenty_entries(self):
+        state = self._base_round_state()
+        state["loop_history"] = [{"round": index} for index in range(1, 21)]
+        summary = {
+            "start_offset": 10,
+            "end_offset": 11,
+            "records_seen": 0,
+            "created": 0,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "errors": [],
+        }
+
+        with patch.object(self.service, "_run_loop_process_once", new=AsyncMock(return_value=0)), patch.object(
+            self.service,
+            "_process_loop_accounts_jsonl_round",
+            return_value=summary,
+        ):
+            asyncio.run(self.service._run_loop_round(state))
+
+        self.assertEqual(len(state["loop_history"]), 20)
+        self.assertEqual(state["loop_history"][0]["round"], 2)
+        self.assertEqual(state["loop_history"][-1]["round"], 1)
+
+
+class LoopMutualExclusionTests(ServiceTestCase):
+    def test_enable_rejects_while_loop_running(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        self.service._loop_worker_thread = FakeWorker(alive=True)
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(self.service.handle_path("/enable", payload={}))
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "loop_running")
+
+    def test_resume_rejects_while_loop_running(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        state["job_phase"] = "waiting_manual:subscribe_then_resume"
+        state["resume_context"] = {"email": "loop@example.com"}
+        self.service._loop_worker_thread = FakeWorker(alive=True)
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(self.service.handle_path("/resume", payload={}))
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"]["code"], "loop_running")
 
 
 class DataDirectoryContractTests(ServiceTestCase):
@@ -453,10 +1117,10 @@ class DataDirectoryContractTests(ServiceTestCase):
         self.assertEqual(service._accounts_jsonl_path, pathlib.Path(tmpdir) / "accounts.jsonl")
 
     def test_list_accounts_for_frontend_includes_plan_and_role_fields(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = pathlib.Path(tmpdir) / "accounts.jsonl"
-            path.write_text(
-                json.dumps(
+        cursor = FakeCursor(
+            list_account_rows=[
+                (
+                    201,
                     {
                         "email": "parent@example.com",
                         "access_token": "at1",
@@ -467,15 +1131,18 @@ class DataDirectoryContractTests(ServiceTestCase):
                         "organization_id": "org-1",
                         "workspace_id": "ws-1",
                         "codex_register_role": "parent",
-                        "created_at": "2026-03-19T00:00:00Z",
-                        "updated_at": "2026-03-19T01:00:00Z",
-                    }
+                    },
+                    {
+                        "codex_auto_register": True,
+                    },
+                    "2026-03-19T00:00:00Z",
+                    "2026-03-19T01:00:00Z",
                 )
-                + "\n",
-                encoding="utf-8",
-            )
-            self.service._accounts_jsonl_path = path
+            ]
+        )
+        conn = FakeConnection(cursor)
 
+        with patch.object(self.service, "_create_db_connection", return_value=conn):
             accounts = self.service._list_accounts_for_frontend()
 
         self.assertEqual(accounts[0]["codex_register_role"], "parent")

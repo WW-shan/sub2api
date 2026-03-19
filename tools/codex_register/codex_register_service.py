@@ -48,6 +48,14 @@ class CodexRegisterService:
         self._active_context: Optional[Dict[str, Any]] = None
         self._stop_requested = False
 
+        self._loop_generation_counter = 0
+        self._loop_active_generation: Optional[int] = None
+        self._loop_worker_generation: Optional[int] = None
+        self._loop_owned_process_generation: Optional[int] = None
+        self._loop_worker_thread: Optional[threading.Thread] = None
+        self._loop_stop_event = threading.Event()
+        self._loop_owned_process: Optional[Any] = None
+
         self._base_dir = Path(__file__).resolve().parent
         self._data_dir = Path(os.getenv("CODEX_REGISTER_DATA_DIR") or str(self._base_dir)).resolve()
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -58,12 +66,15 @@ class CodexRegisterService:
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
 
-        if path in {"/enable", "/resume", "/disable"} and not self._is_authorized(payload):
+        if path in {"/enable", "/resume", "/disable", "/loop/start", "/loop/stop"} and not self._is_authorized(payload):
             return self._result(False, error="unauthorized")
 
         if path == "/status":
             state = await self._load_state()
             return self._result(True, data=state)
+
+        if path == "/loop/status":
+            return await self._handle_loop_status()
 
         if path == "/logs":
             return self._result(True, data=await self._list_logs())
@@ -81,16 +92,26 @@ class CodexRegisterService:
         if path == "/disable":
             return await self._handle_disable()
 
+        if path == "/loop/start":
+            return await self._handle_loop_start()
+
+        if path == "/loop/stop":
+            return await self._handle_loop_stop()
+
         return self._result(False, error=f"unsupported_path: {path}")
 
     async def _handle_enable(self) -> Dict[str, Any]:
         command = [sys.executable, str(self._base_dir / "get_tokens.py")]
 
         async with self._state_lock:
+            state = await self._load_state()
+            if self._repair_stale_loop_state_locked(state):
+                await self._save_state(state)
+            if self._coerce_bool(state.get("loop_running")):
+                return self._result(False, error="loop_running", data=state)
             if self._has_active_process_locked():
                 return self._result(False, error="already_running")
 
-            state = await self._load_state()
             self._set_phase(
                 state,
                 to_phase="running:get_tokens",
@@ -135,6 +156,14 @@ class CodexRegisterService:
     async def _handle_resume(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         async with self._state_lock:
             state = await self._load_state()
+            if self._repair_stale_loop_state_locked(state):
+                await self._save_state(state)
+            if self._coerce_bool(state.get("loop_running")):
+                return self._result(
+                    False,
+                    error={"code": "loop_running", "message": "loop is already running"},
+                    data=state,
+                )
             phase = str(state.get("job_phase") or "")
             waiting_phases = {"waiting_manual:resume_email", "waiting_manual:subscribe_then_resume"}
 
@@ -250,6 +279,290 @@ class CodexRegisterService:
 
         latest = await self._load_state()
         return self._result(True, data=latest)
+
+    async def _handle_loop_status(self) -> Dict[str, Any]:
+        async with self._state_lock:
+            state = await self._load_state()
+            if self._repair_stale_loop_state_locked(state):
+                await self._save_state(state)
+            return self._result(True, data=state)
+
+    async def _handle_loop_start(self) -> Dict[str, Any]:
+        worker: Optional[threading.Thread] = None
+        error_state: Optional[Dict[str, Any]] = None
+
+        async with self._state_lock:
+            state = await self._load_state()
+            if self._repair_stale_loop_state_locked(state):
+                await self._save_state(state)
+
+            if self._coerce_bool(state.get("loop_stopping")):
+                return self._result(False, error="loop_stopping", data=state)
+            if self._coerce_bool(state.get("loop_running")):
+                return self._result(False, error="already_running", data=state)
+            if self._has_active_loop_worker_locked():
+                state["loop_stopping"] = True
+                await self._save_state(state)
+                return self._result(False, error="loop_stopping", data=state)
+            if self._has_active_process_locked():
+                return self._result(False, error="main_workflow_running", data=state)
+
+            self._loop_generation_counter += 1
+            generation = self._loop_generation_counter
+            self._loop_active_generation = generation
+            self._loop_owned_process_generation = None
+            self._loop_stop_event.clear()
+            state["loop_running"] = True
+            state["loop_stopping"] = False
+            state["loop_started_at"] = self._now_iso()
+            state["loop_last_error"] = ""
+
+            worker, error = self._start_loop_worker(generation)
+            if error:
+                state["loop_running"] = False
+                state["loop_stopping"] = False
+                state["loop_started_at"] = ""
+                state["loop_last_error"] = error
+                self._loop_active_generation = None
+                await self._save_state(state)
+                error_state = state
+            else:
+                if worker is not None:
+                    self._loop_worker_thread = worker
+                    self._loop_worker_generation = generation
+                await self._save_state(state)
+                return self._result(True, data=state)
+
+        return self._result(False, error="loop_worker_start_failed", data=error_state)
+
+    async def _handle_loop_stop(self) -> Dict[str, Any]:
+        process: Optional[Any] = None
+        process_generation: Optional[int] = None
+
+        async with self._state_lock:
+            state = await self._load_state()
+            if self._repair_stale_loop_state_locked(state):
+                await self._save_state(state)
+
+            self._loop_stop_event.set()
+            process = self._loop_owned_process
+            process_generation = self._loop_owned_process_generation
+
+            if not self._coerce_bool(state.get("loop_running")):
+                if self._has_active_loop_worker_locked():
+                    state["loop_stopping"] = True
+                    await self._save_state(state)
+                else:
+                    state["loop_stopping"] = False
+                    self._clear_loop_runtime_ownership_locked()
+                    await self._save_state(state)
+                    return self._result(True, data=state)
+            else:
+                state["loop_running"] = False
+                state["loop_stopping"] = True
+                await self._save_state(state)
+
+        self._terminate_process(process)
+
+        async with self._state_lock:
+            state = await self._load_state()
+            if self._repair_stale_loop_state_locked(state):
+                await self._save_state(state)
+                return self._result(True, data=state)
+            state["loop_running"] = False
+            if not self._has_active_loop_worker_locked():
+                state["loop_stopping"] = False
+                self._clear_loop_runtime_ownership_locked(generation=process_generation)
+            await self._save_state(state)
+            return self._result(True, data=state)
+
+    def _start_loop_worker(self, generation: int) -> Tuple[Optional[threading.Thread], str]:
+        if self._loop is None:
+            return None, "service_loop_unavailable"
+
+        worker = threading.Thread(
+            target=self._loop_worker_main,
+            args=(generation,),
+            name=f"codex-register-loop-worker-{generation}",
+            daemon=True,
+        )
+        worker.start()
+        return worker, ""
+
+    def _loop_worker_main(self, generation: int) -> None:
+        loop = self._loop
+        if loop is None:
+            return
+
+        try:
+            while not self._loop_stop_event.is_set():
+                future = asyncio.run_coroutine_threadsafe(self._loop_worker_iteration(generation), loop)
+                try:
+                    should_continue = bool(future.result())
+                except Exception:
+                    should_continue = False
+                if not should_continue:
+                    break
+        finally:
+            future = asyncio.run_coroutine_threadsafe(self._finalize_loop_worker_shutdown(generation), loop)
+            try:
+                future.result(timeout=30)
+            except Exception:
+                pass
+
+    async def _loop_worker_iteration(self, generation: Optional[int] = None) -> bool:
+        async with self._state_lock:
+            state = await self._load_state()
+            if self._repair_stale_loop_state_locked(state):
+                await self._save_state(state)
+            active_generation = self._loop_active_generation
+            if generation is None:
+                generation = active_generation
+            if generation != active_generation:
+                return False
+            if not self._coerce_bool(state.get("loop_running")):
+                return False
+
+        if generation is None:
+            await self._run_loop_round(state)
+        else:
+            await self._run_loop_round(state, generation)
+
+        async with self._state_lock:
+            latest_state = await self._load_state()
+            if self._repair_stale_loop_state_locked(latest_state):
+                await self._save_state(latest_state)
+                return False
+            active_generation = self._loop_active_generation
+            if generation != active_generation:
+                return False
+
+            self._merge_loop_round_state(latest_state, state)
+            await self._save_state(latest_state)
+            active_generation = self._loop_active_generation
+            if generation != active_generation:
+                return False
+            if not self._coerce_bool(latest_state.get("loop_running")):
+                return False
+
+        sleep_seconds = max(0, int(self.sleep_max or self.sleep_min or 0))
+        if sleep_seconds <= 0:
+            return not self._loop_stop_event.is_set()
+        return not self._loop_stop_event.wait(timeout=sleep_seconds)
+
+    def _merge_loop_round_state(self, target_state: Dict[str, Any], round_state: Dict[str, Any]) -> None:
+        for key in (
+            "loop_current_round",
+            "loop_last_round_started_at",
+            "loop_last_round_finished_at",
+            "loop_last_round_created",
+            "loop_last_round_updated",
+            "loop_last_round_skipped",
+            "loop_last_round_failed",
+            "loop_total_created",
+            "loop_last_error",
+            "loop_history",
+            "loop_committed_accounts_jsonl_offset",
+        ):
+            if key in round_state:
+                value = round_state.get(key)
+                if key == "loop_history" and isinstance(value, list):
+                    target_state[key] = [dict(item) if isinstance(item, dict) else item for item in value]
+                else:
+                    target_state[key] = value
+
+    async def _finalize_loop_worker_shutdown(self, generation: int) -> None:
+        async with self._state_lock:
+            state = await self._load_state()
+            if generation != self._loop_active_generation:
+                self._clear_loop_runtime_ownership_locked(generation=generation)
+                return
+            if self._repair_stale_loop_state_locked(state):
+                await self._save_state(state)
+                return
+            if self._coerce_bool(state.get("loop_running")) and self._loop_stop_event.is_set():
+                state["loop_running"] = False
+            if not self._coerce_bool(state.get("loop_running")):
+                state["loop_stopping"] = False
+                self._clear_loop_runtime_ownership_locked(generation=generation)
+                await self._save_state(state)
+
+    def _clear_loop_runtime_ownership_locked(self, generation: Optional[int] = None) -> None:
+        if generation is None or generation == self._loop_owned_process_generation:
+            self._loop_owned_process = None
+            self._loop_owned_process_generation = None
+        if generation is None or generation == self._loop_worker_generation:
+            self._loop_worker_thread = None
+            self._loop_worker_generation = None
+        if generation is None or generation == self._loop_active_generation:
+            self._loop_active_generation = None
+            self._loop_stop_event.clear()
+
+    def _has_loop_worker_thread_locked(self, generation: Optional[int] = None) -> bool:
+        worker = self._loop_worker_thread
+        if worker is None:
+            return False
+        if generation is not None and generation != self._loop_worker_generation:
+            return False
+
+        is_alive = getattr(worker, "is_alive", None)
+        if callable(is_alive):
+            try:
+                return bool(is_alive())
+            except Exception:
+                return True
+
+        return True
+
+    def _has_active_loop_process_locked(self, generation: Optional[int] = None) -> bool:
+        process = self._loop_owned_process
+        if process is None:
+            return False
+        if generation is not None and generation != self._loop_owned_process_generation:
+            return False
+
+        poll = getattr(process, "poll", None)
+        if callable(poll):
+            if poll() is None:
+                return True
+            return False
+        return getattr(process, "returncode", None) is None
+
+    def _has_active_loop_worker_locked(self) -> bool:
+        if self._has_active_loop_process_locked():
+            return True
+
+        worker = self._loop_worker_thread
+        if worker is None:
+            return False
+
+        is_alive = getattr(worker, "is_alive", None)
+        if callable(is_alive):
+            try:
+                return bool(is_alive())
+            except Exception:
+                return True
+
+        return True
+
+    def _repair_stale_loop_state_locked(self, state: Dict[str, Any]) -> bool:
+        if self._coerce_bool(state.get("loop_running")):
+            if self._has_active_loop_worker_locked():
+                return False
+
+            state["loop_running"] = False
+            state["loop_stopping"] = False
+            state["loop_started_at"] = ""
+            state["loop_last_error"] = "loop_worker_missing_after_restart"
+            self._clear_loop_runtime_ownership_locked()
+            return True
+
+        if self._coerce_bool(state.get("loop_stopping")) and not self._has_active_loop_worker_locked():
+            state["loop_stopping"] = False
+            self._clear_loop_runtime_ownership_locked()
+            return True
+
+        return False
 
     def _spawn_process(self, command: List[str]) -> Tuple[Optional[Any], str]:
         try:
@@ -414,44 +727,89 @@ class CodexRegisterService:
             await self._append_log("process_failed", process=name, return_code=return_code)
 
     def _list_accounts_for_frontend(self) -> List[Dict[str, Any]]:
-        """Read accounts.jsonl and normalize into frontend-ready records.
+        """List persisted Codex register accounts from the accounts table.
 
         Fields:
-          - id: monotonically increasing integer (1-based)
+          - id: persisted account row id
           - email: normalized email
           - refresh_token/access_token: optional, may be empty strings
           - account_id: optional string or None
-          - source: record source (e.g., 'get_tokens', 'gpt-team-new', 'accounts_jsonl')
-          - codex_register_role, plan_type, organization_id, workspace_id: currently optional
-          - created_at/updated_at: best-effort timestamps from record
+          - source: persisted record source when available
+          - codex_register_role, plan_type, organization_id, workspace_id: optional metadata
+          - created_at/updated_at: best-effort timestamps from persisted account metadata or row timestamps
         """
-        records, _next_offset = self._read_accounts_jsonl_records(start_offset=0)
+        conn = self._create_db_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT id, credentials, extra, created_at, updated_at FROM accounts "
+                "WHERE platform = 'openai' AND type = 'oauth' AND deleted_at IS NULL "
+                "AND COALESCE(extra ->> 'codex_auto_register', 'false') = 'true' "
+                "ORDER BY id ASC"
+            )
+            rows = cur.fetchall()
+        finally:
+            self._safe_close(cur)
+            self._safe_close(conn)
+
         accounts: List[Dict[str, Any]] = []
-        next_id = 1
-        for record in records:
-            email = str(record.get("email") or "").strip()
-            if not email:
-                continue
-            created_at = str(record.get("created_at") or "")
-            updated_at = str(record.get("updated_at") or created_at)
-            account = {
-                "id": next_id,
-                "email": email,
-                "refresh_token": record.get("refresh_token") or "",
-                "access_token": record.get("access_token") or "",
-                "account_id": (record.get("account_id") or "") or None,
-                "source": record.get("source") or "accounts_jsonl",
-                "codex_register_role": str(record.get("codex_register_role") or "").strip() or None,
-                "plan_type": str(record.get("plan_type") or "").strip() or None,
-                "organization_id": str(record.get("organization_id") or "").strip() or None,
-                "workspace_id": str(record.get("workspace_id") or "").strip() or None,
-                "created_at": created_at,
-                "updated_at": updated_at,
-            }
-            accounts.append(account)
-            next_id += 1
+        for row in rows:
+            account = self._build_frontend_account_from_db_row(row)
+            if account is not None:
+                accounts.append(account)
         return accounts
 
+    def _build_frontend_account_from_db_row(self, row: Tuple[Any, ...]) -> Optional[Dict[str, Any]]:
+        if not isinstance(row, tuple) or len(row) < 5:
+            return None
+
+        account_id_value, credentials_value, extra_value, row_created_at, row_updated_at = row[:5]
+        credentials = self._ensure_dict(credentials_value)
+        extra = self._ensure_dict(extra_value)
+
+        email = str(credentials.get("email") or "").strip().lower()
+        if not email:
+            return None
+
+        created_at = self._serialize_optional_timestamp(
+            extra.get("created_at") or credentials.get("created_at") or row_created_at
+        )
+        updated_at = self._serialize_optional_timestamp(
+            extra.get("updated_at") or credentials.get("updated_at") or row_updated_at or created_at
+        )
+
+        return {
+            "id": int(account_id_value),
+            "email": email,
+            "refresh_token": str(credentials.get("refresh_token") or "").strip(),
+            "access_token": str(credentials.get("access_token") or "").strip(),
+            "account_id": str(credentials.get("account_id") or "").strip() or None,
+            "source": str(extra.get("source") or credentials.get("source") or "codex-auto-register").strip()
+            or "codex-auto-register",
+            "codex_register_role": str(credentials.get("codex_register_role") or extra.get("codex_register_role") or "").strip()
+            or None,
+            "plan_type": str(credentials.get("plan_type") or extra.get("plan_type") or "").strip() or None,
+            "organization_id": str(credentials.get("organization_id") or extra.get("organization_id") or "").strip()
+            or None,
+            "workspace_id": str(credentials.get("workspace_id") or extra.get("workspace_id") or "").strip() or None,
+            "created_at": created_at or None,
+            "updated_at": updated_at or None,
+        }
+
+    def _serialize_optional_timestamp(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        isoformat = getattr(value, "isoformat", None)
+        if callable(isoformat):
+            try:
+                return str(isoformat())
+            except Exception:
+                pass
+        return str(value).strip()
+
+    def _capture_accounts_jsonl_offset(self) -> int:
         try:
             return int(self._accounts_jsonl_path.stat().st_size)
         except Exception:
@@ -899,6 +1257,155 @@ class CodexRegisterService:
         state["last_processed_summary"] = dict(summary)
         return summary
 
+    def _process_loop_accounts_jsonl_round(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        main_owned_offset = int(state.get("accounts_jsonl_offset") or 0)
+        committed_offset = int(state.get("loop_committed_accounts_jsonl_offset") or 0)
+        baseline_total_created = int(state.get("total_created") or 0)
+        baseline_total_updated = int(state.get("total_updated") or 0)
+        baseline_total_skipped = int(state.get("total_skipped") or 0)
+        baseline_total_failed = int(state.get("total_failed") or 0)
+        baseline_last_processed_records = int(state.get("last_processed_records") or 0)
+        baseline_last_processed_offset = int(state.get("last_processed_offset") or 0)
+        baseline_last_processed_summary = state.get("last_processed_summary")
+
+        state["accounts_jsonl_offset"] = committed_offset
+        try:
+            summary = self._process_accounts_jsonl_records(state)
+            if int(summary.get("failed") or 0) == 0:
+                state["loop_committed_accounts_jsonl_offset"] = int(summary.get("end_offset") or committed_offset)
+            return summary
+        finally:
+            state["accounts_jsonl_offset"] = main_owned_offset
+            state["total_created"] = baseline_total_created
+            state["total_updated"] = baseline_total_updated
+            state["total_skipped"] = baseline_total_skipped
+            state["total_failed"] = baseline_total_failed
+            state["last_processed_records"] = baseline_last_processed_records
+            state["last_processed_offset"] = baseline_last_processed_offset
+            state["last_processed_summary"] = baseline_last_processed_summary
+
+    async def _run_loop_round(self, state: Dict[str, Any], generation: Optional[int] = None) -> Dict[str, Any]:
+        state["loop_current_round"] = int(state.get("loop_current_round") or 0) + 1
+        round_number = int(state["loop_current_round"])
+        started_at = self._now_iso()
+        state["loop_last_round_started_at"] = started_at
+
+        history_entry: Dict[str, Any] = {
+            "round": round_number,
+            "started_at": started_at,
+            "finished_at": "",
+            "status": "running",
+            "created": 0,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "summary": None,
+            "error": "",
+        }
+        summary: Optional[Dict[str, Any]] = None
+
+        try:
+            return_code = await self._run_loop_process_once(generation)
+            if self._loop_stop_event.is_set() and return_code != 0:
+                history_entry["status"] = "stopped"
+                summary = {
+                    "start_offset": int(state.get("loop_committed_accounts_jsonl_offset") or 0),
+                    "end_offset": int(state.get("loop_committed_accounts_jsonl_offset") or 0),
+                    "records_seen": 0,
+                    "created": 0,
+                    "updated": 0,
+                    "skipped": 0,
+                    "failed": 0,
+                    "errors": [],
+                }
+            elif return_code != 0:
+                raise RuntimeError(f"gpt_team_new_exit_{return_code}")
+            else:
+                summary = self._process_loop_accounts_jsonl_round(state)
+                if int(summary.get("failed") or 0) > 0:
+                    raise RuntimeError("loop_accounts_processing_failed")
+                history_entry["status"] = "success"
+                state["loop_last_error"] = ""
+                state["loop_committed_accounts_jsonl_offset"] = int(summary.get("end_offset") or state.get("loop_committed_accounts_jsonl_offset") or 0)
+                state["loop_last_round_created"] = int(summary.get("created") or 0)
+                state["loop_last_round_updated"] = int(summary.get("updated") or 0)
+                state["loop_last_round_skipped"] = int(summary.get("skipped") or 0)
+                state["loop_last_round_failed"] = int(summary.get("failed") or 0)
+                state["loop_total_created"] = int(state.get("loop_total_created") or 0) + int(summary.get("created") or 0)
+
+            history_entry["created"] = int(summary.get("created") or 0)
+            history_entry["updated"] = int(summary.get("updated") or 0)
+            history_entry["skipped"] = int(summary.get("skipped") or 0)
+            history_entry["failed"] = int(summary.get("failed") or 0)
+            history_entry["summary"] = dict(summary)
+        except Exception as exc:
+            history_entry["status"] = "stopped" if self._loop_stop_event.is_set() else "failed"
+            history_entry["error"] = str(exc)
+            state["loop_last_error"] = str(exc)
+            if isinstance(summary, dict):
+                history_entry["created"] = int(summary.get("created") or 0)
+                history_entry["updated"] = int(summary.get("updated") or 0)
+                history_entry["skipped"] = int(summary.get("skipped") or 0)
+                history_entry["failed"] = int(summary.get("failed") or 0)
+                history_entry["summary"] = dict(summary)
+                state["loop_last_round_created"] = int(summary.get("created") or 0)
+                state["loop_last_round_updated"] = int(summary.get("updated") or 0)
+                state["loop_last_round_skipped"] = int(summary.get("skipped") or 0)
+                state["loop_last_round_failed"] = int(summary.get("failed") or 0)
+            else:
+                state["loop_last_round_created"] = 0
+                state["loop_last_round_updated"] = 0
+                state["loop_last_round_skipped"] = 0
+                state["loop_last_round_failed"] = 1
+        finally:
+            finished_at = self._now_iso()
+            state["loop_last_round_finished_at"] = finished_at
+            history_entry["finished_at"] = finished_at
+            history = list(state.get("loop_history") or [])
+            history.append(history_entry)
+            state["loop_history"] = history[-20:]
+
+        return history_entry
+
+    async def _run_loop_process_once(self, generation: Optional[int] = None) -> int:
+        command = [sys.executable, str(self._base_dir / "gpt-team-new.py")]
+        process, error = self._spawn_process(command)
+        if error or process is None:
+            raise RuntimeError(error or "loop_spawn_failed")
+
+        should_terminate = False
+        async with self._state_lock:
+            self._loop_owned_process = process
+            self._loop_owned_process_generation = generation
+            state = await self._load_state()
+            active_generation = self._loop_active_generation
+            if generation is not None and generation != active_generation:
+                should_terminate = True
+            elif self._loop_stop_event.is_set() or self._coerce_bool(state.get("loop_stopping")):
+                should_terminate = True
+
+        if should_terminate:
+            self._terminate_process(process)
+        try:
+            return int(await asyncio.to_thread(process.wait))
+        finally:
+            async with self._state_lock:
+                if self._loop_owned_process is process:
+                    self._loop_owned_process = None
+                    self._loop_owned_process_generation = None
+
+    def _terminate_process(self, process: Optional[Any]) -> None:
+        if process is None:
+            return
+
+        try:
+            process.terminate()
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
     def _safe_close(self, value: Any) -> None:
         close = getattr(value, "close", None)
         if callable(close):
@@ -1040,6 +1547,20 @@ class CodexRegisterService:
             "last_processed_offset": 0,
             "last_processed_records": 0,
             "last_processed_summary": None,
+            "loop_running": False,
+            "loop_stopping": False,
+            "loop_started_at": None,
+            "loop_current_round": 0,
+            "loop_last_round_started_at": None,
+            "loop_last_round_finished_at": None,
+            "loop_last_round_created": 0,
+            "loop_last_round_updated": 0,
+            "loop_last_round_skipped": 0,
+            "loop_last_round_failed": 0,
+            "loop_total_created": 0,
+            "loop_last_error": "",
+            "loop_history": [],
+            "loop_committed_accounts_jsonl_offset": 0,
         }
 
     def _is_authorized(self, payload: Dict[str, Any]) -> bool:
@@ -1103,8 +1624,8 @@ async def run_http(service: CodexRegisterService, *, host: str, port: int) -> No
 
 def build_http_handler(service: CodexRegisterService):
     method_allowlist = {
-        "GET": {"/status", "/logs", "/accounts"},
-        "POST": {"/enable", "/resume", "/disable"},
+        "GET": {"/status", "/logs", "/accounts", "/loop/status"},
+        "POST": {"/enable", "/resume", "/disable", "/loop/start", "/loop/stop"},
     }
 
     class CodexRegisterHTTPRequestHandler(BaseHTTPRequestHandler):

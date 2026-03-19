@@ -8,14 +8,29 @@ const StatCardStub = {
   template: '<div>{{ title }} {{ value }}</div>'
 }
 
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+
+  return { promise, resolve, reject }
+}
+
 const codexApiMocks = vi.hoisted(() => ({
   getStatus: vi.fn(),
+  getLoopStatus: vi.fn(),
   getLogs: vi.fn(),
   getAccounts: vi.fn(),
   enable: vi.fn(),
   disable: vi.fn(),
   resume: vi.fn(),
-  retry: vi.fn()
+  retry: vi.fn(),
+  startLoop: vi.fn(),
+  stopLoop: vi.fn()
 }))
 
 function makeStatus(overrides: Record<string, unknown> = {}) {
@@ -33,9 +48,33 @@ function makeStatus(overrides: Record<string, unknown> = {}) {
     can_start: false,
     can_resume: true,
     can_abandon: true,
+    manual_gate: null,
+    resume_context: null,
+    resume_hint: null,
     last_transition: null,
     last_resume_gate_reason: null,
     recent_logs_tail: [],
+    last_processed_summary: null,
+    ...overrides
+  }
+}
+
+function makeLoopStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    loop_running: false,
+    loop_stopping: false,
+    loop_started_at: null,
+    loop_current_round: 0,
+    loop_last_round_started_at: null,
+    loop_last_round_finished_at: null,
+    loop_last_round_created: 0,
+    loop_last_round_updated: 0,
+    loop_last_round_skipped: 0,
+    loop_last_round_failed: 0,
+    loop_total_created: 0,
+    loop_last_error: '',
+    loop_history: [],
+    loop_committed_accounts_jsonl_offset: 0,
     ...overrides
   }
 }
@@ -50,7 +89,8 @@ function makeSubscribeGateStatus(overrides: Record<string, unknown> = {}) {
       continue_url: 'https://chatgpt.com/invite'
     },
     resume_context: {
-      email: 'owner@example.com'
+      email: 'owner@example.com',
+      access_token_raw: 'tok-1234567890abcdef'
     },
     ...overrides
   })
@@ -69,6 +109,10 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'common.loading': '加载中...',
     'common.unknown': '未知',
     'common.refresh': '刷新',
+    'common.all': '全部',
+    'common.info': '提示',
+    'common.warning': '警告',
+    'common.error': '错误',
     'admin.codexRegister.badge.adminConsole': '后台控制台',
     'admin.codexRegister.badge.attention': '需关注',
     'admin.codexRegister.badge.healthy': '暂无错误',
@@ -89,6 +133,7 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.summary.proxyMissing': '未配置',
     'admin.codexRegister.summary.batchEmpty': '本轮批量暂无统计数据',
     'admin.codexRegister.summary.batchProgress': '本轮已处理 5 条，成功 5 条，失败 0 条',
+    'admin.codexRegister.summary.empty': '暂无',
     'admin.codexRegister.phase.unknown': '未知阶段',
     'admin.codexRegister.phase.idle': '未运行',
     'admin.codexRegister.phase.runningCreateParent': '正在创建母号',
@@ -115,31 +160,28 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.waitingTodo.generic.step1': '根据等待原因完成对应手动操作。',
     'admin.codexRegister.waitingTodo.generic.step2': '确认操作已在目标平台生效。',
     'admin.codexRegister.waitingTodo.generic.step3': '返回本页后点击“继续”。',
-    'admin.codexRegister.panels.statusTitle': '当前状态',
-    'admin.codexRegister.panels.statusDescription': 'status description',
-    'admin.codexRegister.panels.serviceStatus': '服务状态',
-    'admin.codexRegister.panels.proxyConfig': '代理配置',
+    'admin.codexRegister.panels.polling': '自动轮询：10 秒',
+    'admin.codexRegister.panels.waitingReasonEmpty': '当前无需等待',
+    'admin.codexRegister.panels.lastSuccessEmpty': '暂无成功记录',
     'admin.codexRegister.panels.proxyConfiguredDetail': '已配置代理，容器可按当前出口执行注册',
     'admin.codexRegister.panels.proxyMissingDetail': '未配置代理，请确认网络出口要求',
-    'admin.codexRegister.panels.phaseTitle': '工作流阶段',
-    'admin.codexRegister.panels.waitingReasonTitle': '等待原因',
-    'admin.codexRegister.panels.waitingReasonEmpty': '当前无需等待',
-    'admin.codexRegister.panels.lastSuccessTitle': '最近成功时间',
-    'admin.codexRegister.panels.lastSuccessEmpty': '暂无成功记录',
-    'admin.codexRegister.panels.sleepRangeTitle': '休眠区间',
-    'admin.codexRegister.panels.errorTitle': '最近错误日志',
-    'admin.codexRegister.panels.noErrors': '最近没有错误输出，服务状态看起来正常。',
     'admin.codexRegister.panels.eventsTitle': '最近事件',
     'admin.codexRegister.panels.eventsDescription': 'events description',
+    'admin.codexRegister.panels.workflowFailed': '工作流失败',
     'admin.codexRegister.panels.emptyEvents': '暂无事件',
     'admin.codexRegister.accounts.title': '已创建账户',
     'admin.codexRegister.accounts.description': '仅展示 codex-register 自动创建记录',
     'admin.codexRegister.accounts.empty': '暂无账号记录',
+    'admin.codexRegister.accounts.searchPlaceholder': '按邮箱搜索',
     'admin.codexRegister.accounts.columns.email': '邮箱',
+    'admin.codexRegister.accounts.columns.role': '角色',
     'admin.codexRegister.accounts.columns.accessToken': 'Access Token',
     'admin.codexRegister.accounts.columns.refreshToken': 'Refresh Token',
     'admin.codexRegister.accounts.columns.accountId': 'Account ID',
     'admin.codexRegister.accounts.columns.createdAt': '创建时间',
+    'admin.codexRegister.subscribeGate.title': '手动订阅关卡',
+    'admin.codexRegister.subscribeGate.email': '目标邮箱',
+    'admin.codexRegister.subscribeGate.missingResumeContextHint': '缺少 resume_context.email 或 resume_context.access_token_raw。',
     'admin.codexRegister.debug.snapshotTitle': 'Debug Snapshot',
     'admin.codexRegister.debug.phaseLabel': 'Current Phase',
     'admin.codexRegister.debug.waitingLabel': 'Waiting Reason',
@@ -160,7 +202,35 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.debug.resumeIgnored': 'Resume ignored',
     'admin.codexRegister.debug.resumeGateBlocked': 'Resume gate blocked: {reason}',
     'admin.codexRegister.debug.resumeStarted': 'Resume started',
-    'admin.codexRegister.debug.resumeUnknown': 'Resume unknown'
+    'admin.codexRegister.debug.resumeUnknown': 'Resume unknown',
+    'admin.codexRegister.loop.title': '循环执行控制',
+    'admin.codexRegister.loop.actions.start': '启动循环',
+    'admin.codexRegister.loop.actions.starting': '启动中…',
+    'admin.codexRegister.loop.actions.stop': '停止循环',
+    'admin.codexRegister.loop.actions.stopping': '停止中…',
+    'admin.codexRegister.loop.status.idle': '未运行',
+    'admin.codexRegister.loop.status.running': '循环运行中',
+    'admin.codexRegister.loop.status.stopping': '停止中',
+    'admin.codexRegister.loop.summary.idle': '可按需启动独立循环执行。',
+    'admin.codexRegister.loop.summary.idleWithHistory': '最近保留 1 轮执行记录。',
+    'admin.codexRegister.loop.summary.running': '当前正在执行第 3 轮循环。',
+    'admin.codexRegister.loop.summary.stopping': '正在请求停止当前循环，请稍候。',
+    'admin.codexRegister.loop.fields.status': '循环状态',
+    'admin.codexRegister.loop.fields.currentRound': '当前轮次',
+    'admin.codexRegister.loop.fields.totalCreated': '循环累计创建',
+    'admin.codexRegister.loop.fields.committedOffset': '已提交偏移量',
+    'admin.codexRegister.loop.fields.startedAt': '启动时间',
+    'admin.codexRegister.loop.fields.lastFinishedAt': '最近完成时间',
+    'admin.codexRegister.loop.fields.lastRoundSummary': '最近一轮结果',
+    'admin.codexRegister.loop.fields.lastError': '最近循环错误',
+    'admin.codexRegister.loop.lastRoundSummary': '创建 2 / 更新 1 / 跳过 0 / 失败 0',
+    'admin.codexRegister.loop.noError': '暂无循环错误',
+    'admin.codexRegister.loop.history.title': '最近循环历史',
+    'admin.codexRegister.loop.history.empty': '暂无循环历史',
+    'admin.codexRegister.loop.history.status.running': '运行中',
+    'admin.codexRegister.loop.history.status.success': '成功',
+    'admin.codexRegister.loop.history.status.failed': '失败',
+    'admin.codexRegister.loop.history.status.stopped': '已停止'
   }
 
   return {
@@ -179,6 +249,30 @@ vi.mock('vue-i18n', async (importOriginal) => {
         if (key === 'admin.codexRegister.summary.rangeValueWithUnit' && params) {
           return `${params.min} - ${params.max} 秒`
         }
+        if (key === 'admin.codexRegister.loop.summary.running' && params) {
+          return `当前正在执行第 ${params.round} 轮循环。`
+        }
+        if (key === 'admin.codexRegister.loop.summary.idleWithHistory' && params) {
+          return `最近保留 ${params.count} 轮执行记录。`
+        }
+        if (key === 'admin.codexRegister.loop.lastRoundSummary' && params) {
+          return `创建 ${params.created} / 更新 ${params.updated} / 跳过 ${params.skipped} / 失败 ${params.failed}`
+        }
+        if (key === 'admin.codexRegister.loop.history.count' && params) {
+          return `${params.count} 条记录`
+        }
+        if (key === 'admin.codexRegister.loop.history.round' && params) {
+          return `第 ${params.round} 轮`
+        }
+        if (key === 'admin.codexRegister.loop.history.summary' && params) {
+          return `创建 ${params.created} / 更新 ${params.updated} / 跳过 ${params.skipped} / 失败 ${params.failed}`
+        }
+        if (key === 'admin.codexRegister.loop.history.timeRange' && params) {
+          return `开始：${params.startedAt} · 结束：${params.finishedAt}`
+        }
+        if (key === 'admin.codexRegister.debug.resumeGateBlocked' && params) {
+          return `Resume gate blocked: ${params.reason}`
+        }
         return messages[key] ?? key
       }
     })
@@ -191,7 +285,7 @@ describe('CodexRegistrationCard', () => {
     vi.clearAllMocks()
 
     codexApiMocks.getStatus.mockResolvedValue(makeStatus())
-
+    codexApiMocks.getLoopStatus.mockResolvedValue(makeLoopStatus())
     codexApiMocks.getLogs.mockResolvedValue([
       {
         level: 'info',
@@ -199,7 +293,6 @@ describe('CodexRegistrationCard', () => {
         message: 'run completed'
       }
     ])
-
     codexApiMocks.getAccounts.mockResolvedValue([
       {
         id: 1,
@@ -212,6 +305,8 @@ describe('CodexRegistrationCard', () => {
         updated_at: '2026-03-06T10:00:01Z'
       }
     ])
+    codexApiMocks.startLoop.mockResolvedValue(makeLoopStatus({ loop_running: true, loop_current_round: 1 }))
+    codexApiMocks.stopLoop.mockResolvedValue(makeLoopStatus({ loop_running: false, loop_stopping: false }))
   })
 
   afterEach(() => {
@@ -379,14 +474,13 @@ describe('CodexRegistrationCard', () => {
 
     expect(codexApiMocks.resume).toHaveBeenCalledTimes(1)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.getLoopStatus).toHaveBeenCalledTimes(2)
     expect(wrapper.text()).toContain('正在创建母号')
   })
 
   it('keeps secondary action as stop in cancelled waiting state', async () => {
-    codexApiMocks.getStatus.mockResolvedValueOnce({
+    codexApiMocks.getStatus.mockResolvedValueOnce(makeStatus({
       enabled: false,
-      sleep_min: 12,
-      sleep_max: 34,
       total_created: 19,
       last_success: '2026-03-06 10:05:00',
       last_error: null,
@@ -397,7 +491,7 @@ describe('CodexRegistrationCard', () => {
       can_start: false,
       can_resume: true,
       can_abandon: true
-    })
+    }))
 
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
@@ -412,10 +506,8 @@ describe('CodexRegistrationCard', () => {
   })
 
   it('calls disable endpoint when secondary stop button is clicked in cancelled waiting state', async () => {
-    codexApiMocks.getStatus.mockResolvedValueOnce({
+    codexApiMocks.getStatus.mockResolvedValueOnce(makeStatus({
       enabled: false,
-      sleep_min: 12,
-      sleep_max: 34,
       total_created: 19,
       last_success: '2026-03-06 10:05:00',
       last_error: null,
@@ -426,12 +518,10 @@ describe('CodexRegistrationCard', () => {
       can_start: false,
       can_resume: true,
       can_abandon: true
-    })
+    }))
 
-    codexApiMocks.disable.mockResolvedValueOnce({
+    codexApiMocks.disable.mockResolvedValueOnce(makeStatus({
       enabled: false,
-      sleep_min: 12,
-      sleep_max: 34,
       total_created: 19,
       last_success: '2026-03-06 10:05:00',
       last_error: null,
@@ -442,7 +532,7 @@ describe('CodexRegistrationCard', () => {
       can_start: true,
       can_resume: false,
       can_abandon: false
-    })
+    }))
 
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
@@ -463,10 +553,8 @@ describe('CodexRegistrationCard', () => {
   })
 
   it('keeps resume as primary action in cancelled waiting state', async () => {
-    codexApiMocks.getStatus.mockResolvedValueOnce({
+    codexApiMocks.getStatus.mockResolvedValueOnce(makeStatus({
       enabled: false,
-      sleep_min: 12,
-      sleep_max: 34,
       total_created: 19,
       last_success: '2026-03-06 10:05:00',
       last_error: null,
@@ -477,12 +565,10 @@ describe('CodexRegistrationCard', () => {
       can_start: false,
       can_resume: true,
       can_abandon: true
-    })
+    }))
 
-    codexApiMocks.resume.mockResolvedValueOnce({
+    codexApiMocks.resume.mockResolvedValueOnce(makeStatus({
       enabled: true,
-      sleep_min: 12,
-      sleep_max: 34,
       total_created: 19,
       last_success: '2026-03-06 10:05:00',
       last_error: null,
@@ -493,7 +579,7 @@ describe('CodexRegistrationCard', () => {
       can_start: false,
       can_resume: false,
       can_abandon: true
-    })
+    }))
 
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
@@ -512,7 +598,20 @@ describe('CodexRegistrationCard', () => {
     expect(codexApiMocks.retry).not.toHaveBeenCalled()
   })
 
-  it('passes selected level and limit to getLogs', async () => {
+  it('renders workflow failure heading via i18n', async () => {
+    codexApiMocks.getStatus.mockResolvedValueOnce(makeStatus({
+      job_phase: 'failed',
+      last_error: 'terminal failure'
+    }))
+
+    codexApiMocks.getLogs.mockResolvedValueOnce([
+      {
+        level: 'error',
+        time: '2026-03-06 10:00:09',
+        message: 'workflow_failed: terminal failure'
+      }
+    ])
+
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
       global: { stubs: { StatCard: StatCardStub } }
@@ -520,15 +619,9 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
-    const levelSelect = wrapper.find('[data-testid="codex-log-level"]')
-    const limitSelect = wrapper.find('[data-testid="codex-log-limit"]')
-
-    await levelSelect.setValue('warn')
-    await limitSelect.setValue('50')
-    await flushPromises()
-
-    const lastCall = codexApiMocks.getLogs.mock.calls.at(-1)
-    expect(lastCall?.[0]).toEqual({ level: 'warn', limit: 50 })
+    const failurePanel = wrapper.find('[data-testid="codex-workflow-failure-detail"]')
+    expect(failurePanel.exists()).toBe(true)
+    expect(failurePanel.text()).toContain('工作流失败')
   })
 
   it('renders debug snapshot before events section', async () => {
@@ -603,7 +696,7 @@ describe('CodexRegistrationCard', () => {
     expect(raw).toContain('parent_upgrade')
   })
 
-  it('renders log limit options 50/100/200 and requests logs with selected level/limit', async () => {
+  it('renders localized log level options and log limit options, and requests logs with selected level/limit', async () => {
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
       global: { stubs: { StatCard: StatCardStub } }
@@ -611,15 +704,20 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
+    const levelSelect = wrapper.find('[data-testid="codex-log-level"]')
+    const levelOptions = levelSelect.findAll('option').map((option) => option.text())
+    expect(levelOptions).toEqual(['全部', '提示', '警告', '错误'])
+
     const limitSelect = wrapper.find('[data-testid="codex-log-limit"]')
     const options = limitSelect.findAll('option').map((option) => option.text())
     expect(options).toEqual(['50', '100', '200'])
 
+    await levelSelect.setValue('warn')
     await limitSelect.setValue('100')
     await flushPromises()
 
     const lastCall = codexApiMocks.getLogs.mock.calls.at(-1)
-    expect(lastCall?.[0]).toEqual({ level: undefined, limit: 100 })
+    expect(lastCall?.[0]).toEqual({ level: 'warn', limit: 100 })
   })
 
   it('applies resume-only local filter without changing server query', async () => {
@@ -777,6 +875,7 @@ describe('CodexRegistrationCard', () => {
     await flushPromises()
 
     expect(codexApiMocks.getStatus).not.toHaveBeenCalled()
+    expect(codexApiMocks.getLoopStatus).not.toHaveBeenCalled()
     expect(codexApiMocks.getLogs).not.toHaveBeenCalled()
     expect(setIntervalSpy).not.toHaveBeenCalled()
 
@@ -784,6 +883,7 @@ describe('CodexRegistrationCard', () => {
     await flushPromises()
 
     expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.getLoopStatus).toHaveBeenCalledTimes(1)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(1)
     expect(codexApiMocks.getAccounts).toHaveBeenCalledTimes(1)
     expect(setIntervalSpy).toHaveBeenCalledTimes(1)
@@ -792,6 +892,7 @@ describe('CodexRegistrationCard', () => {
     await flushPromises()
 
     expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.getLoopStatus).toHaveBeenCalledTimes(2)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
     expect(codexApiMocks.getAccounts).toHaveBeenCalledTimes(2)
 
@@ -804,11 +905,51 @@ describe('CodexRegistrationCard', () => {
     await flushPromises()
 
     expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.getLoopStatus).toHaveBeenCalledTimes(2)
     expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
     expect(codexApiMocks.getAccounts).toHaveBeenCalledTimes(2)
 
     setIntervalSpy.mockRestore()
     clearIntervalSpy.mockRestore()
+  })
+
+  it('disables workflow action buttons while refresh polling is in flight', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const statusDeferred = createDeferred<ReturnType<typeof makeStatus>>()
+    const loopDeferred = createDeferred<ReturnType<typeof makeLoopStatus>>()
+    const logsDeferred = createDeferred<unknown[]>()
+    const accountsDeferred = createDeferred<unknown[]>()
+
+    codexApiMocks.getStatus.mockReturnValueOnce(statusDeferred.promise)
+    codexApiMocks.getLoopStatus.mockReturnValueOnce(loopDeferred.promise)
+    codexApiMocks.getLogs.mockReturnValueOnce(logsDeferred.promise)
+    codexApiMocks.getAccounts.mockReturnValueOnce(accountsDeferred.promise)
+
+    vi.advanceTimersByTime(10000)
+    await wrapper.vm.$nextTick()
+
+    const primaryButton = wrapper.find('[data-testid="codex-controlbar-primary"] button')
+    const secondaryButtons = wrapper.findAll('[data-testid="codex-controlbar-secondary"] button')
+
+    expect(primaryButton.text()).toBe('继续')
+    expect((primaryButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect(secondaryButtons).toHaveLength(2)
+    expect(secondaryButtons[0].text()).toBe('刷新中…')
+    expect((secondaryButtons[0].element as HTMLButtonElement).disabled).toBe(true)
+    expect(secondaryButtons[1].text()).toBe('停止')
+    expect((secondaryButtons[1].element as HTMLButtonElement).disabled).toBe(true)
+
+    statusDeferred.resolve(makeStatus())
+    loopDeferred.resolve(makeLoopStatus())
+    logsDeferred.resolve([])
+    accountsDeferred.resolve([])
+    await flushPromises()
   })
 
   it('sorts accounts by created_at descending and keeps invalid/null timestamps last', async () => {
@@ -882,6 +1023,66 @@ describe('CodexRegistrationCard', () => {
       'invalid@example.com',
       'null@example.com'
     ])
+  })
+
+  it('prefers plan_type over codex_register_role and source for account badges', async () => {
+    codexApiMocks.getAccounts.mockResolvedValueOnce([
+      {
+        id: 1,
+        email: 'plan-type-first@example.com',
+        access_token: 'at-plan-type-first',
+        refresh_token: 'rt-plan-type-first',
+        account_id: 'acct-plan-type-first',
+        source: 'parent',
+        codex_register_role: 'parent',
+        plan_type: 'child',
+        created_at: '2026-03-08T10:00:01Z',
+        updated_at: '2026-03-08T10:00:01Z'
+      },
+      {
+        id: 2,
+        email: 'role-second@example.com',
+        access_token: 'at-role-second',
+        refresh_token: 'rt-role-second',
+        account_id: 'acct-role-second',
+        source: 'child',
+        codex_register_role: 'parent',
+        created_at: '2026-03-07T10:00:01Z',
+        updated_at: '2026-03-07T10:00:01Z'
+      },
+      {
+        id: 3,
+        email: 'source-third@example.com',
+        access_token: 'at-source-third',
+        refresh_token: 'rt-source-third',
+        account_id: 'acct-source-third',
+        source: 'parent',
+        created_at: '2026-03-06T10:00:01Z',
+        updated_at: '2026-03-06T10:00:01Z'
+      }
+    ])
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows).toHaveLength(3)
+
+    const firstBadge = rows[0].findAll('td')[1].find('span')
+    expect(firstBadge.text()).toBe('child')
+    expect(firstBadge.classes()).toContain('bg-blue-100')
+
+    const secondBadge = rows[1].findAll('td')[1].find('span')
+    expect(secondBadge.text()).toBe('parent')
+    expect(secondBadge.classes()).toContain('bg-purple-100')
+
+    const thirdBadge = rows[2].findAll('td')[1].find('span')
+    expect(thirdBadge.text()).toBe('parent')
+    expect(thirdBadge.classes()).toContain('bg-purple-100')
   })
 
   it('copies account secrets with copy action', async () => {
@@ -974,7 +1175,7 @@ describe('CodexRegistrationCard', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="codex-subscribe-gate-copy-hint"]').text()).toContain('copy denied')
-    expect(wrapper.text()).toContain('等待你手动操作')
+    expect(wrapper.text()).toContain('等待你在官网完成订阅后再点击继续')
     expect(wrapper.find('[data-testid="codex-controlbar-primary"]').text()).toContain('继续')
   })
 
@@ -1051,5 +1252,211 @@ describe('CodexRegistrationCard', () => {
     const scrollContainer = wrapper.find('[data-testid="codex-accounts-scroll"]')
     expect(scrollContainer.exists()).toBe(true)
     expect(scrollContainer.classes()).toContain('overflow-auto')
+  })
+
+  it('renders loop status summary fields', async () => {
+    codexApiMocks.getLoopStatus.mockResolvedValueOnce(
+      makeLoopStatus({
+        loop_running: true,
+        loop_current_round: 3,
+        loop_total_created: 7,
+        loop_started_at: '2026-03-06T11:00:00Z',
+        loop_last_round_finished_at: '2026-03-06T11:05:00Z',
+        loop_last_round_created: 2,
+        loop_last_round_updated: 1,
+        loop_last_round_skipped: 0,
+        loop_last_round_failed: 0,
+        loop_committed_accounts_jsonl_offset: 24
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const panel = wrapper.find('[data-testid="codex-loop-panel"]')
+    expect(panel.text()).toContain('循环执行控制')
+    expect(panel.text()).toContain('循环运行中')
+    expect(panel.text()).toContain('当前轮次')
+    expect(panel.text()).toContain('3')
+    expect(panel.text()).toContain('循环累计创建')
+    expect(panel.text()).toContain('7')
+    expect(panel.text()).toContain('已提交偏移量')
+    expect(panel.text()).toContain('24')
+    expect(panel.text()).toContain('创建 2 / 更新 1 / 跳过 0 / 失败 0')
+  })
+
+  it('disables loop controls while refresh polling is in flight', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const statusDeferred = createDeferred<ReturnType<typeof makeStatus>>()
+    const loopDeferred = createDeferred<ReturnType<typeof makeLoopStatus>>()
+    const logsDeferred = createDeferred<unknown[]>()
+    const accountsDeferred = createDeferred<unknown[]>()
+
+    codexApiMocks.getStatus.mockReturnValueOnce(statusDeferred.promise)
+    codexApiMocks.getLoopStatus.mockReturnValueOnce(loopDeferred.promise)
+    codexApiMocks.getLogs.mockReturnValueOnce(logsDeferred.promise)
+    codexApiMocks.getAccounts.mockReturnValueOnce(accountsDeferred.promise)
+
+    vi.advanceTimersByTime(10000)
+    await wrapper.vm.$nextTick()
+
+    const startButton = wrapper.find('[data-testid="codex-loop-start"]')
+    const stopButton = wrapper.find('[data-testid="codex-loop-stop"]')
+
+    expect((startButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect((stopButton.element as HTMLButtonElement).disabled).toBe(true)
+
+    statusDeferred.resolve(makeStatus())
+    loopDeferred.resolve(makeLoopStatus())
+    logsDeferred.resolve([])
+    accountsDeferred.resolve([])
+    await flushPromises()
+  })
+  it('sets start and stop loop button enabled states', async () => {
+    const idleWrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const idleStartButton = idleWrapper.find('[data-testid="codex-loop-start"]')
+    const idleStopButton = idleWrapper.find('[data-testid="codex-loop-stop"]')
+
+    expect((idleStartButton.element as HTMLButtonElement).disabled).toBe(false)
+    expect((idleStopButton.element as HTMLButtonElement).disabled).toBe(true)
+
+    codexApiMocks.getLoopStatus.mockResolvedValueOnce(
+      makeLoopStatus({ loop_running: true, loop_current_round: 1 })
+    )
+
+    const runningWrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const runningStartButton = runningWrapper.find('[data-testid="codex-loop-start"]')
+    const runningStopButton = runningWrapper.find('[data-testid="codex-loop-stop"]')
+
+    expect((runningStartButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect((runningStopButton.element as HTMLButtonElement).disabled).toBe(false)
+
+    codexApiMocks.getLoopStatus.mockResolvedValueOnce(
+      makeLoopStatus({ loop_running: true, loop_stopping: true, loop_current_round: 1 })
+    )
+
+    const stoppingWrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const stoppingStopButton = stoppingWrapper.find('[data-testid="codex-loop-stop"]')
+
+    expect((stoppingStopButton.element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('calls startLoop when start button is clicked', async () => {
+    codexApiMocks.startLoop.mockResolvedValueOnce(
+      makeLoopStatus({ loop_running: true, loop_current_round: 1 })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    await wrapper.find('[data-testid="codex-loop-start"]').trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.startLoop).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
+  })
+
+  it('calls stopLoop when stop button is clicked', async () => {
+    codexApiMocks.getLoopStatus.mockResolvedValueOnce(
+      makeLoopStatus({ loop_running: true, loop_current_round: 2 })
+    )
+    codexApiMocks.stopLoop.mockResolvedValueOnce(
+      makeLoopStatus({ loop_running: false, loop_stopping: false, loop_current_round: 2 })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    await wrapper.find('[data-testid="codex-loop-stop"]').trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.stopLoop).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.getStatus).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.getLogs).toHaveBeenCalledTimes(2)
+  })
+
+  it('renders loop history entries', async () => {
+    codexApiMocks.getLoopStatus.mockResolvedValueOnce(
+      makeLoopStatus({
+        loop_history: [
+          {
+            round: 1,
+            started_at: '2026-03-06T11:00:00Z',
+            finished_at: '2026-03-06T11:05:00Z',
+            status: 'success',
+            created: 2,
+            updated: 1,
+            skipped: 0,
+            failed: 0,
+            summary: null,
+            error: ''
+          },
+          {
+            round: 2,
+            started_at: '2026-03-06T12:00:00Z',
+            finished_at: '2026-03-06T12:03:00Z',
+            status: 'failed',
+            created: 1,
+            updated: 0,
+            skipped: 1,
+            failed: 1,
+            summary: null,
+            error: 'db boom'
+          }
+        ]
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const historyRows = wrapper.findAll('[data-testid="codex-loop-history-row"]')
+    expect(historyRows).toHaveLength(2)
+    expect(historyRows[0].text()).toContain('第 2 轮')
+    expect(historyRows[0].text()).toContain('失败')
+    expect(historyRows[0].text()).toContain('db boom')
+    expect(historyRows[1].text()).toContain('第 1 轮')
+    expect(historyRows[1].text()).toContain('成功')
   })
 })

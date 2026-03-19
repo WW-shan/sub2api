@@ -1103,6 +1103,7 @@ export default {
         sleepRangeTitle: '休眠区间',
         errorTitle: '最近错误日志',
         noErrors: '最近没有错误输出，服务状态看起来正常。',
+        workflowFailed: '工作流失败',
         eventsTitle: '最近事件',
         eventsDescription: '展示服务最近的运行记录和错误，便于快速排查容器执行情况。',
         eventCount: '{count} 条记录',
@@ -1115,6 +1116,7 @@ export default {
         searchPlaceholder: '按邮箱搜索',
         columns: {
           email: '邮箱',
+          role: '角色',
           password: '密码',
           accessToken: 'Access Token',
           refreshToken: 'Refresh Token',
@@ -1126,6 +1128,52 @@ export default {
         title: '手动订阅关卡',
         email: '目标邮箱',
         missingResumeContextHint: '缺少 resume_context.email 或 resume_context.access_token_raw。'
+      },
+      loop: {
+        title: '循环执行控制',
+        actions: {
+          start: '启动循环',
+          starting: '启动中…',
+          stop: '停止循环',
+          stopping: '停止中…'
+        },
+        status: {
+          idle: '未运行',
+          running: '循环运行中',
+          stopping: '停止中'
+        },
+        summary: {
+          idle: '可按需启动独立循环执行。',
+          idleWithHistory: '最近保留 {count} 轮执行记录。',
+          running: '当前正在执行第 {round} 轮循环。',
+          stopping: '正在请求停止当前循环，请稍候。'
+        },
+        fields: {
+          status: '循环状态',
+          currentRound: '当前轮次',
+          totalCreated: '循环累计创建',
+          committedOffset: '已提交偏移量',
+          startedAt: '启动时间',
+          lastFinishedAt: '最近完成时间',
+          lastRoundSummary: '最近一轮结果',
+          lastError: '最近循环错误'
+        },
+        lastRoundSummary: '创建 {created} / 更新 {updated} / 跳过 {skipped} / 失败 {failed}',
+        noError: '暂无循环错误',
+        history: {
+          title: '最近循环历史',
+          count: '{count} 条记录',
+          empty: '暂无循环历史',
+          round: '第 {round} 轮',
+          summary: '创建 {created} / 更新 {updated} / 跳过 {skipped} / 失败 {failed}',
+          timeRange: '开始：{startedAt} · 结束：{finishedAt}',
+          status: {
+            running: '运行中',
+            success: '成功',
+            failed: '失败',
+            stopped: '已停止'
+          }
+        }
       },
       debug: {
         snapshotTitle: '调试快照',

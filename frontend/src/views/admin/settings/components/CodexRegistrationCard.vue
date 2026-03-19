@@ -46,7 +46,7 @@
             <button
               type="button"
               class="btn btn-primary min-w-32"
-              :disabled="loading || primaryAction === 'inProgress'"
+              :disabled="refreshing || loading || primaryAction === 'inProgress'"
               @click="triggerPrimaryAction"
             >
               {{ primaryActionLabel }}
@@ -60,7 +60,7 @@
             <button
               type="button"
               class="btn btn-secondary"
-              :disabled="refreshing || loading"
+              :disabled="refreshing || loading || loopActionLoading !== null"
               @click="refreshAll"
             >
               {{
@@ -72,7 +72,7 @@
             <button
               type="button"
               class="btn btn-secondary"
-              :disabled="loading || !secondaryActionEnabled"
+              :disabled="refreshing || loading || !secondaryActionEnabled"
               @click="triggerSecondaryAction"
             >
               {{ secondaryActionLabel }}
@@ -121,7 +121,7 @@
         data-testid="codex-workflow-failure-detail"
       >
         <h3 class="text-sm font-semibold text-red-700 dark:text-red-300">
-          Workflow Failed
+          {{ t("admin.codexRegister.panels.workflowFailed") }}
         </h3>
         <p
           class="mt-2 whitespace-pre-wrap break-words text-xs leading-6 text-red-700 dark:text-red-200"
@@ -168,8 +168,12 @@
           {{ subscribeGateEmail || t("common.unknown") }}
         </p>
 
-        <div v-if="subscribeGateHasTokenControls" class="mt-3" data-testid="codex-subscribe-gate-token">
-          <p class="text-sm text-primary-800 dark:text-primary-100 break-all">
+        <div
+          v-if="subscribeGateHasTokenControls"
+          class="mt-3"
+          data-testid="codex-subscribe-gate-token"
+        >
+          <p class="break-all text-sm text-primary-800 dark:text-primary-100">
             {{ subscribeGateTokenDisplay }}
           </p>
           <div
@@ -229,6 +233,193 @@
       </section>
 
       <section
+        class="rounded-2xl border border-gray-200 bg-gray-50/60 p-6 dark:border-dark-700 dark:bg-dark-900/20"
+        data-testid="codex-loop-panel"
+      >
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+              {{ t("admin.codexRegister.loop.title") }}
+            </h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              {{ loopSummaryLabel }}
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2" data-testid="codex-loop-controls">
+            <button
+              type="button"
+              class="btn btn-primary"
+              data-testid="codex-loop-start"
+              :disabled="!loopStartEnabled"
+              @click="startLoopRunner"
+            >
+              {{ loopStartButtonLabel }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary"
+              data-testid="codex-loop-stop"
+              :disabled="!loopStopEnabled"
+              @click="stopLoopRunner"
+            >
+              {{ loopStopButtonLabel }}
+            </button>
+          </div>
+        </div>
+
+        <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div
+            class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
+          >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t("admin.codexRegister.loop.fields.status") }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white" data-testid="codex-loop-status">
+              {{ loopStateLabel }}
+            </p>
+          </div>
+          <div
+            class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
+          >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t("admin.codexRegister.loop.fields.currentRound") }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+              {{ loopStatus?.loop_current_round ?? 0 }}
+            </p>
+          </div>
+          <div
+            class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
+          >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t("admin.codexRegister.loop.fields.totalCreated") }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+              {{ loopStatus?.loop_total_created ?? 0 }}
+            </p>
+          </div>
+          <div
+            class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
+          >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t("admin.codexRegister.loop.fields.committedOffset") }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+              {{ loopStatus?.loop_committed_accounts_jsonl_offset ?? 0 }}
+            </p>
+          </div>
+          <div
+            class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
+          >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t("admin.codexRegister.loop.fields.startedAt") }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+              {{ loopStartedAtLabel }}
+            </p>
+          </div>
+          <div
+            class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
+          >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t("admin.codexRegister.loop.fields.lastFinishedAt") }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+              {{ loopFinishedAtLabel }}
+            </p>
+          </div>
+          <div
+            class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
+          >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t("admin.codexRegister.loop.fields.lastRoundSummary") }}
+            </p>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
+              {{ loopLastRoundSummaryLabel }}
+            </p>
+          </div>
+          <div
+            class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
+          >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
+              {{ t("admin.codexRegister.loop.fields.lastError") }}
+            </p>
+            <p class="mt-2 break-words text-sm font-medium text-gray-900 dark:text-white">
+              {{ loopLastErrorLabel }}
+            </p>
+          </div>
+        </div>
+
+        <div class="mt-6">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+              {{ t("admin.codexRegister.loop.history.title") }}
+            </h3>
+            <span
+              class="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300"
+            >
+              {{ t("admin.codexRegister.loop.history.count", { count: loopHistory.length }) }}
+            </span>
+          </div>
+
+          <div
+            v-if="loopHistory.length === 0"
+            class="mt-4 rounded-xl border border-dashed border-gray-200 px-6 py-10 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-gray-400"
+            data-testid="codex-loop-history-empty"
+          >
+            {{ t("admin.codexRegister.loop.history.empty") }}
+          </div>
+          <div
+            v-else
+            class="mt-4 space-y-3"
+            data-testid="codex-loop-history"
+          >
+            <div
+              v-for="entry in loopHistory"
+              :key="`${entry.round}-${entry.started_at}-${entry.finished_at}`"
+              class="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/40"
+              data-testid="codex-loop-history-row"
+            >
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <p class="text-sm font-semibold text-gray-900 dark:text-white">
+                  {{ t("admin.codexRegister.loop.history.round", { round: entry.round }) }}
+                </p>
+                <span
+                  class="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-600 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300"
+                >
+                  {{ loopHistoryStatusLabel(entry.status) }}
+                </span>
+              </div>
+              <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                {{
+                  t("admin.codexRegister.loop.history.summary", {
+                    created: entry.created,
+                    updated: entry.updated,
+                    skipped: entry.skipped,
+                    failed: entry.failed,
+                  })
+                }}
+              </p>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{
+                  t("admin.codexRegister.loop.history.timeRange", {
+                    startedAt: entry.started_at || emptyValueLabel,
+                    finishedAt: entry.finished_at || emptyValueLabel,
+                  })
+                }}
+              </p>
+              <p
+                v-if="entry.error"
+                class="mt-2 break-words text-xs text-red-600 dark:text-red-300"
+              >
+                {{ entry.error }}
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
         class="rounded-2xl border border-slate-200 bg-white/70 p-6 dark:border-dark-700 dark:bg-dark-900/40"
         data-testid="codex-debug-snapshot"
         data-section-order="debug"
@@ -260,9 +451,7 @@
           <div
             class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
           >
-            <p
-              class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-            >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
               {{ t("admin.codexRegister.debug.phaseLabel") }}
             </p>
             <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
@@ -272,9 +461,7 @@
           <div
             class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
           >
-            <p
-              class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-            >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
               {{ t("admin.codexRegister.debug.waitingLabel") }}
             </p>
             <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
@@ -284,33 +471,23 @@
           <div
             class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
           >
-            <p
-              class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-            >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
               {{ t("admin.codexRegister.debug.gateLabel") }}
             </p>
-            <p
-              class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all"
-            >
+            <p class="mt-2 break-all text-sm font-medium text-gray-900 dark:text-white">
               {{ resumeGateLabel }}
             </p>
           </div>
           <div
             class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
           >
-            <p
-              class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400"
-            >
+            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
               {{ t("admin.codexRegister.debug.transitionLabel") }}
             </p>
-            <p
-              class="mt-2 text-sm font-medium text-gray-900 dark:text-white break-all"
-            >
+            <p class="mt-2 break-all text-sm font-medium text-gray-900 dark:text-white">
               {{ transitionMainLabel }}
             </p>
-            <div
-              class="mt-2 space-y-1 text-xs text-gray-500 dark:text-gray-400"
-            >
+            <div class="mt-2 space-y-1 text-xs text-gray-500 dark:text-gray-400">
               <p>
                 {{ t("admin.codexRegister.debug.transitionReason") }}:
                 {{ transitionReasonLabel }}
@@ -366,10 +543,10 @@
                 class="ml-2 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs dark:border-dark-700 dark:bg-dark-900"
                 data-testid="codex-log-level"
               >
-                <option value="all">all</option>
-                <option value="info">info</option>
-                <option value="warn">warn</option>
-                <option value="error">error</option>
+                <option value="all">{{ t("common.all") }}</option>
+                <option value="info">{{ t("common.info") }}</option>
+                <option value="warn">{{ t("common.warning") }}</option>
+                <option value="error">{{ t("common.error") }}</option>
               </select>
             </label>
             <label class="text-xs font-medium text-gray-500 dark:text-gray-400">
@@ -451,7 +628,6 @@
         </div>
       </section>
 
-
       <section
         class="rounded-2xl border border-gray-200 bg-gray-50/60 dark:border-dark-700 dark:bg-dark-900/20"
       >
@@ -511,7 +687,7 @@
                   <th
                     class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300"
                   >
-                    Role
+                    {{ t("admin.codexRegister.accounts.columns.role") }}
                   </th>
                   <th
                     class="px-3 py-2 text-left font-medium text-gray-600 dark:text-gray-300"
@@ -544,17 +720,12 @@
                     <span
                       :class="[
                         'inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold',
-                        (account.codex_register_role || account.source) ===
-                        'parent'
+                        accountBadgeLabel(account) === 'parent'
                           ? 'border border-purple-200 bg-purple-100 text-purple-800 dark:border-purple-900/60 dark:bg-purple-900/30 dark:text-purple-300'
                           : 'border border-blue-200 bg-blue-100 text-blue-800 dark:border-blue-900/60 dark:bg-blue-900/30 dark:text-blue-300',
                       ]"
                     >
-                      {{
-                        account.codex_register_role ||
-                        account.source ||
-                        "unknown"
-                      }}
+                      {{ accountBadgeLabel(account) }}
                     </span>
                   </td>
                   <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
@@ -589,9 +760,7 @@
                       <span
                         class="max-w-[220px] truncate whitespace-nowrap"
                         :title="secretDisplayValue(account, 'refresh_token')"
-                        >{{
-                          secretDisplayValue(account, "refresh_token")
-                        }}</span
+                        >{{ secretDisplayValue(account, "refresh_token") }}</span
                       >
                       <button
                         type="button"
@@ -635,6 +804,7 @@ import { useI18n } from "vue-i18n";
 import { adminAPI } from "@/api/admin";
 import type {
   CodexLogEntry,
+  CodexLoopStatus,
   CodexRegisterAccount,
   CodexStatus,
 } from "@/api/admin/codex";
@@ -650,9 +820,12 @@ const props = defineProps({
 const { t } = useI18n();
 
 const status = ref<CodexStatus | null>(null);
+const loopStatus = ref<CodexLoopStatus | null>(null);
 const loading = ref(false);
+const loopActionLoading = ref<"start" | "stop" | null>(null);
 const error = ref<string | null>(null);
 const statusError = ref<string | null>(null);
+const loopError = ref<string | null>(null);
 const logsError = ref<string | null>(null);
 const accountsError = ref<string | null>(null);
 const logs = ref<CodexLogEntry[]>([]);
@@ -679,9 +852,6 @@ function phaseInfo(phase?: string | null): { label: string; tone: PhaseTone } {
 
   if (phase === "idle") {
     return { label: t("admin.codexRegister.phase.idle"), tone: "neutral" };
-  }
-  if (phase === "completed") {
-    return { label: t("admin.codexRegister.phase.completed"), tone: "neutral" };
   }
   if (phase === "running:get_tokens") {
     return {
@@ -760,10 +930,56 @@ function waitingReasonText(reason?: string | null): string {
   return reason;
 }
 
+function loopHistoryStatusLabel(statusValue?: string | null): string {
+  if (statusValue === "running") {
+    return t("admin.codexRegister.loop.history.status.running");
+  }
+  if (statusValue === "success") {
+    return t("admin.codexRegister.loop.history.status.success");
+  }
+  if (statusValue === "failed") {
+    return t("admin.codexRegister.loop.history.status.failed");
+  }
+  if (statusValue === "stopped") {
+    return t("admin.codexRegister.loop.history.status.stopped");
+  }
+  return statusValue || t("common.unknown");
+}
+
+function getErrorMessage(errorValue: unknown): string {
+  if (errorValue && typeof errorValue === "object") {
+    if ("response" in errorValue) {
+      const response = (errorValue as { response?: { data?: { error?: unknown } } }).response;
+      const responseError = response?.data?.error;
+      if (typeof responseError === "string" && responseError) {
+        return responseError;
+      }
+      if (
+        responseError &&
+        typeof responseError === "object" &&
+        "message" in responseError &&
+        typeof responseError.message === "string"
+      ) {
+        return responseError.message;
+      }
+    }
+    if ("message" in errorValue && typeof errorValue.message === "string") {
+      return errorValue.message;
+    }
+  }
+
+  return errorValue instanceof Error ? errorValue.message : String(errorValue);
+}
+
+const combinedError = computed(
+  () => error.value || loopError.value || logsError.value || statusError.value || accountsError.value,
+);
+const emptyValueLabel = computed(() => t("admin.codexRegister.summary.empty"));
+
 const phaseState = computed(() => {
   if (!status.value) {
     return {
-      label: error.value ? t("common.unknown") : t("common.loading"),
+      label: combinedError.value ? t("common.unknown") : t("common.loading"),
       tone: "neutral" as PhaseTone,
     };
   }
@@ -785,21 +1001,18 @@ const statusBadgeToneClass = computed(() => {
 
 const statusBadgeLabel = computed(() => phaseState.value.label);
 const serviceStatusLabel = computed(() => phaseState.value.label);
+const batchSummary = computed(() => status.value?.last_processed_summary ?? null);
 
-const controlbarSummaryLabel = computed(() => {
-  if (!status.value) {
-    return combinedError.value ? t("common.unknown") : t("common.loading");
+const batchProgressLabel = computed(() => {
+  const summary = batchSummary.value;
+  if (!summary) {
+    return t("admin.codexRegister.summary.batchEmpty");
   }
-
-  if (status.value.waiting_reason) {
-    return waitingReasonText(status.value.waiting_reason);
-  }
-
-  if (batchSummary.value) {
-    return batchProgressLabel.value;
-  }
-
-  return proxyDetailLabel.value;
+  return t("admin.codexRegister.summary.batchProgress", {
+    total: Number(summary.records_seen ?? 0),
+    created: Number(summary.created ?? 0),
+    failed: Number(summary.failed ?? 0),
+  });
 });
 
 const proxySummaryLabel = computed(() => {
@@ -808,8 +1021,7 @@ const proxySummaryLabel = computed(() => {
       ? t("admin.codexRegister.summary.proxyConfigured")
       : t("admin.codexRegister.summary.proxyMissing");
   }
-
-  return error.value ? t("common.unknown") : t("common.loading");
+  return combinedError.value ? t("common.unknown") : t("common.loading");
 });
 
 const proxyDetailLabel = computed(() => {
@@ -818,19 +1030,14 @@ const proxyDetailLabel = computed(() => {
       ? t("admin.codexRegister.panels.proxyConfiguredDetail")
       : t("admin.codexRegister.panels.proxyMissingDetail");
   }
-
-  return error.value ? t("common.unknown") : t("common.loading");
+  return combinedError.value ? t("common.unknown") : t("common.loading");
 });
 
 const lastSuccessLabel = computed(() => {
   if (status.value) {
-    return (
-      status.value.last_success ||
-      t("admin.codexRegister.panels.lastSuccessEmpty")
-    );
+    return status.value.last_success || t("admin.codexRegister.panels.lastSuccessEmpty");
   }
-
-  return error.value ? t("common.unknown") : t("common.loading");
+  return combinedError.value ? t("common.unknown") : t("common.loading");
 });
 
 const sleepRangeSummaryLabel = computed(() => {
@@ -840,8 +1047,7 @@ const sleepRangeSummaryLabel = computed(() => {
       max: status.value.sleep_max,
     });
   }
-
-  return error.value ? t("common.unknown") : t("common.loading");
+  return combinedError.value ? t("common.unknown") : t("common.loading");
 });
 
 const sleepRangeDetailLabel = computed(() => {
@@ -851,15 +1057,26 @@ const sleepRangeDetailLabel = computed(() => {
       max: status.value.sleep_max,
     });
   }
+  return combinedError.value ? t("common.unknown") : t("common.loading");
+});
 
-  return error.value ? t("common.unknown") : t("common.loading");
+const controlbarSummaryLabel = computed(() => {
+  if (!status.value) {
+    return combinedError.value ? t("common.unknown") : t("common.loading");
+  }
+  if (status.value.waiting_reason) {
+    return waitingReasonText(status.value.waiting_reason);
+  }
+  if (batchSummary.value) {
+    return batchProgressLabel.value;
+  }
+  return proxyDetailLabel.value;
 });
 
 const codexPhaseLabel = computed(() => {
   if (!status.value) {
     return combinedError.value ? t("common.unknown") : t("common.loading");
   }
-
   return phaseInfo(status.value.job_phase).label;
 });
 
@@ -867,47 +1084,23 @@ const waitingReasonLabel = computed(() => {
   if (!status.value) {
     return combinedError.value ? t("common.unknown") : t("common.loading");
   }
-
   return waitingReasonText(status.value.waiting_reason);
 });
 
-const snapshotTransition = computed(
-  () => status.value?.last_transition ?? null,
-);
+const snapshotTransition = computed(() => status.value?.last_transition ?? null);
 const transitionMainLabel = computed(() => {
   const transition = snapshotTransition.value;
   return transition
     ? `${transition.from} → ${transition.to}`
     : t("admin.codexRegister.debug.transitionEmpty");
 });
-const transitionReasonLabel = computed(
-  () => snapshotTransition.value?.reason || "-",
-);
-const transitionTimeLabel = computed(
-  () => snapshotTransition.value?.time || "-",
-);
+const transitionReasonLabel = computed(() => snapshotTransition.value?.reason || "-");
+const transitionTimeLabel = computed(() => snapshotTransition.value?.time || "-");
 const resumeGateLabel = computed(
-  () =>
-    status.value?.last_resume_gate_reason ||
-    t("admin.codexRegister.debug.gateClear"),
+  () => status.value?.last_resume_gate_reason || t("admin.codexRegister.debug.gateClear"),
 );
-const batchSummary = computed(() => status.value?.last_processed_summary ?? null);
 
-const batchProgressLabel = computed(() => {
-  const summary = batchSummary.value;
-  if (!summary) {
-    return t("admin.codexRegister.summary.batchEmpty");
-  }
-  const total = Number(summary.records_seen ?? 0);
-  const created = Number(summary.created ?? 0);
-  const failed = Number(summary.failed ?? 0);
-  return t("admin.codexRegister.summary.batchProgress", {
-    total,
-    created,
-    failed,
-  });
-});
-
+const workflowFailureDetail = computed(() => {
   if (status.value?.job_phase !== "failed") {
     return "";
   }
@@ -923,12 +1116,8 @@ const batchProgressLabel = computed(() => {
   return status.value?.last_error || "";
 });
 
-const isWaitingManual = computed(() =>
-  Boolean(status.value?.job_phase?.startsWith("waiting_manual:")),
-);
-const waitingTodoReason = computed(() =>
-  waitingReasonText(status.value?.waiting_reason),
-);
+const isWaitingManual = computed(() => Boolean(status.value?.job_phase?.startsWith("waiting_manual:")));
+const waitingTodoReason = computed(() => waitingReasonText(status.value?.waiting_reason));
 const waitingTodoSteps = computed(() => {
   if (status.value?.waiting_reason === "parent_upgrade") {
     return [
@@ -964,25 +1153,16 @@ const showSubscribeGate = computed(() => {
   );
 });
 
-const subscribeGateEmail = computed(
-  () => status.value?.resume_context?.email || "",
-);
+const subscribeGateEmail = computed(() => status.value?.resume_context?.email || "");
 const subscribeGateRawToken = computed(
-  () =>
-    status.value?.resume_context?.access_token_raw ||
-    status.value?.manual_gate?.token ||
-    "",
+  () => status.value?.resume_context?.access_token_raw || status.value?.manual_gate?.token || "",
 );
-const subscribeGateHasTokenControls = computed(() =>
-  Boolean(subscribeGateEmail.value && subscribeGateRawToken.value),
+const subscribeGateHasTokenControls = computed(
+  () => Boolean(subscribeGateEmail.value && subscribeGateRawToken.value),
 );
 const subscribeGateMissingContextHint = computed(() => {
-  const translated = t(
-    "admin.codexRegister.subscribeGate.missingResumeContextHint",
-  );
-  if (
-    translated === "admin.codexRegister.subscribeGate.missingResumeContextHint"
-  ) {
+  const translated = t("admin.codexRegister.subscribeGate.missingResumeContextHint");
+  if (translated === "admin.codexRegister.subscribeGate.missingResumeContextHint") {
     return "Missing resume_context.email or resume_context.access_token_raw.";
   }
   return translated;
@@ -994,6 +1174,7 @@ const subscribeGateDiagnosticHint = computed(() => {
   }
   return subscribeGateMissingContextHint.value;
 });
+
 function maskSubscribeGateToken(value: string): string {
   if (!value) return "-";
   if (value.length <= 11) return "******";
@@ -1006,28 +1187,11 @@ const subscribeGateTokenDisplay = computed(() =>
     : maskSubscribeGateToken(subscribeGateRawToken.value),
 );
 
-const filteredAccounts = computed(() => {
-  const keyword = accountSearchKeyword.value.trim().toLowerCase();
-  if (!keyword) {
-    return accounts.value;
-  }
-  return accounts.value.filter((account) =>
-    String(account.email || "")
-      .toLowerCase()
-      .includes(keyword),
-  );
-});
-
 const canStart = computed(() => Boolean(status.value?.can_start));
 const canResume = computed(() => Boolean(status.value?.can_resume));
 const canAbandon = computed(() => Boolean(status.value?.can_abandon));
-const secondaryActionLabel = computed(() => {
-  return t("admin.codexRegister.actions.stop");
-});
-
-const secondaryActionEnabled = computed(() => {
-  return canAbandon.value;
-});
+const secondaryActionLabel = computed(() => t("admin.codexRegister.actions.stop"));
+const secondaryActionEnabled = computed(() => canAbandon.value);
 
 const primaryAction = computed<PrimaryAction>(() => {
   if (canStart.value) return "start";
@@ -1036,15 +1200,151 @@ const primaryAction = computed<PrimaryAction>(() => {
 });
 
 const primaryActionLabel = computed(() => {
-  if (primaryAction.value === "start")
+  if (primaryAction.value === "start") {
     return t("admin.codexRegister.actions.start");
+  }
   if (primaryAction.value === "resume") {
     return t("admin.codexRegister.actions.resume");
   }
   return t("admin.codexRegister.actions.inProgress");
 });
 
+const resumeDiagnosticLabel = computed(() => {
+  if (status.value?.last_resume_gate_reason) {
+    return t("admin.codexRegister.debug.resumeGateBlocked", {
+      reason: status.value.last_resume_gate_reason,
+    });
+  }
+
+  if (status.value?.job_phase === "running:pre_resume_check") {
+    return t("admin.codexRegister.debug.resumeStarted");
+  }
+
+  const recentLogs = [
+    ...(status.value?.recent_logs_tail ?? []),
+    ...logs.value,
+  ];
+  if (
+    recentLogs.some((entry) =>
+      String(entry.message || "").includes("resume_request_ignored"),
+    )
+  ) {
+    return t("admin.codexRegister.debug.resumeIgnored");
+  }
+
+  return t("admin.codexRegister.debug.resumeUnknown");
+});
+
+const visibleLogs = computed(() => {
+  if (!resumeOnly.value) {
+    return logs.value;
+  }
+  return logs.value.filter((entry) =>
+    String(entry.message || "").toLowerCase().includes("resume"),
+  );
+});
+
+const filteredAccounts = computed(() => {
+  const keyword = accountSearchKeyword.value.trim().toLowerCase();
+  if (!keyword) {
+    return accounts.value;
+  }
+  return accounts.value.filter((account) =>
+    String(account.email || "").toLowerCase().includes(keyword),
+  );
+});
+
+const loopHistory = computed(() => [...(loopStatus.value?.loop_history ?? [])].reverse());
+const loopRunning = computed(() => Boolean(loopStatus.value?.loop_running));
+const loopStopping = computed(() => Boolean(loopStatus.value?.loop_stopping));
+const loopStateLabel = computed(() => {
+  if (!loopStatus.value) {
+    return combinedError.value ? t("common.unknown") : t("common.loading");
+  }
+  if (loopStopping.value) {
+    return t("admin.codexRegister.loop.status.stopping");
+  }
+  if (loopRunning.value) {
+    return t("admin.codexRegister.loop.status.running");
+  }
+  return t("admin.codexRegister.loop.status.idle");
+});
+const loopStartEnabled = computed(
+  () =>
+    !refreshing.value &&
+    !loading.value &&
+    loopActionLoading.value === null &&
+    !loopRunning.value &&
+    !loopStopping.value,
+);
+const loopStopEnabled = computed(
+  () =>
+    !refreshing.value &&
+    !loading.value &&
+    loopActionLoading.value === null &&
+    loopRunning.value &&
+    !loopStopping.value,
+);
+const loopStartButtonLabel = computed(() =>
+  loopActionLoading.value === "start"
+    ? t("admin.codexRegister.loop.actions.starting")
+    : t("admin.codexRegister.loop.actions.start"),
+);
+const loopStopButtonLabel = computed(() =>
+  loopActionLoading.value === "stop" || loopStopping.value
+    ? t("admin.codexRegister.loop.actions.stopping")
+    : t("admin.codexRegister.loop.actions.stop"),
+);
+const loopStartedAtLabel = computed(
+  () => loopStatus.value?.loop_started_at || emptyValueLabel.value,
+);
+const loopFinishedAtLabel = computed(
+  () => loopStatus.value?.loop_last_round_finished_at || emptyValueLabel.value,
+);
+const loopLastRoundSummaryLabel = computed(() =>
+  t("admin.codexRegister.loop.lastRoundSummary", {
+    created: loopStatus.value?.loop_last_round_created ?? 0,
+    updated: loopStatus.value?.loop_last_round_updated ?? 0,
+    skipped: loopStatus.value?.loop_last_round_skipped ?? 0,
+    failed: loopStatus.value?.loop_last_round_failed ?? 0,
+  }),
+);
+const loopLastErrorLabel = computed(
+  () => loopStatus.value?.loop_last_error || t("admin.codexRegister.loop.noError"),
+);
+const loopSummaryLabel = computed(() => {
+  if (!loopStatus.value) {
+    return combinedError.value ? t("common.unknown") : t("common.loading");
+  }
+  if (loopStopping.value) {
+    return t("admin.codexRegister.loop.summary.stopping");
+  }
+  if (loopRunning.value) {
+    return t("admin.codexRegister.loop.summary.running", {
+      round: loopStatus.value.loop_current_round,
+    });
+  }
+  if (loopStatus.value.loop_last_error) {
+    return loopStatus.value.loop_last_error;
+  }
+  if (loopHistory.value.length > 0) {
+    return t("admin.codexRegister.loop.summary.idleWithHistory", {
+      count: loopHistory.value.length,
+    });
+  }
+  return t("admin.codexRegister.loop.summary.idle");
+});
+
 const revealedSecrets = ref<Record<string, boolean>>({});
+
+function accountBadgeLabel(account: CodexRegisterAccount): string {
+  return (
+    account.plan_type ??
+    account.codex_register_role ??
+    account.source ??
+    "unknown"
+  );
+}
 
 function secretKey(accountId: number, field: SecretField): string {
   return `${accountId}:${field}`;
@@ -1065,22 +1365,15 @@ function maskSecret(value: string): string {
   return `${value.slice(0, 6)}...${value.slice(-4)}`;
 }
 
-function secretDisplayValue(
-  account: CodexRegisterAccount,
-  field: SecretField,
-): string {
+function secretDisplayValue(account: CodexRegisterAccount, field: SecretField): string {
   const value = account[field] || "";
   return isSecretRevealed(account.id, field) ? value : maskSecret(value);
 }
 
-const combinedError = computed(
-  () => logsError.value || statusError.value || accountsError.value,
-);
 const errorStateLabel = computed(() => {
   if (!status.value) {
     return combinedError.value ? t("common.unknown") : t("common.loading");
   }
-
   return status.value.last_error
     ? t("admin.codexRegister.badge.attention")
     : t("admin.codexRegister.badge.healthy");
@@ -1166,42 +1459,33 @@ const PulseIcon = {
     ),
 };
 
-function getErrorMessage(error: unknown): string {
-  if (error && typeof error === "object" && "message" in error) {
-    const message = error.message;
-    if (typeof message === "string" && message) {
-      return message;
-    }
-  }
-
-  return error instanceof Error ? error.message : String(error);
-}
-
 async function fetchStatus() {
   try {
-    const data = await adminAPI.codex.getStatus();
-    status.value = data;
+    status.value = await adminAPI.codex.getStatus();
     statusError.value = null;
-    error.value = null;
   } catch (errorValue) {
     statusError.value = getErrorMessage(errorValue);
-    error.value = statusError.value;
+  }
+}
+
+async function fetchLoopStatus() {
+  try {
+    loopStatus.value = await adminAPI.codex.getLoopStatus();
+    loopError.value = null;
+  } catch (errorValue) {
+    loopError.value = getErrorMessage(errorValue);
   }
 }
 
 async function fetchLogs() {
   try {
-    const data = await adminAPI.codex.getLogs({
-      level:
-        selectedLogLevel.value === "all" ? undefined : selectedLogLevel.value,
+    logs.value = await adminAPI.codex.getLogs({
+      level: selectedLogLevel.value === "all" ? undefined : selectedLogLevel.value,
       limit: selectedLogLimit.value,
     });
-    logs.value = data;
     logsError.value = null;
-    error.value = null;
   } catch (errorValue) {
     logsError.value = getErrorMessage(errorValue);
-    error.value = logsError.value;
   }
 }
 
@@ -1218,11 +1502,9 @@ async function fetchAccounts() {
       (a, b) => toTimestamp(b.created_at) - toTimestamp(a.created_at),
     );
     accountsError.value = null;
-    error.value = null;
   } catch (errorValue) {
     accounts.value = [];
     accountsError.value = getErrorMessage(errorValue);
-    error.value = accountsError.value;
   }
 }
 
@@ -1249,57 +1531,80 @@ async function refreshAll() {
   if (refreshing.value) return;
   refreshing.value = true;
   try {
-    await Promise.all([fetchStatus(), fetchLogs(), fetchAccounts()]);
+    await Promise.all([fetchStatus(), fetchLoopStatus(), fetchLogs(), fetchAccounts()]);
   } finally {
     refreshing.value = false;
   }
 }
 
 async function toggleEnabled(value: boolean) {
-  if (loading.value) return;
+  if (refreshing.value || loading.value) return;
   loading.value = true;
   try {
-    const data = value
-      ? await adminAPI.codex.enable()
-      : await adminAPI.codex.disable();
-    status.value = data;
+    status.value = value ? await adminAPI.codex.enable() : await adminAPI.codex.disable();
     error.value = null;
   } catch (errorValue) {
     error.value = getErrorMessage(errorValue);
   } finally {
     loading.value = false;
   }
-  await fetchLogs();
+  await Promise.all([fetchLoopStatus(), fetchLogs()]);
 }
 
 async function resumeWorkflow() {
-  if (loading.value) return;
+  if (refreshing.value || loading.value) return;
   loading.value = true;
   try {
-    const data = await adminAPI.codex.resume();
-    status.value = data;
+    status.value = await adminAPI.codex.resume();
     error.value = null;
   } catch (errorValue) {
     error.value = getErrorMessage(errorValue);
   } finally {
     loading.value = false;
   }
-  await fetchLogs();
+  await Promise.all([fetchLoopStatus(), fetchLogs()]);
 }
 
 async function retryWorkflow() {
-  if (loading.value) return;
+  if (refreshing.value || loading.value) return;
   loading.value = true;
   try {
-    const data = await adminAPI.codex.retry();
-    status.value = data;
+    status.value = await adminAPI.codex.retry();
     error.value = null;
   } catch (errorValue) {
     error.value = getErrorMessage(errorValue);
   } finally {
     loading.value = false;
   }
-  await fetchLogs();
+  await Promise.all([fetchLoopStatus(), fetchLogs()]);
+}
+
+async function startLoopRunner() {
+  if (!loopStartEnabled.value) return;
+  loopActionLoading.value = "start";
+  try {
+    loopStatus.value = await adminAPI.codex.startLoop();
+    error.value = null;
+  } catch (errorValue) {
+    error.value = getErrorMessage(errorValue);
+  } finally {
+    loopActionLoading.value = null;
+  }
+  await Promise.all([fetchStatus(), fetchLogs()]);
+}
+
+async function stopLoopRunner() {
+  if (!loopStopEnabled.value) return;
+  loopActionLoading.value = "stop";
+  try {
+    loopStatus.value = await adminAPI.codex.stopLoop();
+    error.value = null;
+  } catch (errorValue) {
+    error.value = getErrorMessage(errorValue);
+  } finally {
+    loopActionLoading.value = null;
+  }
+  await Promise.all([fetchStatus(), fetchLogs()]);
 }
 
 async function triggerPrimaryAction() {
@@ -1320,7 +1625,7 @@ function startPolling() {
   if (timer !== undefined) return;
   void refreshAll();
   timer = window.setInterval(() => {
-    if (loading.value || refreshing.value) {
+    if (loading.value || refreshing.value || loopActionLoading.value !== null) {
       return;
     }
     void refreshAll();
@@ -1377,6 +1682,10 @@ defineExpose({
   toggleEnabled,
   resumeWorkflow,
   retryWorkflow,
+  startLoopRunner,
+  stopLoopRunner,
+  loopStateLabel,
+  loopHistory,
   isWaitingManual,
   waitingTodoSteps,
   maskSecret,

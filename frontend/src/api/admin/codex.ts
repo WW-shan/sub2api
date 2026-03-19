@@ -24,6 +24,17 @@ export interface CodexResumeContext {
   access_token_raw?: string | null;
 }
 
+export interface CodexProcessedSummary {
+  start_offset?: number;
+  end_offset?: number;
+  records_seen?: number;
+  created?: number;
+  updated?: number;
+  skipped?: number;
+  failed?: number;
+  errors?: string[];
+}
+
 export interface CodexStatus {
   enabled: boolean;
   sleep_min: number;
@@ -50,16 +61,7 @@ export interface CodexStatus {
   last_processed_records?: number;
   total_skipped?: number;
   total_failed?: number;
-  last_processed_summary?: {
-    start_offset?: number;
-    end_offset?: number;
-    records_seen?: number;
-    created?: number;
-    updated?: number;
-    skipped?: number;
-    failed?: number;
-    errors?: string[];
-  } | null;
+  last_processed_summary?: CodexProcessedSummary | null;
 }
 
 export interface CodexLogEntry {
@@ -88,6 +90,93 @@ export interface CodexRegisterAccount {
   updated_at: string | null;
 }
 
+export interface CodexLoopHistoryEntry {
+  round: number;
+  started_at: string | null;
+  finished_at: string | null;
+  status: string;
+  created: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  summary: CodexProcessedSummary | null;
+  error: string | null;
+}
+
+export interface CodexLoopStatus {
+  loop_running: boolean;
+  loop_stopping: boolean;
+  loop_started_at: string | null;
+  loop_current_round: number;
+  loop_last_round_started_at: string | null;
+  loop_last_round_finished_at: string | null;
+  loop_last_round_created: number;
+  loop_last_round_updated: number;
+  loop_last_round_skipped: number;
+  loop_last_round_failed: number;
+  loop_total_created: number;
+  loop_last_error: string | null;
+  loop_history: CodexLoopHistoryEntry[];
+  loop_committed_accounts_jsonl_offset: number;
+}
+
+const defaultProcessedSummary = (): CodexProcessedSummary => ({
+  start_offset: 0,
+  end_offset: 0,
+  records_seen: 0,
+  created: 0,
+  updated: 0,
+  skipped: 0,
+  failed: 0,
+  errors: [],
+});
+
+const defaultStatus = (): CodexStatus => ({
+  enabled: false,
+  sleep_min: 0,
+  sleep_max: 0,
+  total_created: 0,
+  last_success: null,
+  last_error: null,
+  proxy: false,
+  job_phase: "idle",
+  workflow_id: null,
+  waiting_reason: null,
+  can_start: false,
+  can_resume: false,
+  can_abandon: false,
+  manual_gate: null,
+  resume_context: null,
+  resume_hint: null,
+  last_transition: null,
+  last_resume_gate_reason: null,
+  recent_logs_tail: [],
+  accounts_jsonl_offset: 0,
+  accounts_jsonl_baseline_offset: 0,
+  last_processed_offset: 0,
+  last_processed_records: 0,
+  total_skipped: 0,
+  total_failed: 0,
+  last_processed_summary: null,
+});
+
+const defaultLoopStatus = (): CodexLoopStatus => ({
+  loop_running: false,
+  loop_stopping: false,
+  loop_started_at: null,
+  loop_current_round: 0,
+  loop_last_round_started_at: null,
+  loop_last_round_finished_at: null,
+  loop_last_round_created: 0,
+  loop_last_round_updated: 0,
+  loop_last_round_skipped: 0,
+  loop_last_round_failed: 0,
+  loop_total_created: 0,
+  loop_last_error: null,
+  loop_history: [],
+  loop_committed_accounts_jsonl_offset: 0,
+});
+
 function unwrapCodexPayload<T>(payload: unknown, fallback: T): T {
   if (!payload || typeof payload !== "object") {
     return fallback;
@@ -99,6 +188,38 @@ function unwrapCodexPayload<T>(payload: unknown, fallback: T): T {
   }
 
   return payload as T;
+}
+
+function toNumber(value: unknown, fallback = 0): number {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function toNullableString(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  return String(value);
+}
+
+function normalizeProcessedSummary(value: unknown): CodexProcessedSummary | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const summary = value as Record<string, unknown>;
+  return {
+    start_offset: toNumber(summary.start_offset),
+    end_offset: toNumber(summary.end_offset),
+    records_seen: toNumber(summary.records_seen),
+    created: toNumber(summary.created),
+    updated: toNumber(summary.updated),
+    skipped: toNumber(summary.skipped),
+    failed: toNumber(summary.failed),
+    errors: Array.isArray(summary.errors)
+      ? summary.errors.map((item) => String(item))
+      : [],
+  };
 }
 
 function normalizeLogEntry(entry: unknown): CodexLogEntry {
@@ -182,11 +303,75 @@ function normalizeTransition(value: unknown): CodexTransition | null {
 
 function normalizeStatus(status: CodexStatus): CodexStatus {
   return {
+    ...defaultStatus(),
     ...status,
+    last_success: toNullableString(status.last_success),
+    last_error: toNullableString(status.last_error),
+    workflow_id: toNullableString(status.workflow_id),
+    waiting_reason: toNullableString(status.waiting_reason),
+    resume_hint: toNullableString(status.resume_hint),
+    last_resume_gate_reason: toNullableString(status.last_resume_gate_reason),
     last_transition: normalizeTransition(status.last_transition),
     recent_logs_tail: Array.isArray(status.recent_logs_tail)
       ? status.recent_logs_tail.map(normalizeLogEntry)
       : [],
+    last_processed_summary: normalizeProcessedSummary(status.last_processed_summary),
+  };
+}
+
+function normalizeLoopHistoryEntry(value: unknown): CodexLoopHistoryEntry {
+  if (!value || typeof value !== "object") {
+    return {
+      round: 0,
+      started_at: null,
+      finished_at: null,
+      status: "unknown",
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+      summary: null,
+      error: toNullableString(value),
+    };
+  }
+
+  const entry = value as Record<string, unknown>;
+  return {
+    round: toNumber(entry.round),
+    started_at: toNullableString(entry.started_at),
+    finished_at: toNullableString(entry.finished_at),
+    status: String(entry.status ?? "unknown"),
+    created: toNumber(entry.created),
+    updated: toNumber(entry.updated),
+    skipped: toNumber(entry.skipped),
+    failed: toNumber(entry.failed),
+    summary: normalizeProcessedSummary(entry.summary) ?? defaultProcessedSummary(),
+    error: toNullableString(entry.error),
+  };
+}
+
+function normalizeLoopStatus(status: CodexLoopStatus): CodexLoopStatus {
+  return {
+    ...defaultLoopStatus(),
+    ...status,
+    loop_running: Boolean(status.loop_running),
+    loop_stopping: Boolean(status.loop_stopping),
+    loop_started_at: toNullableString(status.loop_started_at),
+    loop_current_round: toNumber(status.loop_current_round),
+    loop_last_round_started_at: toNullableString(status.loop_last_round_started_at),
+    loop_last_round_finished_at: toNullableString(status.loop_last_round_finished_at),
+    loop_last_round_created: toNumber(status.loop_last_round_created),
+    loop_last_round_updated: toNumber(status.loop_last_round_updated),
+    loop_last_round_skipped: toNumber(status.loop_last_round_skipped),
+    loop_last_round_failed: toNumber(status.loop_last_round_failed),
+    loop_total_created: toNumber(status.loop_total_created),
+    loop_last_error: toNullableString(status.loop_last_error),
+    loop_history: Array.isArray(status.loop_history)
+      ? status.loop_history.map(normalizeLoopHistoryEntry)
+      : [],
+    loop_committed_accounts_jsonl_offset: toNumber(
+      status.loop_committed_accounts_jsonl_offset,
+    ),
   };
 }
 
@@ -194,28 +379,15 @@ export async function getStatus(): Promise<CodexStatus> {
   const res = await apiClient.get<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/status",
   );
-  return normalizeStatus(
-    unwrapCodexPayload<CodexStatus>(res.data, {
-      enabled: false,
-      sleep_min: 0,
-      sleep_max: 0,
-      total_created: 0,
-      last_success: null,
-      last_error: null,
-      proxy: false,
-      job_phase: "idle",
-      workflow_id: null,
-      waiting_reason: null,
-      can_start: false,
-      can_resume: false,
-      can_abandon: false,
-      manual_gate: null,
-      resume_context: null,
-      resume_hint: null,
-      last_transition: null,
-      last_resume_gate_reason: null,
-      recent_logs_tail: [],
-    }),
+  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, defaultStatus()));
+}
+
+export async function getLoopStatus(): Promise<CodexLoopStatus> {
+  const res = await apiClient.get<
+    CodexLoopStatus | CodexEnvelope<CodexLoopStatus>
+  >("/admin/codex/loop/status");
+  return normalizeLoopStatus(
+    unwrapCodexPayload<CodexLoopStatus>(res.data, defaultLoopStatus()),
   );
 }
 
@@ -254,124 +426,57 @@ export async function enable(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/enable",
   );
-  return normalizeStatus(
-    unwrapCodexPayload<CodexStatus>(res.data, {
-      enabled: false,
-      sleep_min: 0,
-      sleep_max: 0,
-      total_created: 0,
-      last_success: null,
-      last_error: null,
-      proxy: false,
-      job_phase: "idle",
-      workflow_id: null,
-      waiting_reason: null,
-      can_start: false,
-      can_resume: false,
-      can_abandon: false,
-      manual_gate: null,
-      resume_context: null,
-      resume_hint: null,
-      last_transition: null,
-      last_resume_gate_reason: null,
-      recent_logs_tail: [],
-    }),
-  );
+  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, defaultStatus()));
 }
 
 export async function disable(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/disable",
   );
-  return normalizeStatus(
-    unwrapCodexPayload<CodexStatus>(res.data, {
-      enabled: false,
-      sleep_min: 0,
-      sleep_max: 0,
-      total_created: 0,
-      last_success: null,
-      last_error: null,
-      proxy: false,
-      job_phase: "idle",
-      workflow_id: null,
-      waiting_reason: null,
-      can_start: false,
-      can_resume: false,
-      can_abandon: false,
-      manual_gate: null,
-      resume_context: null,
-      resume_hint: null,
-      last_transition: null,
-      last_resume_gate_reason: null,
-      recent_logs_tail: [],
-    }),
-  );
+  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, defaultStatus()));
 }
 
 export async function resume(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/resume",
   );
-  return normalizeStatus(
-    unwrapCodexPayload<CodexStatus>(res.data, {
-      enabled: false,
-      sleep_min: 0,
-      sleep_max: 0,
-      total_created: 0,
-      last_success: null,
-      last_error: null,
-      proxy: false,
-      job_phase: "idle",
-      workflow_id: null,
-      waiting_reason: null,
-      can_start: false,
-      can_resume: false,
-      can_abandon: false,
-      manual_gate: null,
-      resume_context: null,
-      resume_hint: null,
-      last_transition: null,
-      last_resume_gate_reason: null,
-      recent_logs_tail: [],
-    }),
-  );
+  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, defaultStatus()));
 }
 
 export async function retry(): Promise<CodexStatus> {
   const res = await apiClient.post<CodexStatus | CodexEnvelope<CodexStatus>>(
     "/admin/codex/retry",
   );
-  return normalizeStatus(
-    unwrapCodexPayload<CodexStatus>(res.data, {
-      enabled: false,
-      sleep_min: 0,
-      sleep_max: 0,
-      total_created: 0,
-      last_success: null,
-      last_error: null,
-      proxy: false,
-      job_phase: "idle",
-      workflow_id: null,
-      waiting_reason: null,
-      can_start: false,
-      can_resume: false,
-      can_abandon: false,
-      manual_gate: null,
-      resume_context: null,
-      resume_hint: null,
-      last_transition: null,
-      last_resume_gate_reason: null,
-      recent_logs_tail: [],
-    }),
+  return normalizeStatus(unwrapCodexPayload<CodexStatus>(res.data, defaultStatus()));
+}
+
+export async function startLoop(): Promise<CodexLoopStatus> {
+  const res = await apiClient.post<
+    CodexLoopStatus | CodexEnvelope<CodexLoopStatus>
+  >("/admin/codex/loop/start");
+  return normalizeLoopStatus(
+    unwrapCodexPayload<CodexLoopStatus>(res.data, defaultLoopStatus()),
+  );
+}
+
+export async function stopLoop(): Promise<CodexLoopStatus> {
+  const res = await apiClient.post<
+    CodexLoopStatus | CodexEnvelope<CodexLoopStatus>
+  >("/admin/codex/loop/stop");
+  return normalizeLoopStatus(
+    unwrapCodexPayload<CodexLoopStatus>(res.data, defaultLoopStatus()),
   );
 }
 
 export default {
   getStatus,
+  getLoopStatus,
   getLogs,
   getAccounts,
   enable,
   disable,
   resume,
   retry,
+  startLoop,
+  stopLoop,
 };
