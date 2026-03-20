@@ -11,6 +11,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+try:
+    import requests  # type: ignore
+except ModuleNotFoundError:
+    requests = None
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -1304,9 +1309,30 @@ class LoopStateTests(ServiceTestCase):
 
         self.assertEqual(loop_state["codex_total_persisted_accounts"], 9)
 
-    def test_loop_start_rejects_when_already_running(self):
+    def test_loop_start_captures_current_accounts_jsonl_offset_as_first_round_baseline(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            existing_lines = [
+                json.dumps({"email": "old1@example.com", "access_token": "t1"}),
+                json.dumps({"email": "old2@example.com", "access_token": "t2"}),
+            ]
+            path.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
+            expected_offset = len(path.read_bytes())
+            self.service._accounts_jsonl_path = path
+
+            with patch.object(self.service, "_start_loop_worker", return_value=(None, "")):
+                result = asyncio.run(self.service.handle_path("/loop/start", payload={}))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["loop_committed_accounts_jsonl_offset"], expected_offset)
+
+        persisted = asyncio.run(self.service._load_state())
+        self.assertEqual(persisted["loop_committed_accounts_jsonl_offset"], expected_offset)
+
+    def test_loop_start_rejection_keeps_existing_loop_committed_offset(self):
         state = self.service._default_state()
         state["loop_running"] = True
+        state["loop_committed_accounts_jsonl_offset"] = 123
         self.service._loop_worker_thread = FakeWorker(alive=True)
         asyncio.run(self.service._save_state(state))
 
@@ -1314,6 +1340,8 @@ class LoopStateTests(ServiceTestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(result["error"], "already_running")
+        latest = asyncio.run(self.service._load_state())
+        self.assertEqual(latest["loop_committed_accounts_jsonl_offset"], 123)
 
     def test_loop_stop_repairs_stale_running_state(self):
         state = self.service._default_state()
@@ -1484,6 +1512,7 @@ class LoopStateTests(ServiceTestCase):
         self.assertEqual(latest_state["loop_history"], [{"round": 9, "status": "success"}])
 
 
+
 class LoopRoundTests(ServiceTestCase):
     def _base_round_state(self):
         state = self.service._default_state()
@@ -1491,6 +1520,39 @@ class LoopRoundTests(ServiceTestCase):
         state["accounts_jsonl_offset"] = 10
         state["loop_committed_accounts_jsonl_offset"] = 10
         return state
+
+    def test_loop_start_baseline_excludes_preexisting_jsonl_rows_from_first_round(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "accounts.jsonl"
+            old_line = json.dumps({"email": "old@example.com", "access_token": "old-token"}) + "\n"
+            path.write_text(old_line, encoding="utf-8")
+            self.service._accounts_jsonl_path = path
+
+            with patch.object(self.service, "_start_loop_worker", return_value=(None, "")):
+                start_result = asyncio.run(self.service.handle_path("/loop/start", payload={}))
+
+            self.assertTrue(start_result["success"])
+
+            new_line = json.dumps({"email": "new@example.com", "access_token": "new-token"}) + "\n"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(new_line)
+
+            state = asyncio.run(self.service._load_state())
+
+            with patch.object(self.service, "_run_loop_process_once", new=AsyncMock(return_value=0)), \
+                 patch.object(self.service, "_create_db_connection", return_value=FakeConnection(FakeCursor(insert_ids=[901]))), \
+                 patch.object(self.service, "_pg_json", side_effect=lambda value: value):
+                history = asyncio.run(self.service._run_loop_round(state))
+
+            self.assertEqual(history["status"], "success")
+            self.assertEqual(history["created"], 1)
+            self.assertEqual(history["updated"], 0)
+            self.assertEqual(history["skipped"], 0)
+            self.assertEqual(history["failed"], 0)
+            summary = history["summary"]
+            self.assertEqual(summary["records_seen"], 1)
+            self.assertEqual(summary["start_offset"], len(old_line.encode("utf-8")))
+            self.assertEqual(summary["end_offset"], len((old_line + new_line).encode("utf-8")))
 
     def test_loop_round_updates_created_counts_and_committed_offset(self):
         state = self._base_round_state()
@@ -1828,7 +1890,7 @@ class DataDirectoryContractTests(ServiceTestCase):
                     auto_run=False,
                 )
 
-        self.assertEqual(service._accounts_jsonl_path, pathlib.Path(tmpdir) / "accounts.jsonl")
+        self.assertEqual(service._accounts_jsonl_path, (pathlib.Path(tmpdir).resolve() / "accounts.jsonl"))
 
     def test_list_accounts_for_frontend_includes_plan_and_role_fields(self):
         cursor = FakeCursor(
@@ -1866,6 +1928,7 @@ class DataDirectoryContractTests(ServiceTestCase):
         self.assertEqual(accounts[0]["updated_at"], "2026-03-19T01:00:00Z")
 
 
+@unittest.skipIf(requests is None, "requests dependency is not installed")
 class GetTokensPersistenceContractTests(unittest.TestCase):
     def test_get_tokens_uses_configured_data_dir(self):
         module_name = "tools.codex_register.get_tokens"
@@ -1879,7 +1942,9 @@ class GetTokensPersistenceContractTests(unittest.TestCase):
         self.assertEqual(module.ACCOUNTS_JSONL_FILE, str(pathlib.Path(tmpdir) / "accounts.jsonl"))
 
 
+@unittest.skipIf(requests is None, "requests dependency is not installed")
 class GptTeamPersistenceContractTests(unittest.TestCase):
+
     def test_gpt_team_uses_configured_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(os.environ, {"CODEX_REGISTER_DATA_DIR": tmpdir}, clear=False):

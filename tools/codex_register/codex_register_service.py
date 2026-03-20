@@ -320,6 +320,7 @@ class CodexRegisterService:
             state["loop_started_at"] = self._now_iso()
             state["loop_last_error"] = ""
 
+            state["loop_committed_accounts_jsonl_offset"] = self._capture_accounts_jsonl_offset()
             worker, error = self._start_loop_worker(generation)
             if error:
                 state["loop_running"] = False
