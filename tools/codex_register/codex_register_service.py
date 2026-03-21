@@ -2369,7 +2369,7 @@ async def run_http(service: CodexRegisterService, *, host: str, port: int) -> No
 def build_http_handler(service: CodexRegisterService):
     method_allowlist = {
         "GET": {"/status", "/logs", "/accounts", "/loop/status", "/proxy/status", "/proxy/list"},
-        "POST": {"/enable", "/resume", "/disable", "/loop/start", "/loop/stop", "/proxy/select", "/proxy/test"},
+        "POST": {"/enable", "/resume", "/disable", "/loop/start", "/loop/stop", "/proxy/select", "/proxy/test", "/proxy/list"},
     }
 
     class CodexRegisterHTTPRequestHandler(BaseHTTPRequestHandler):

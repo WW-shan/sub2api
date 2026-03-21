@@ -274,6 +274,8 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.loop.history.status.running': '运行中',
     'admin.codexRegister.loop.history.status.success': '成功',
     'admin.codexRegister.loop.history.status.failed': '失败',
+    'admin.codexRegister.proxyPool.emptyHint': 'No proxies yet. Add your first proxy entry to enable routing.',
+    'admin.codexRegister.proxyPool.addAction': 'Add Proxy',
     'admin.codexRegister.proxyPool.title': 'Proxy Pool',
     'admin.codexRegister.proxyPool.available': 'Available Proxies: {count}',
     'admin.codexRegister.proxyPool.lastError': 'Last Proxy Error: {error}',
@@ -287,6 +289,7 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.proxyPool.testAction': 'Test Proxy',
     'admin.codexRegister.proxyPool.selectAction': 'Select Proxy',
     'admin.codexRegister.proxyPool.saveAction': 'Save Proxy Pool',
+    'admin.codexRegister.proxyPool.unsavedHint': 'Save this proxy row before testing or selecting it.',
     'admin.codexRegister.proxyPool.statusValue.ok': 'Healthy',
     'admin.codexRegister.proxyPool.statusValue.failed': 'Failed',
     'admin.codexRegister.proxyPool.statusValue.cooldown': 'Cooldown',
@@ -1639,6 +1642,147 @@ describe('CodexRegistrationCard', () => {
     expect(historyRows[1].text()).toContain('成功')
   })
 
+  it('renders empty proxy pool helper and adds first editable proxy row', async () => {
+    codexApiMocks.getProxyStatus.mockResolvedValueOnce(
+      makeProxyStatus({
+        proxy_pool: []
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('No proxies yet. Add your first proxy entry to enable routing.')
+
+    const addButton = wrapper.find('[data-testid="codex-proxy-add"]')
+    expect(addButton.exists()).toBe(true)
+    expect(wrapper.findAll('[data-testid="codex-proxy-row"]')).toHaveLength(0)
+
+    await addButton.trigger('click')
+    await flushPromises()
+
+    const rows = wrapper.findAll('[data-testid="codex-proxy-row"]')
+    expect(rows).toHaveLength(1)
+
+    const nameInputs = wrapper.findAll('[data-testid^="codex-proxy-name-input-"]')
+    const urlInputs = wrapper.findAll('[data-testid^="codex-proxy-url-input-"]')
+    expect(nameInputs).toHaveLength(1)
+    expect(urlInputs).toHaveLength(1)
+
+    await nameInputs[0].setValue('Draft Proxy')
+    await urlInputs[0].setValue('http://draft-proxy:8080')
+
+    expect((nameInputs[0].element as HTMLInputElement).value).toBe('Draft Proxy')
+    expect((urlInputs[0].element as HTMLInputElement).value).toBe('http://draft-proxy:8080')
+  })
+
+  it('hides remote-only actions for unsaved proxy rows while keeping saved-row controls visible', async () => {
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    await wrapper.find('[data-testid="codex-proxy-add"]').trigger('click')
+    await flushPromises()
+
+    const proxyRows = wrapper.findAll('[data-testid="codex-proxy-row"]')
+    const unsavedRow = proxyRows.find((row) => row.find('[data-testid="codex-proxy-unsaved-hint"]').exists())
+    expect(unsavedRow).toBeDefined()
+
+    expect(unsavedRow!.find('[data-testid^="codex-proxy-test-"]').exists()).toBe(false)
+    expect(unsavedRow!.find('[data-testid^="codex-proxy-select-"]').exists()).toBe(false)
+    expect(unsavedRow!.find('[data-testid="codex-proxy-unsaved-hint"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Save this proxy row before testing or selecting it.')
+
+    expect(wrapper.find('[data-testid="codex-proxy-test-proxy-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="codex-proxy-test-proxy-2"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="codex-proxy-select-proxy-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="codex-proxy-select-proxy-2"]').exists()).toBe(true)
+
+    const savedProxyRows = proxyRows.filter((row) => row.find('[data-testid="codex-proxy-unsaved-hint"]').exists() === false)
+    expect(savedProxyRows).toHaveLength(2)
+
+    for (const row of savedProxyRows) {
+      expect(row.find('[data-testid^="codex-proxy-test-"]').exists()).toBe(true)
+      expect(row.find('[data-testid^="codex-proxy-select-"]').exists()).toBe(true)
+    }
+  })
+
+  it('saves a newly added proxy row without persisted id using current draft routing state', async () => {
+    codexApiMocks.getProxyStatus.mockResolvedValueOnce(
+      makeProxyStatus({
+        proxy_enabled: false,
+        proxy_pool: []
+      })
+    )
+    codexApiMocks.saveProxyList.mockResolvedValueOnce(
+      makeProxyStatus({
+        proxy_enabled: true,
+        proxy_pool: [
+          {
+            id: 'proxy-3',
+            name: 'New Draft Proxy',
+            proxy_url: 'http://proxy-3:8080',
+            enabled: true,
+            last_status: 'unknown',
+            last_checked_at: null,
+            last_success_at: null,
+            last_failure_at: null,
+            cooldown_until: null,
+            failure_count: 0,
+          }
+        ]
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    await wrapper.find('[data-testid="codex-proxy-routing-toggle"]').setValue(true)
+    await wrapper.find('[data-testid="codex-proxy-add"]').trigger('click')
+    await flushPromises()
+
+    const proxyRows = wrapper.findAll('[data-testid="codex-proxy-row"]')
+    const unsavedRow = proxyRows.find((row) => row.find('[data-testid="codex-proxy-unsaved-hint"]').exists())
+    expect(unsavedRow).toBeDefined()
+
+    const nameInput = unsavedRow!.find('[data-testid^="codex-proxy-name-input-"]')
+    const urlInput = unsavedRow!.find('[data-testid^="codex-proxy-url-input-"]')
+    const enabledInput = unsavedRow!.find('[data-testid^="codex-proxy-enabled-input-"]')
+
+    await nameInput.setValue('New Draft Proxy')
+    await urlInput.setValue('http://proxy-3:8080')
+    await enabledInput.setValue(true)
+
+    await wrapper.find('[data-testid="codex-proxy-save"]').trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.saveProxyList).toHaveBeenCalledTimes(1)
+
+    const payload = codexApiMocks.saveProxyList.mock.calls[0]?.[0]
+    expect(payload).toEqual({
+      proxy_enabled: true,
+      proxy_pool: [
+        {
+          name: 'New Draft Proxy',
+          proxy_url: 'http://proxy-3:8080',
+          enabled: true
+        }
+      ]
+    })
+    expect(wrapper.find('[data-testid="codex-proxy-test-proxy-3"]').exists()).toBe(true)
+  })
+
   it('renders localized proxy panel labels and preserves unsaved proxy edits across refresh', async () => {
     codexApiMocks.getProxyStatus.mockResolvedValueOnce(
       makeProxyStatus({
@@ -1712,9 +1856,10 @@ describe('CodexRegistrationCard', () => {
   })
 
 
-  it('save action sends edited proxy list', async () => {
+  it('save action persists proxy routing flag with current proxy pool edits', async () => {
     codexApiMocks.saveProxyList.mockResolvedValueOnce(
       makeProxyStatus({
+        proxy_enabled: false,
         proxy_pool: [
           {
             id: 'proxy-1',
@@ -1751,6 +1896,7 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
+    await wrapper.find('[data-testid="codex-proxy-routing-toggle"]').setValue(false)
     await wrapper.find('[data-testid="codex-proxy-name-input-proxy-1"]').setValue('Primary Proxy Edited')
     await wrapper.find('[data-testid="codex-proxy-url-input-proxy-1"]').setValue('http://proxy-1-edited:8080')
     await wrapper.find('[data-testid="codex-proxy-enabled-input-proxy-2"]').setValue(false)
@@ -1759,7 +1905,7 @@ describe('CodexRegistrationCard', () => {
 
     expect(codexApiMocks.saveProxyList).toHaveBeenCalledTimes(1)
     expect(codexApiMocks.saveProxyList).toHaveBeenCalledWith({
-      proxy_enabled: true,
+      proxy_enabled: false,
       proxy_pool: [
         {
           id: 'proxy-1',

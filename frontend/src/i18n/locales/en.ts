@@ -1029,6 +1029,9 @@ export default {
         unknown: 'Unknown phase',
         idle: 'Not running',
         runningCreateParent: 'Creating parent account',
+        runningGetTokens: 'Creating parent account',
+        waitingSubscribeThenResume: 'Subscribing parent account',
+        runningGptTeamBatch: 'Registering/inviting child accounts',
         waitingManual: 'Waiting for your manual action',
         runningPreResumeCheck: 'Running pre-resume checks',
         runningInviteChildren: 'Inviting child accounts',
@@ -1038,7 +1041,8 @@ export default {
         failed: 'Failed'
       },
       waitingReason: {
-        parentUpgrade: 'Parent account upgrade is required first'
+        parentUpgrade: 'Parent account upgrade is required first',
+        subscribeThenResume: 'Complete subscription on the official site, then click "Resume"'
       },
       waitingTodo: {
         title: 'Todo checklist',
@@ -1047,6 +1051,11 @@ export default {
           step1: 'Sign in to the parent account and complete the upgrade.',
           step2: 'Confirm the upgrade succeeds and account status is normal.',
           step3: 'Return to this page and click "Resume".'
+        },
+        subscribeThenResume: {
+          step1: 'Use the parent account shown above to subscribe on the official site.',
+          step2: 'Confirm the subscription is active.',
+          step3: 'Return to this page and click "Resume" to continue the workflow.'
         },
         generic: {
           step1: 'Complete the required manual action for the waiting reason.',
@@ -1063,6 +1072,7 @@ export default {
         proxyConfiguredDetail: 'Proxy is configured and the container can register through the current egress path.',
         proxyMissingDetail: 'No proxy is configured. Confirm whether the container requires a dedicated network exit.',
         phaseTitle: 'Workflow Phase',
+        workflowFailed: 'Workflow failed',
         waitingReasonTitle: 'Waiting Reason',
         waitingReasonEmpty: 'Not waiting',
         lastSuccessTitle: 'Last Success Time',
@@ -1082,6 +1092,7 @@ export default {
         searchPlaceholder: 'Search by email',
         columns: {
           email: 'Email',
+          role: 'Role',
           password: 'Password',
           accessToken: 'Access Token',
           refreshToken: 'Refresh Token',
@@ -1100,14 +1111,17 @@ export default {
         lastError: 'Last Proxy Error: {error}',
         enableAction: 'Enable Proxy Routing',
         disableAction: 'Disable Proxy Routing',
+        addAction: 'Add Proxy',
         enableRouting: 'Enable Proxy Routing',
         enabledLabel: 'Enabled',
+        emptyHint: 'No proxies yet. Add a proxy to enable routing.',
         statusLabel: 'Status: {status}',
         cooldownLabel: 'Cooldown: {value}',
         failedLabel: 'Failed: {count}',
         testAction: 'Test Proxy',
         selectAction: 'Select Proxy',
         saveAction: 'Save Proxy Pool',
+        unsavedHint: 'Save this proxy row before testing or selecting it.',
         statusValue: {
           ok: 'Healthy',
           failed: 'Failed',

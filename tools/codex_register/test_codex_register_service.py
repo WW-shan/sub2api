@@ -8,6 +8,9 @@ import sys
 import tempfile
 import threading
 import unittest
+from concurrent.futures import Future
+from email.message import Message
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -152,6 +155,61 @@ class ControllableStartLoopWorker:
         return worker, ""
 
 
+
+class InProcessHttpHandlerHarness:
+    def __init__(self, handler_cls, *, method, path, body=None, headers=None, service_loop=None):
+        self._handler_cls = handler_cls
+        self._method = method
+        self._path = path
+        self._body = body or b""
+        self._headers = dict(headers or {})
+        self._service_loop = service_loop if service_loop is not None else object()
+
+    def run(self):
+        handler = self._handler_cls.__new__(self._handler_cls)
+        handler.path = self._path
+        handler.server = SimpleNamespace(_service_loop=self._service_loop)
+        handler.rfile = BytesIO(self._body)
+        handler.wfile = BytesIO()
+
+        message = Message()
+        for key, value in self._headers.items():
+            message[key] = str(value)
+        if self._body and "Content-Length" not in message:
+            message["Content-Length"] = str(len(self._body))
+        handler.headers = message
+
+        captured = {"status": None, "headers": []}
+
+        def send_response(status_code, _msg=None):
+            captured["status"] = status_code
+
+        def send_header(key, value):
+            captured["headers"].append((key, value))
+
+        def end_headers():
+            return None
+
+        handler.send_response = send_response
+        handler.send_header = send_header
+        handler.end_headers = end_headers
+
+        if self._method == "POST":
+            handler.do_POST()
+        elif self._method == "GET":
+            handler.do_GET()
+        else:
+            raise ValueError(f"unsupported method: {self._method}")
+
+        raw = handler.wfile.getvalue()
+        body = json.loads(raw.decode("utf-8")) if raw else None
+        return {
+            "status": captured["status"],
+            "headers": captured["headers"],
+            "body": body,
+        }
+
+
 class ServiceTestCase(unittest.TestCase):
     def setUp(self):
         if MODULE_NAME in sys.modules:
@@ -212,6 +270,66 @@ class ProxyEndpointTests(ServiceTestCase):
         self.assertFalse(result["data"]["proxy_enabled"])
 
 
+
+    def test_http_handler_accepts_post_proxy_list_and_dispatches_to_service(self):
+        handler_cls = self.module.build_http_handler(self.service)
+
+        with patch.object(
+            self.service,
+            "handle_path",
+            new=AsyncMock(return_value={"success": True, "data": {"dispatched": True}, "error": ""}),
+        ) as mocked_handle_path:
+            captured = {}
+
+            def immediate_run_coroutine_threadsafe(coro, _loop):
+                captured["coroutine"] = coro
+                future = Future()
+                try:
+                    future.set_result(asyncio.run(coro))
+                except Exception as exc:  # pragma: no cover
+                    future.set_exception(exc)
+                return future
+
+            body = json.dumps(
+                {
+                    "proxy_pool": [
+                        {
+                            "id": "p1",
+                            "name": "Proxy 1",
+                            "proxy_url": "http://p1:8080",
+                            "enabled": True,
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+            with patch.object(
+                self.module.asyncio,
+                "run_coroutine_threadsafe",
+                side_effect=immediate_run_coroutine_threadsafe,
+            ) as run_threadsafe_mock:
+                response = InProcessHttpHandlerHarness(
+                    handler_cls,
+                    method="POST",
+                    path="/proxy/list",
+                    body=body,
+                    headers={"Content-Type": "application/json"},
+                    service_loop=object(),
+                ).run()
+
+            self.assertEqual(response["status"], 200)
+            self.assertTrue(response["body"]["success"])
+            self.assertEqual(response["body"]["data"]["dispatched"], True)
+
+            run_threadsafe_mock.assert_called_once()
+            self.assertIn("coroutine", captured)
+            mocked_handle_path.assert_awaited_once()
+            self.assertEqual(mocked_handle_path.await_args.args[0], "/proxy/list")
+            self.assertEqual(
+                mocked_handle_path.await_args.kwargs["payload"]["proxy_pool"][0]["proxy_url"],
+                "http://p1:8080",
+            )
+            self.assertEqual(mocked_handle_path.await_args.kwargs["payload"]["method"], "POST")
 
     def test_proxy_select_updates_current_proxy_name(self):
         state = self.service._default_state()
