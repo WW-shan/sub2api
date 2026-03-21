@@ -330,6 +330,31 @@ class CodexRegisterService:
         digest = hashlib.sha1(normalized_proxy_url.encode("utf-8")).hexdigest()[:12]
         return f"proxy-{digest}"
 
+    def _validate_proxy_pool_payload(self, pool: Any) -> str:
+        if not isinstance(pool, list):
+            return "invalid_proxy_pool"
+
+        seen_ids = set()
+        seen_proxy_urls = set()
+        for item in pool:
+            if not isinstance(item, dict):
+                return "invalid_proxy_pool"
+
+            proxy_url = self._normalize_proxy_url(item.get("proxy_url") or item.get("url"))
+            if not proxy_url:
+                return "proxy_url_missing"
+            if proxy_url in seen_proxy_urls:
+                return "duplicate_proxy_url"
+            seen_proxy_urls.add(proxy_url)
+
+            proxy_id = str(item.get("id") or "").strip()
+            if proxy_id:
+                if proxy_id in seen_ids:
+                    return "duplicate_proxy_id"
+                seen_ids.add(proxy_id)
+
+        return ""
+
     def _normalize_proxy_pool(self, pool: Any) -> List[Dict[str, Any]]:
         if not isinstance(pool, list):
             return []
