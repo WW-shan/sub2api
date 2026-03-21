@@ -1394,6 +1394,28 @@ describe('CodexRegistrationCard', () => {
     expect(panel.text()).toContain('创建 2 / 更新 1 / 跳过 0 / 失败 0')
   })
 
+  it('renders loop summary current/previous proxy labels from loop status', async () => {
+    codexApiMocks.getLoopStatus.mockResolvedValueOnce(
+      makeLoopStatus({
+        loop_running: true,
+        loop_current_round: 4,
+        loop_current_proxy_name: 'Round4 Proxy',
+        loop_last_proxy_name: 'Round3 Proxy'
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const panel = wrapper.find('[data-testid="codex-loop-panel"]')
+    expect(panel.text()).toContain('Current round proxy: Round4 Proxy')
+    expect(panel.text()).toContain('Previous round proxy: Round3 Proxy')
+  })
+
   it('disables loop controls while refresh polling is in flight', async () => {
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
@@ -1704,7 +1726,53 @@ describe('CodexRegistrationCard', () => {
       proxy_enabled: true
     })
   })
-  it('renders proxy row status values', async () => {
+  it('calls testProxy endpoint when proxy test action is clicked', async () => {
+    codexApiMocks.testProxy.mockResolvedValueOnce(
+      makeProxyStatus({
+        proxy_pool: [
+          {
+            id: 'proxy-1',
+            name: 'Primary Proxy',
+            proxy_url: 'http://proxy-1:8080',
+            enabled: true,
+            last_status: 'ok',
+            last_checked_at: '2026-03-06T10:12:00Z',
+            last_success_at: '2026-03-06T10:12:00Z',
+            last_failure_at: null,
+            cooldown_until: null,
+            failure_count: 0
+          },
+          {
+            id: 'proxy-2',
+            name: 'Backup Proxy',
+            proxy_url: 'http://proxy-2:8080',
+            enabled: true,
+            last_status: 'ok',
+            last_checked_at: '2026-03-06T10:12:00Z',
+            last_success_at: '2026-03-06T10:12:00Z',
+            last_failure_at: null,
+            cooldown_until: null,
+            failure_count: 0
+          }
+        ]
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    await wrapper.find('[data-testid="codex-proxy-test-proxy-1"]').trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.testProxy).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.testProxy).toHaveBeenCalledWith({ proxy_id: 'proxy-1' })
+  })
+
+  it('renders cooldown and failed details per proxy row', async () => {
     codexApiMocks.getProxyStatus.mockResolvedValueOnce(
       makeProxyStatus({
         proxy_pool: [
@@ -1743,9 +1811,16 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
-    const panel = wrapper.find('[data-testid="codex-proxy-panel"]')
-    expect(panel.text()).toContain('cooldown')
-    expect(panel.text()).toContain('failed')
+    const rows = wrapper.findAll('[data-testid="codex-proxy-row"]')
+    expect(rows).toHaveLength(2)
+
+    expect(rows[0].text()).toContain('Status: cooldown')
+    expect(rows[0].text()).toContain('Cooldown: 2026-03-06T10:10:00Z')
+    expect(rows[0].text()).toContain('Failed: 2')
+
+    expect(rows[1].text()).toContain('Status: failed')
+    expect(rows[1].text()).toContain('Failed: 3')
+    expect(rows[1].text()).not.toContain('Cooldown:')
   })
 
   it('displays available proxy count', async () => {
