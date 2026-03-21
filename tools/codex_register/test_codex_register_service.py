@@ -170,6 +170,262 @@ class ServiceTestCase(unittest.TestCase):
         )
 
 
+class ProxyEndpointTests(ServiceTestCase):
+    def test_default_state_includes_proxy_fields(self):
+        state = self.service._default_state()
+
+        self.assertIn("proxy_enabled", state)
+        self.assertIn("proxy_pool", state)
+        self.assertIn("proxy_current_id", state)
+        self.assertIn("proxy_last_used_id", state)
+        self.assertIn("proxy_last_checked_at", state)
+        self.assertIn("proxy_last_error", state)
+        self.assertIn("proxy_rotation_cursor", state)
+        self.assertIn("proxy_last_switch_reason", state)
+
+    def test_proxy_status_returns_success_with_proxy_defaults(self):
+        result = asyncio.run(self.service.handle_path("/proxy/status"))
+
+        self.assertTrue(result["success"])
+        self.assertFalse(result["error"])
+        self.assertFalse(result["data"]["proxy_enabled"])
+        self.assertEqual(result["data"]["proxy_pool"], [])
+        self.assertEqual(result["data"]["proxy_current_id"], "")
+        self.assertEqual(result["data"]["proxy_last_used_id"], "")
+        self.assertEqual(result["data"]["proxy_last_checked_at"], "")
+        self.assertEqual(result["data"]["proxy_last_error"], "")
+        self.assertEqual(result["data"]["proxy_rotation_cursor"], 0)
+        self.assertEqual(result["data"]["proxy_last_switch_reason"], "")
+
+    def test_proxy_status_preserves_explicit_proxy_enabled_flag(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "p1", "enabled": False},
+            {"id": "p2", "enabled": True},
+        ]
+        state["proxy_enabled"] = False
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(self.service.handle_path("/proxy/status"))
+
+        self.assertTrue(result["success"])
+        self.assertFalse(result["data"]["proxy_enabled"])
+
+
+
+    def test_proxy_select_updates_current_proxy_name(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "p1", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": True},
+            {"id": "p2", "name": "Proxy 2", "proxy_url": "http://p2:8080", "enabled": True},
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(self.service.handle_path("/proxy/select", payload={"proxy_id": "p2"}))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["proxy_current_name"], "Proxy 2")
+
+
+    def test_proxy_test_success_clears_stale_failure_fields(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {
+                "id": "p1",
+                "name": "Proxy 1",
+                "proxy_url": "http://p1:8080",
+                "enabled": True,
+                "last_status": "failed",
+                "last_checked_at": "2026-03-21T00:00:00Z",
+                "last_success_at": "",
+                "last_failure_at": "2026-03-21T00:00:00Z",
+                "cooldown_until": "2026-03-21T00:01:00Z",
+                "failure_count": 2,
+            },
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        with patch.object(self.service, "_probe_proxy_target", return_value=(True, "")):
+            result = asyncio.run(self.service.handle_path("/proxy/test", payload={"proxy_id": "p1"}))
+
+        self.assertTrue(result["success"])
+        row = result["data"]["proxy_pool"][0]
+        self.assertEqual(row["last_status"], "ok")
+        self.assertEqual(row["failure_count"], 0)
+        self.assertEqual(row["cooldown_until"], "")
+        self.assertEqual(row["last_failure_at"], "")
+        self.assertNotEqual(row["last_success_at"], "")
+
+    def test_proxy_list_clears_stale_current_proxy_name_when_selected_proxy_removed(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "p1", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": True},
+        ]
+        state["proxy_current_id"] = "p1"
+        state["proxy_current_name"] = "Proxy 1"
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"id": "p2", "name": "Proxy 2", "proxy_url": "http://p2:8080", "enabled": True},
+                    ]
+                },
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["proxy_current_id"], "")
+        self.assertEqual(result["data"]["proxy_current_name"], "")
+
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "p1", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": True},
+        ]
+        state["proxy_last_used_id"] = "p1"
+        state["proxy_last_used_name"] = "Proxy 1"
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"id": "p2", "name": "Proxy 2", "proxy_url": "http://p2:8080", "enabled": True},
+                    ]
+                },
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["proxy_last_used_id"], "")
+        self.assertEqual(result["data"]["proxy_last_used_name"], "")
+
+
+    def test_proxy_list_refreshes_current_and_last_used_names_when_same_ids_are_renamed(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "p1", "name": "Old Current", "proxy_url": "http://p1:8080", "enabled": True},
+            {"id": "p2", "name": "Old Last", "proxy_url": "http://p2:8080", "enabled": True},
+        ]
+        state["proxy_current_id"] = "p1"
+        state["proxy_current_name"] = "Old Current"
+        state["proxy_last_used_id"] = "p2"
+        state["proxy_last_used_name"] = "Old Last"
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"id": "p1", "name": "New Current", "proxy_url": "http://p1:8080", "enabled": True},
+                        {"id": "p2", "name": "New Last", "proxy_url": "http://p2:8080", "enabled": True},
+                    ]
+                },
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["proxy_current_name"], "New Current")
+        self.assertEqual(result["data"]["proxy_last_used_name"], "New Last")
+
+
+
+
+    def test_proxy_select_clears_stale_proxy_last_error(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "p1", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": True},
+            {"id": "p2", "name": "Proxy 2", "proxy_url": "http://p2:8080", "enabled": True},
+        ]
+        state["proxy_last_error"] = "probe_failed"
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(self.service.handle_path("/proxy/select", payload={"proxy_id": "p2"}))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["proxy_last_error"], "")
+
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {
+                "id": "p1",
+                "name": "Proxy 1",
+                "proxy_url": "http://p1:8080",
+                "enabled": True,
+                "last_status": "ok",
+                "last_checked_at": "2026-03-21T00:00:00Z",
+                "last_success_at": "2026-03-21T00:00:00Z",
+                "last_failure_at": "",
+                "cooldown_until": "",
+                "failure_count": 0,
+            },
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        with patch.object(self.service, "_probe_proxy_target", return_value=(False, "probe_failed")):
+            result = asyncio.run(self.service.handle_path("/proxy/test", payload={"proxy_id": "p1"}))
+
+        self.assertTrue(result["success"])
+        row = result["data"]["proxy_pool"][0]
+        self.assertEqual(row["last_status"], "failed")
+        self.assertEqual(row["last_success_at"], "2026-03-21T00:00:00Z")
+        self.assertNotEqual(row["last_failure_at"], "")
+        self.assertEqual(row["failure_count"], 1)
+
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {
+                "id": "p1",
+                "name": "Proxy 1",
+                "proxy_url": "http://p1:8080",
+                "enabled": True,
+                "last_status": "failed",
+                "last_checked_at": "2026-03-21T00:00:00Z",
+                "last_success_at": "",
+                "last_failure_at": "2026-03-21T00:00:00Z",
+                "cooldown_until": "2026-03-21T00:01:00Z",
+                "failure_count": 3,
+            },
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {
+                            "id": "p1",
+                            "name": "Proxy 1 renamed",
+                            "proxy_url": "http://p1-new:8080",
+                            "enabled": True,
+                            "last_status": "ok",
+                            "last_checked_at": "fake-time",
+                            "last_success_at": "fake-time",
+                            "last_failure_at": "fake-time",
+                            "cooldown_until": "fake-time",
+                            "failure_count": 999,
+                        }
+                    ]
+                },
+            )
+        )
+
+        self.assertTrue(result["success"])
+        row = result["data"]["proxy_pool"][0]
+        self.assertEqual(row["name"], "Proxy 1 renamed")
+        self.assertEqual(row["proxy_url"], "http://p1-new:8080")
+        self.assertEqual(row["last_status"], "failed")
+        self.assertEqual(row["last_checked_at"], "2026-03-21T00:00:00Z")
+        self.assertEqual(row["last_failure_at"], "2026-03-21T00:00:00Z")
+        self.assertEqual(row["cooldown_until"], "2026-03-21T00:01:00Z")
+        self.assertEqual(row["failure_count"], 3)
+
+
 class StateStoreEnvContractRedTests(unittest.TestCase):
     def setUp(self):
         if MODULE_NAME in sys.modules:
@@ -1844,6 +2100,124 @@ class LoopRoundTests(ServiceTestCase):
             asyncio.run(self.service._run_loop_round(state))
 
         self.assertEqual(state["codex_total_persisted_accounts"], 4)
+
+
+class LoopProxySelectionTests(ServiceTestCase):
+    def _proxy_round_state(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        state["proxy_enabled"] = True
+        state["proxy_pool"] = [
+            {"id": "p1", "url": "http://p1:8080", "enabled": True},
+            {"id": "p2", "url": "http://p2:8080", "enabled": True},
+            {"id": "p3", "url": "http://p3:8080", "enabled": True},
+        ]
+        return state
+
+    def test_round_prefers_proxy_different_from_previous_round_proxy(self):
+        state = self._proxy_round_state()
+        state["proxy_rotation_cursor"] = 0
+        state["proxy_last_used_id"] = "p1"
+
+        with patch.object(self.service, "_probe_proxy_target", return_value=(True, "")) as probe_mock:
+            result = self.service._select_loop_proxy(state)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["proxy"]["id"], "p2")
+        self.assertEqual(probe_mock.call_args_list[0].args[0], "http://p2:8080")
+
+    def test_candidate_ordering_starts_from_proxy_rotation_cursor(self):
+        state = self._proxy_round_state()
+        state["proxy_rotation_cursor"] = 2
+        state["proxy_last_used_id"] = ""
+
+        with patch.object(self.service, "_probe_proxy_target", return_value=(True, "")) as probe_mock:
+            result = self.service._select_loop_proxy(state)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["proxy"]["id"], "p3")
+        self.assertEqual(probe_mock.call_args_list[0].args[0], "http://p3:8080")
+
+    def test_stable_ordered_polling_is_preserved_among_eligible_proxies(self):
+        state = self._proxy_round_state()
+        state["proxy_pool"].append({"id": "p4", "url": "http://p4:8080", "enabled": True})
+        state["proxy_rotation_cursor"] = 1
+        state["proxy_last_used_id"] = ""
+        state["proxy_pool"][2]["cooldown_until"] = "2999-01-01T00:00:00+00:00"
+
+        probe_results = {
+            "http://p2:8080": (False, "p2_down"),
+            "http://p4:8080": (False, "p4_down"),
+            "http://p1:8080": (True, ""),
+        }
+
+        with patch.object(self.service, "_probe_proxy_target", side_effect=lambda url: probe_results[url]) as probe_mock:
+            result = self.service._select_loop_proxy(state)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["proxy"]["id"], "p1")
+        self.assertEqual([call.args[0] for call in probe_mock.call_args_list], ["http://p2:8080", "http://p4:8080", "http://p1:8080"])
+
+    def test_failed_probe_moves_to_next_candidate(self):
+        state = self._proxy_round_state()
+        state["proxy_pool"] = [
+            {"id": "p1", "url": "http://p1:8080", "enabled": True},
+            {"id": "p2", "url": "http://p2:8080", "enabled": True},
+        ]
+        state["proxy_rotation_cursor"] = 0
+
+        with patch.object(self.service, "_probe_proxy_target", side_effect=[(False, "p1_down"), (True, "")]) as probe_mock:
+            result = self.service._select_loop_proxy(state)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["proxy"]["id"], "p2")
+        self.assertEqual([call.args[0] for call in probe_mock.call_args_list], ["http://p1:8080", "http://p2:8080"])
+
+    def test_failed_proxies_are_skipped_during_cooldown(self):
+        state = self._proxy_round_state()
+        state["proxy_pool"][0]["cooldown_until"] = "2999-01-01T00:00:00+00:00"
+
+        with patch.object(self.service, "_probe_proxy_target", return_value=(True, "")) as probe_mock:
+            result = self.service._select_loop_proxy(state)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["proxy"]["id"], "p2")
+        self.assertEqual([call.args[0] for call in probe_mock.call_args_list], ["http://p2:8080"])
+
+    def test_previous_round_proxy_is_only_retried_as_fallback(self):
+        state = self._proxy_round_state()
+        state["proxy_pool"].append({"id": "p4", "url": "http://p4:8080", "enabled": False})
+        state["proxy_rotation_cursor"] = 0
+        state["proxy_last_used_id"] = "p2"
+
+        probe_results = {
+            "http://p1:8080": (False, "p1_down"),
+            "http://p3:8080": (False, "p3_down"),
+            "http://p2:8080": (True, ""),
+        }
+
+        with patch.object(self.service, "_probe_proxy_target", side_effect=lambda url: probe_results[url]) as probe_mock:
+            result = self.service._select_loop_proxy(state)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["proxy"]["id"], "p2")
+        self.assertEqual([call.args[0] for call in probe_mock.call_args_list], ["http://p1:8080", "http://p3:8080", "http://p2:8080"])
+
+
+    def test_loop_round_updates_proxy_last_used_name(self):
+        state = self.service._default_state()
+        state["loop_running"] = True
+        state["proxy_enabled"] = True
+        state["proxy_pool"] = [
+            {"id": "p1", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": True},
+        ]
+
+        with patch.object(self.service, "_probe_proxy_target", return_value=(True, "")), \
+             patch.object(self.service, "_run_loop_process_once", new=AsyncMock(return_value=1)):
+            asyncio.run(self.service._run_loop_round(state))
+
+        self.assertEqual(state["proxy_last_used_id"], "p1")
+        self.assertEqual(state["proxy_last_used_name"], "Proxy 1")
 
 
 class LoopMutualExclusionTests(ServiceTestCase):

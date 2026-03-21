@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import importlib
 import json
@@ -17,6 +17,8 @@ import threading
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 
 LOGGER = logging.getLogger("codex_register")
@@ -69,7 +71,7 @@ class CodexRegisterService:
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
 
-        if path in {"/enable", "/resume", "/disable", "/loop/start", "/loop/stop"} and not self._is_authorized(payload):
+        if path in {"/enable", "/resume", "/disable", "/loop/start", "/loop/stop", "/proxy/select", "/proxy/test"} and not self._is_authorized(payload):
             return self._result(False, error="unauthorized")
 
         if path == "/status":
@@ -100,6 +102,18 @@ class CodexRegisterService:
 
         if path == "/loop/stop":
             return await self._handle_loop_stop()
+
+        if path == "/proxy/status":
+            return await self._handle_proxy_status()
+
+        if path == "/proxy/list":
+            return await self._handle_proxy_list(payload)
+
+        if path == "/proxy/select":
+            return await self._handle_proxy_select(payload)
+
+        if path == "/proxy/test":
+            return await self._handle_proxy_test(payload)
 
         return self._result(False, error=f"unsupported_path: {path}")
 
@@ -282,6 +296,159 @@ class CodexRegisterService:
 
         latest = await self._load_state()
         return self._result(True, data=latest)
+
+    async def _handle_proxy_status(self) -> Dict[str, Any]:
+        async with self._state_lock:
+            state = await self._load_state()
+            pool = state.get("proxy_pool")
+            if not isinstance(pool, list):
+                pool = []
+                state["proxy_pool"] = pool
+            if "proxy_enabled" not in state:
+                state["proxy_enabled"] = any(self._coerce_bool(item.get("enabled", True)) for item in pool if isinstance(item, dict))
+            return self._result(True, data=state)
+
+    def _normalize_proxy_pool(self, pool: Any) -> List[Dict[str, Any]]:
+        if not isinstance(pool, list):
+            return []
+        normalized_pool: List[Dict[str, Any]] = []
+        for item in pool:
+            if not isinstance(item, dict):
+                continue
+            proxy_id = str(item.get("id") or "").strip()
+            if not proxy_id:
+                continue
+            proxy_url = str(item.get("proxy_url") or item.get("url") or "").strip()
+            normalized_pool.append(
+                {
+                    "id": proxy_id,
+                    "name": str(item.get("name") or proxy_id).strip(),
+                    "proxy_url": proxy_url,
+                    "enabled": self._coerce_bool(item.get("enabled", True)),
+                    "last_status": "unknown",
+                    "last_checked_at": "",
+                    "last_success_at": "",
+                    "last_failure_at": "",
+                    "cooldown_until": "",
+                    "failure_count": 0,
+                }
+            )
+        return normalized_pool
+
+    def _merge_saved_proxy_runtime_metadata(
+        self,
+        previous_pool: Any,
+        current_pool: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(previous_pool, list):
+            return current_pool
+        previous_by_id: Dict[str, Dict[str, Any]] = {}
+        for item in previous_pool:
+            if not isinstance(item, dict):
+                continue
+            proxy_id = str(item.get("id") or "").strip()
+            if proxy_id:
+                previous_by_id[proxy_id] = item
+
+        merged: List[Dict[str, Any]] = []
+        for item in current_pool:
+            merged_item = dict(item)
+            previous = previous_by_id.get(str(merged_item.get("id") or ""))
+            if isinstance(previous, dict):
+                for field in (
+                    "last_status",
+                    "last_checked_at",
+                    "last_success_at",
+                    "last_failure_at",
+                    "cooldown_until",
+                    "failure_count",
+                ):
+                    merged_item[field] = previous.get(field, merged_item.get(field))
+            merged.append(merged_item)
+        return merged
+
+    async def _handle_proxy_list(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        async with self._state_lock:
+            state = await self._load_state()
+            previous_pool = state.get("proxy_pool")
+            state["proxy_pool"] = self._merge_saved_proxy_runtime_metadata(
+                previous_pool,
+                self._normalize_proxy_pool(payload.get("proxy_pool")),
+            )
+            if "proxy_enabled" in payload:
+                state["proxy_enabled"] = self._coerce_bool(payload.get("proxy_enabled"))
+            else:
+                state["proxy_enabled"] = any(item.get("enabled") for item in state["proxy_pool"])
+
+            current_id = str(state.get("proxy_current_id") or "")
+            last_used_id = str(state.get("proxy_last_used_id") or "")
+            current_match = next((item for item in state["proxy_pool"] if str(item.get("id") or "") == current_id), None)
+            last_used_match = next((item for item in state["proxy_pool"] if str(item.get("id") or "") == last_used_id), None)
+
+            if current_match is None:
+                state["proxy_current_id"] = ""
+                state["proxy_current_name"] = ""
+            else:
+                state["proxy_current_name"] = str(current_match.get("name") or current_id)
+
+            if last_used_match is None:
+                state["proxy_last_used_id"] = ""
+                state["proxy_last_used_name"] = ""
+            else:
+                state["proxy_last_used_name"] = str(last_used_match.get("name") or last_used_id)
+
+            await self._save_state(state)
+            return self._result(True, data=state)
+
+    async def _handle_proxy_select(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        proxy_id = str(payload.get("proxy_id") or "").strip()
+        async with self._state_lock:
+            state = await self._load_state()
+            pool = self._merge_saved_proxy_runtime_metadata(
+                state.get("proxy_pool"),
+                self._normalize_proxy_pool(state.get("proxy_pool")),
+            )
+            state["proxy_pool"] = pool
+            matched = next((item for item in pool if str(item.get("id") or "") == proxy_id and self._coerce_bool(item.get("enabled", True))), None)
+            if matched is None:
+                return self._result(False, data=state, error="proxy_not_found")
+            state["proxy_current_id"] = proxy_id
+            state["proxy_current_name"] = str(matched.get("name") or proxy_id)
+            state["proxy_last_error"] = ""
+            await self._save_state(state)
+            return self._result(True, data=state)
+
+    async def _handle_proxy_test(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        proxy_id = str(payload.get("proxy_id") or "").strip()
+        async with self._state_lock:
+            state = await self._load_state()
+            previous_pool = state.get("proxy_pool")
+            pool = self._merge_saved_proxy_runtime_metadata(
+                previous_pool,
+                self._normalize_proxy_pool(state.get("proxy_pool")),
+            )
+            state["proxy_pool"] = pool
+            matched = next((item for item in pool if str(item.get("id") or "") == proxy_id), None)
+            if matched is None:
+                return self._result(False, data=state, error="proxy_not_found")
+            checked_at = self._now_iso()
+            ok, error = self._probe_proxy_target(str(matched.get("proxy_url") or ""))
+            matched["last_checked_at"] = checked_at
+            state["proxy_last_checked_at"] = checked_at
+            if ok:
+                matched["last_status"] = "ok"
+                matched["last_success_at"] = checked_at
+                matched["last_failure_at"] = ""
+                matched["failure_count"] = 0
+                matched["cooldown_until"] = ""
+                state["proxy_last_error"] = ""
+            else:
+                matched["last_status"] = "failed"
+                matched["last_failure_at"] = checked_at
+                matched["failure_count"] = int(matched.get("failure_count") or 0) + 1
+                state["proxy_last_error"] = error or "probe_failed"
+            await self._save_state(state)
+            return self._result(True, data=state)
 
     async def _handle_loop_status(self) -> Dict[str, Any]:
         async with self._state_lock:
@@ -467,6 +634,17 @@ class CodexRegisterService:
             "loop_last_error",
             "loop_history",
             "loop_committed_accounts_jsonl_offset",
+            "proxy_current_id",
+            "proxy_last_used_id",
+            "proxy_last_checked_at",
+            "proxy_last_error",
+            "proxy_rotation_cursor",
+            "proxy_last_switch_reason",
+            "loop_current_proxy_id",
+            "loop_current_proxy_name",
+            "loop_last_proxy_id",
+            "loop_last_proxy_name",
+            "loop_last_switch_reason",
         ):
             if key in round_state:
                 value = round_state.get(key)
@@ -474,6 +652,53 @@ class CodexRegisterService:
                     target_state[key] = [dict(item) if isinstance(item, dict) else item for item in value]
                 else:
                     target_state[key] = value
+
+        self._merge_loop_proxy_pool_state(target_state, round_state)
+
+    def _merge_loop_proxy_pool_state(self, target_state: Dict[str, Any], round_state: Dict[str, Any]) -> None:
+        round_pool_raw = round_state.get("proxy_pool")
+        if not isinstance(round_pool_raw, list):
+            return
+
+        target_pool_raw = target_state.get("proxy_pool")
+        if not isinstance(target_pool_raw, list):
+            target_state["proxy_pool"] = [dict(item) if isinstance(item, dict) else item for item in round_pool_raw]
+            return
+
+        round_by_id: Dict[str, Dict[str, Any]] = {}
+        for item in round_pool_raw:
+            if not isinstance(item, dict):
+                continue
+            proxy_id = str(item.get("id") or "").strip()
+            if not proxy_id:
+                continue
+            round_by_id[proxy_id] = item
+
+        telemetry_fields = (
+            "last_status",
+            "last_checked_at",
+            "last_success_at",
+            "last_failure_at",
+            "cooldown_until",
+            "failure_count",
+        )
+
+        merged_pool: List[Any] = []
+        for target_item in target_pool_raw:
+            if not isinstance(target_item, dict):
+                merged_pool.append(target_item)
+                continue
+
+            merged_item = dict(target_item)
+            proxy_id = str(merged_item.get("id") or "").strip()
+            round_item = round_by_id.get(proxy_id)
+            if isinstance(round_item, dict):
+                for field in telemetry_fields:
+                    if field in round_item:
+                        merged_item[field] = round_item.get(field)
+            merged_pool.append(merged_item)
+
+        target_state["proxy_pool"] = merged_pool
 
     async def _finalize_loop_worker_shutdown(self, generation: int) -> None:
         async with self._state_lock:
@@ -568,12 +793,191 @@ class CodexRegisterService:
 
         return False
 
-    def _spawn_process(self, command: List[str]) -> Tuple[Optional[Any], str]:
+    def _parse_iso_datetime(self, value: Any) -> Optional[datetime]:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        candidate = raw.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _proxy_is_in_cooldown(self, proxy_item: Dict[str, Any], *, now: Optional[datetime] = None) -> bool:
+        now = now or datetime.now(timezone.utc)
+        cooldown_until = self._parse_iso_datetime(proxy_item.get("cooldown_until"))
+        if cooldown_until is None:
+            return False
+        return cooldown_until > now
+
+    def _probe_loop_proxy(self, proxy_item: Dict[str, Any]) -> Tuple[bool, str]:
+        proxy_url = str(proxy_item.get("proxy_url") or "").strip()
+        if not proxy_url:
+            return False, "proxy_url_missing"
+
+        target_url = "https://chatgpt.com"
+        proxy_handler = urllib_request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        opener = urllib_request.build_opener(proxy_handler)
+        request = urllib_request.Request(target_url, method="GET")
+        try:
+            with opener.open(request, timeout=8) as response:
+                status_code = int(getattr(response, "status", 0) or 0)
+            if 200 <= status_code < 500:
+                return True, ""
+            return False, f"probe_http_{status_code}"
+        except urllib_error.HTTPError as exc:
+            status_code = int(getattr(exc, "code", 0) or 0)
+            if 200 <= status_code < 500:
+                return True, ""
+            return False, f"probe_http_{status_code}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _select_loop_proxy_for_round(self, state: Dict[str, Any]) -> Tuple[Optional[Dict[str, str]], str]:
+        if not self._coerce_bool(state.get("proxy_enabled")):
+            state["loop_current_proxy_id"] = ""
+            state["loop_current_proxy_name"] = ""
+            return None, "no_available_proxy"
+
+        raw_pool = state.get("proxy_pool")
+        if not isinstance(raw_pool, list) or not raw_pool:
+            state["loop_current_proxy_id"] = ""
+            state["loop_current_proxy_name"] = ""
+            return None, "no_available_proxy"
+
+        pool: List[Dict[str, Any]] = [dict(item) for item in raw_pool if isinstance(item, dict)]
+        if not pool:
+            state["loop_current_proxy_id"] = ""
+            state["loop_current_proxy_name"] = ""
+            return None, "no_available_proxy"
+
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        last_used_id = str(state.get("proxy_last_used_id") or "").strip()
+        cursor = int(state.get("proxy_rotation_cursor") or 0)
+        if cursor < 0:
+            cursor = 0
+
+        ordered_indices: List[int] = []
+        total = len(pool)
+        for offset in range(total):
+            ordered_indices.append((cursor + offset) % total)
+
+        eligible_indices: List[int] = []
+        for index in ordered_indices:
+            item = pool[index]
+            if not self._coerce_bool(item.get("enabled", True)):
+                continue
+            if not str(item.get("proxy_url") or "").strip():
+                continue
+            if self._proxy_is_in_cooldown(item, now=now):
+                item["last_status"] = "cooldown"
+                continue
+            eligible_indices.append(index)
+
+        if not eligible_indices:
+            state["proxy_pool"] = pool
+            state["proxy_last_checked_at"] = now_iso
+            state["proxy_last_error"] = "no_available_proxy"
+            state["loop_current_proxy_id"] = ""
+            state["loop_current_proxy_name"] = ""
+            return None, "no_available_proxy"
+
+        preferred_indices = [idx for idx in eligible_indices if str(pool[idx].get("id") or "").strip() != last_used_id]
+        fallback_indices = [idx for idx in eligible_indices if idx not in preferred_indices]
+        candidate_indices = preferred_indices + fallback_indices
+
+        selected_idx: Optional[int] = None
+        probe_error = ""
+        for idx in candidate_indices:
+            item = pool[idx]
+            probe_ok, probe_error = self._probe_proxy_target(str(item.get("proxy_url") or ""))
+            item["last_checked_at"] = now_iso
+            if probe_ok:
+                item["last_status"] = "ok"
+                item["last_success_at"] = now_iso
+                item["failure_count"] = 0
+                item["cooldown_until"] = ""
+                selected_idx = idx
+                break
+
+            item["last_status"] = "failed"
+            item["last_failure_at"] = now_iso
+            item["failure_count"] = int(item.get("failure_count") or 0) + 1
+            item["cooldown_until"] = (now + timedelta(seconds=60)).isoformat()
+
+        state["proxy_pool"] = pool
+        state["proxy_last_checked_at"] = now_iso
+
+        if selected_idx is None:
+            state["proxy_last_error"] = probe_error or "no_available_proxy"
+            state["loop_current_proxy_id"] = ""
+            state["loop_current_proxy_name"] = ""
+            return None, "no_available_proxy"
+
+        selected = pool[selected_idx]
+        selected_id = str(selected.get("id") or "").strip()
+        selected_name = str(selected.get("name") or selected_id).strip()
+        previous_used_id = str(state.get("proxy_last_used_id") or "").strip()
+
+        state["proxy_current_id"] = selected_id
+        state["proxy_current_name"] = selected_name
+        state["proxy_last_error"] = ""
+        state["proxy_rotation_cursor"] = (selected_idx + 1) % len(pool)
+        if not previous_used_id:
+            state["proxy_last_switch_reason"] = "initial_selection"
+        elif previous_used_id != selected_id:
+            state["proxy_last_switch_reason"] = "rotation_prefer_different_proxy"
+        else:
+            state["proxy_last_switch_reason"] = "fallback_previous_proxy"
+
+        state["loop_current_proxy_id"] = selected_id
+        state["loop_current_proxy_name"] = selected_name
+
+        return {
+            "id": selected_id,
+            "name": selected_name,
+            "proxy_url": str(selected.get("proxy_url") or "").strip(),
+        }, ""
+
+    def _probe_proxy_target(self, proxy_url: str) -> Tuple[bool, str]:
+        return self._probe_loop_proxy({"proxy_url": proxy_url})
+
+    def _select_loop_proxy(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        raw_pool = state.get("proxy_pool")
+        normalized_pool: List[Dict[str, Any]] = []
+        if isinstance(raw_pool, list):
+            for item in raw_pool:
+                if not isinstance(item, dict):
+                    continue
+                normalized = dict(item)
+                if not normalized.get("proxy_url") and normalized.get("url"):
+                    normalized["proxy_url"] = normalized.get("url")
+                normalized_pool.append(normalized)
+        state["proxy_pool"] = normalized_pool
+        selected, error = self._select_loop_proxy_for_round(state)
+        if selected is None:
+            return {"ok": False, "error": error, "proxy": None}
+        return {"ok": True, "error": "", "proxy": selected}
+
+    def _spawn_process(self, command: List[str], env_overrides: Optional[Dict[str, str]] = None) -> Tuple[Optional[Any], str]:
+        child_env = None
+        if isinstance(env_overrides, dict) and env_overrides:
+            child_env = dict(os.environ)
+            for key, value in env_overrides.items():
+                normalized_key = str(key or "").strip()
+                if not normalized_key:
+                    continue
+                child_env[normalized_key] = str(value or "")
         try:
             process = subprocess.Popen(
                 command,
                 cwd=str(self._base_dir),
                 text=True,
+                env=child_env,
             )
             return process, ""
         except Exception as exc:
@@ -1587,76 +1991,112 @@ class CodexRegisterService:
             "failed": 0,
             "summary": None,
             "error": "",
+            "proxy_id": "",
+            "proxy_name": "",
         }
         summary: Optional[Dict[str, Any]] = None
 
-        try:
-            return_code = await self._run_loop_process_once(generation)
-            if self._loop_stop_event.is_set() and return_code != 0:
-                history_entry["status"] = "stopped"
-                summary = {
-                    "start_offset": int(state.get("loop_committed_accounts_jsonl_offset") or 0),
-                    "end_offset": int(state.get("loop_committed_accounts_jsonl_offset") or 0),
-                    "records_seen": 0,
-                    "created": 0,
-                    "updated": 0,
-                    "skipped": 0,
-                    "failed": 0,
-                    "errors": [],
-                }
-            elif return_code != 0:
-                raise RuntimeError(f"gpt_team_new_exit_{return_code}")
-            else:
-                summary = self._process_loop_accounts_jsonl_round(state)
-                if int(summary.get("failed") or 0) > 0:
-                    raise RuntimeError("loop_accounts_processing_failed")
-                history_entry["status"] = "success"
-                state["loop_last_error"] = ""
-                state["loop_committed_accounts_jsonl_offset"] = int(summary.get("end_offset") or state.get("loop_committed_accounts_jsonl_offset") or 0)
-                state["loop_last_round_created"] = int(summary.get("created") or 0)
-                state["loop_last_round_updated"] = int(summary.get("updated") or 0)
-                state["loop_last_round_skipped"] = int(summary.get("skipped") or 0)
-                state["loop_last_round_failed"] = int(summary.get("failed") or 0)
-                state["loop_total_created"] = int(state.get("loop_total_created") or 0) + int(summary.get("created") or 0)
-                state["codex_total_persisted_accounts"] = int(state.get("codex_total_persisted_accounts") or 0) + int(summary.get("created") or 0)
+        proxy_enabled = self._coerce_bool(state.get("proxy_enabled"))
+        selected_proxy: Optional[Dict[str, str]] = None
+        if proxy_enabled:
+            selected_proxy, selection_error = self._select_loop_proxy_for_round(state)
+            if selected_proxy is None:
+                state["loop_last_error"] = selection_error or "no_available_proxy"
+                state["loop_last_round_created"] = 0
+                state["loop_last_round_updated"] = 0
+                state["loop_last_round_skipped"] = 0
+                state["loop_last_round_failed"] = 1
+                history_entry["status"] = "failed"
+                history_entry["error"] = state["loop_last_error"]
+                history_entry["failed"] = 1
+        else:
+            state["loop_current_proxy_id"] = ""
+            state["loop_current_proxy_name"] = ""
 
-            history_entry["created"] = int(summary.get("created") or 0)
-            history_entry["updated"] = int(summary.get("updated") or 0)
-            history_entry["skipped"] = int(summary.get("skipped") or 0)
-            history_entry["failed"] = int(summary.get("failed") or 0)
-            history_entry["summary"] = dict(summary)
-        except Exception as exc:
-            history_entry["status"] = "stopped" if self._loop_stop_event.is_set() else "failed"
-            history_entry["error"] = str(exc)
-            state["loop_last_error"] = str(exc)
-            if isinstance(summary, dict):
+        if (not proxy_enabled) or selected_proxy is not None:
+            if selected_proxy is not None:
+                history_entry["proxy_id"] = str(selected_proxy.get("id") or "")
+                history_entry["proxy_name"] = str(selected_proxy.get("name") or "")
+                env_overrides: Optional[Dict[str, str]] = {"REGISTER_PROXY_URL": str(selected_proxy.get("proxy_url") or "")}
+            else:
+                env_overrides = None
+
+            try:
+                return_code = await self._run_loop_process_once(generation, env_overrides)
+                if self._loop_stop_event.is_set() and return_code != 0:
+                    history_entry["status"] = "stopped"
+                    summary = {
+                        "start_offset": int(state.get("loop_committed_accounts_jsonl_offset") or 0),
+                        "end_offset": int(state.get("loop_committed_accounts_jsonl_offset") or 0),
+                        "records_seen": 0,
+                        "created": 0,
+                        "updated": 0,
+                        "skipped": 0,
+                        "failed": 0,
+                        "errors": [],
+                    }
+                elif return_code != 0:
+                    raise RuntimeError(f"gpt_team_new_exit_{return_code}")
+                else:
+                    summary = self._process_loop_accounts_jsonl_round(state)
+                    if int(summary.get("failed") or 0) > 0:
+                        raise RuntimeError("loop_accounts_processing_failed")
+                    history_entry["status"] = "success"
+                    state["loop_last_error"] = ""
+                    state["loop_committed_accounts_jsonl_offset"] = int(summary.get("end_offset") or state.get("loop_committed_accounts_jsonl_offset") or 0)
+                    state["loop_last_round_created"] = int(summary.get("created") or 0)
+                    state["loop_last_round_updated"] = int(summary.get("updated") or 0)
+                    state["loop_last_round_skipped"] = int(summary.get("skipped") or 0)
+                    state["loop_last_round_failed"] = int(summary.get("failed") or 0)
+                    state["loop_total_created"] = int(state.get("loop_total_created") or 0) + int(summary.get("created") or 0)
+                    state["codex_total_persisted_accounts"] = int(state.get("codex_total_persisted_accounts") or 0) + int(summary.get("created") or 0)
+
                 history_entry["created"] = int(summary.get("created") or 0)
                 history_entry["updated"] = int(summary.get("updated") or 0)
                 history_entry["skipped"] = int(summary.get("skipped") or 0)
                 history_entry["failed"] = int(summary.get("failed") or 0)
                 history_entry["summary"] = dict(summary)
-                state["loop_last_round_created"] = int(summary.get("created") or 0)
-                state["loop_last_round_updated"] = int(summary.get("updated") or 0)
-                state["loop_last_round_skipped"] = int(summary.get("skipped") or 0)
-                state["loop_last_round_failed"] = int(summary.get("failed") or 0)
-            else:
-                state["loop_last_round_created"] = 0
-                state["loop_last_round_updated"] = 0
-                state["loop_last_round_skipped"] = 0
-                state["loop_last_round_failed"] = 1
-        finally:
-            finished_at = self._now_iso()
-            state["loop_last_round_finished_at"] = finished_at
-            history_entry["finished_at"] = finished_at
-            history = list(state.get("loop_history") or [])
-            history.append(history_entry)
-            state["loop_history"] = history[-20:]
+            except Exception as exc:
+                history_entry["status"] = "stopped" if self._loop_stop_event.is_set() else "failed"
+                history_entry["error"] = str(exc)
+                state["loop_last_error"] = str(exc)
+                if isinstance(summary, dict):
+                    history_entry["created"] = int(summary.get("created") or 0)
+                    history_entry["updated"] = int(summary.get("updated") or 0)
+                    history_entry["skipped"] = int(summary.get("skipped") or 0)
+                    history_entry["failed"] = int(summary.get("failed") or 0)
+                    history_entry["summary"] = dict(summary)
+                    state["loop_last_round_created"] = int(summary.get("created") or 0)
+                    state["loop_last_round_updated"] = int(summary.get("updated") or 0)
+                    state["loop_last_round_skipped"] = int(summary.get("skipped") or 0)
+                    state["loop_last_round_failed"] = int(summary.get("failed") or 0)
+                else:
+                    state["loop_last_round_created"] = 0
+                    state["loop_last_round_updated"] = 0
+                    state["loop_last_round_skipped"] = 0
+                    state["loop_last_round_failed"] = 1
+
+        if selected_proxy is not None:
+            selected_id = str(selected_proxy.get("id") or "")
+            selected_name = str(selected_proxy.get("name") or "")
+            state["proxy_last_used_id"] = selected_id
+            state["proxy_last_used_name"] = selected_name
+            state["loop_last_proxy_id"] = selected_id
+            state["loop_last_proxy_name"] = selected_name
+            state["loop_last_switch_reason"] = str(state.get("proxy_last_switch_reason") or "")
+
+        finished_at = self._now_iso()
+        state["loop_last_round_finished_at"] = finished_at
+        history_entry["finished_at"] = finished_at
+        history = list(state.get("loop_history") or [])
+        history.append(history_entry)
+        state["loop_history"] = history[-20:]
 
         return history_entry
 
-    async def _run_loop_process_once(self, generation: Optional[int] = None) -> int:
+    async def _run_loop_process_once(self, generation: Optional[int] = None, env_overrides: Optional[Dict[str, str]] = None) -> int:
         command = [sys.executable, str(self._base_dir / "gpt-team-new.py")]
-        process, error = self._spawn_process(command)
+        process, error = self._spawn_process(command, env_overrides=env_overrides)
         if error or process is None:
             raise RuntimeError(error or "loop_spawn_failed")
 
@@ -1818,6 +2258,16 @@ class CodexRegisterService:
             "codex_total_persisted_accounts": 0,
             "last_success": "",
             "last_error": "",
+            "proxy_enabled": False,
+            "proxy_pool": [],
+            "proxy_current_id": "",
+            "proxy_last_used_id": "",
+            "proxy_last_checked_at": "",
+            "proxy_last_error": "",
+            "proxy_rotation_cursor": 0,
+            "proxy_last_switch_reason": "",
+            "proxy_current_name": "",
+            "proxy_last_used_name": "",
             "proxy": "",
             "job_phase": "idle",
             "workflow_id": self.workflow_id,
@@ -1850,6 +2300,11 @@ class CodexRegisterService:
             "loop_last_error": "",
             "loop_history": [],
             "loop_committed_accounts_jsonl_offset": 0,
+            "loop_current_proxy_id": "",
+            "loop_current_proxy_name": "",
+            "loop_last_proxy_id": "",
+            "loop_last_proxy_name": "",
+            "loop_last_switch_reason": "",
         }
 
     def _is_authorized(self, payload: Dict[str, Any]) -> bool:
@@ -1913,8 +2368,8 @@ async def run_http(service: CodexRegisterService, *, host: str, port: int) -> No
 
 def build_http_handler(service: CodexRegisterService):
     method_allowlist = {
-        "GET": {"/status", "/logs", "/accounts", "/loop/status"},
-        "POST": {"/enable", "/resume", "/disable", "/loop/start", "/loop/stop"},
+        "GET": {"/status", "/logs", "/accounts", "/loop/status", "/proxy/status", "/proxy/list"},
+        "POST": {"/enable", "/resume", "/disable", "/loop/start", "/loop/stop", "/proxy/select", "/proxy/test"},
     }
 
     class CodexRegisterHTTPRequestHandler(BaseHTTPRequestHandler):

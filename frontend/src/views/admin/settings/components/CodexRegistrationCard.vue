@@ -60,6 +60,7 @@
             <button
               type="button"
               class="btn btn-secondary"
+              data-testid="codex-refresh-action"
               :disabled="refreshing || loading || loopActionLoading !== null"
               @click="refreshAll"
             >
@@ -423,17 +424,17 @@
         data-testid="codex-proxy-panel"
       >
         <div class="flex flex-wrap items-center justify-between gap-3">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Proxy pool</h3>
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t("admin.codexRegister.proxyPool.title") }}</h3>
           <span
             class="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300"
             data-testid="codex-proxy-available-count"
           >
-            Available: {{ proxyAvailableCount }}
+            {{ t("admin.codexRegister.proxyPool.available", { count: proxyAvailableCount }) }}
           </span>
         </div>
 
         <p class="mt-2 text-xs text-gray-500 dark:text-gray-400" data-testid="codex-proxy-last-error">
-          Last proxy error: {{ proxyLastErrorLabel }}
+          {{ t("admin.codexRegister.proxyPool.lastError", { error: proxyLastErrorLabel }) }}
         </p>
 
         <div class="mt-4 space-y-3">
@@ -445,7 +446,7 @@
               :disabled="Boolean(proxyActionLoading) || proxyDraftEnabled"
               @click="setProxyEnabled(true)"
             >
-              Enable proxy routing
+              {{ t("admin.codexRegister.proxyPool.enableAction") }}
             </button>
             <button
               type="button"
@@ -454,7 +455,7 @@
               :disabled="Boolean(proxyActionLoading) || !proxyDraftEnabled"
               @click="setProxyEnabled(false)"
             >
-              Disable proxy routing
+              {{ t("admin.codexRegister.proxyPool.disableAction") }}
             </button>
           </div>
 
@@ -463,8 +464,9 @@
               v-model="proxyDraftEnabled"
               type="checkbox"
               class="rounded border-gray-300"
+              @change="proxyDraftDirty = true"
             />
-            Enable proxy routing
+            {{ t("admin.codexRegister.proxyPool.enableRouting") }}
           </label>
 
           <div
@@ -482,12 +484,14 @@
                 v-model.trim="entry.name"
                 type="text"
                 class="input input-sm"
+                @input="proxyDraftDirty = true"
               />
               <input
                 :data-testid="`codex-proxy-url-input-${entry.id || index}`"
                 v-model.trim="entry.proxy_url"
                 type="text"
                 class="input input-sm"
+                @input="proxyDraftDirty = true"
               />
               <label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
                 <input
@@ -495,18 +499,19 @@
                   v-model="entry.enabled"
                   type="checkbox"
                   class="rounded border-gray-300"
+                  @change="proxyDraftDirty = true"
                 />
-                enabled
+                {{ t("admin.codexRegister.proxyPool.enabledLabel") }}
               </label>
             </div>
 
             <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              <span>Status: {{ proxyStatusText(proxyStatusById(entry.id)?.last_status || "unknown") }}</span>
+              <span>{{ t("admin.codexRegister.proxyPool.statusLabel", { status: proxyStatusText(proxyStatusById(entry.id)?.last_status || "unknown") }) }}</span>
               <span v-if="proxyStatusById(entry.id)?.cooldown_until">
-                Cooldown: {{ proxyStatusById(entry.id)?.cooldown_until }}
+                {{ t("admin.codexRegister.proxyPool.cooldownLabel", { value: proxyStatusById(entry.id)?.cooldown_until }) }}
               </span>
               <span v-if="proxyStatusById(entry.id)?.failure_count">
-                Failed: {{ proxyStatusById(entry.id)?.failure_count }}
+                {{ t("admin.codexRegister.proxyPool.failedLabel", { count: proxyStatusById(entry.id)?.failure_count }) }}
               </span>
             </div>
 
@@ -518,7 +523,7 @@
                 :disabled="Boolean(proxyActionLoading)"
                 @click="testProxyById(entry.id || '')"
               >
-                Test
+                {{ t("admin.codexRegister.proxyPool.testAction") }}
               </button>
               <button
                 type="button"
@@ -526,7 +531,7 @@
                 :disabled="Boolean(proxyActionLoading)"
                 @click="selectProxyById(entry.id || '')"
               >
-                Select
+                {{ t("admin.codexRegister.proxyPool.selectAction") }}
               </button>
             </div>
           </div>
@@ -540,7 +545,7 @@
             :disabled="Boolean(proxyActionLoading)"
             @click="saveProxyList"
           >
-            Save proxy pool
+            {{ t("admin.codexRegister.proxyPool.saveAction") }}
           </button>
         </div>
       </section>
@@ -1341,11 +1346,13 @@ const proxyLastErrorLabel = computed(
 );
 
 function proxyStatusText(value: string): string {
-  if (value === "ok") return "ok";
-  if (value === "failed") return "failed";
-  if (value === "cooldown") return "cooldown";
-  return "unknown";
+  if (value === "ok") return t("admin.codexRegister.proxyPool.statusValue.ok");
+  if (value === "failed") return t("admin.codexRegister.proxyPool.statusValue.failed");
+  if (value === "cooldown") return t("admin.codexRegister.proxyPool.statusValue.cooldown");
+  return t("admin.codexRegister.proxyPool.statusValue.unknown");
 }
+
+const proxyDraftDirty = ref(false);
 
 function proxyStatusById(proxyId?: string): CodexProxyStatus["proxy_pool"][number] | undefined {
   if (!proxyId) {
@@ -1362,6 +1369,7 @@ function syncProxyDraft(next: CodexProxyStatus) {
     proxy_url: entry.proxy_url,
     enabled: entry.enabled,
   }));
+  proxyDraftDirty.value = false;
 }
 
 const canStart = computed(() => Boolean(status.value?.can_start));
@@ -1671,7 +1679,9 @@ async function fetchProxyStatus() {
     const next = await adminAPI.codex.getProxyStatus();
     proxyStatus.value = next;
     proxyError.value = null;
-    syncProxyDraft(next);
+    if (!proxyDraftDirty.value) {
+      syncProxyDraft(next);
+    }
   } catch (errorValue) {
     proxyError.value = getErrorMessage(errorValue);
   }

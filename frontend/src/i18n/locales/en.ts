@@ -1094,6 +1094,27 @@ export default {
         email: 'Target Email',
         missingResumeContextHint: 'Missing resume_context.email or resume_context.access_token_raw.'
       },
+      proxyPool: {
+        title: 'Proxy Pool',
+        available: 'Available Proxies: {count}',
+        lastError: 'Last Proxy Error: {error}',
+        enableAction: 'Enable Proxy Routing',
+        disableAction: 'Disable Proxy Routing',
+        enableRouting: 'Enable Proxy Routing',
+        enabledLabel: 'Enabled',
+        statusLabel: 'Status: {status}',
+        cooldownLabel: 'Cooldown: {value}',
+        failedLabel: 'Failed: {count}',
+        testAction: 'Test Proxy',
+        selectAction: 'Select Proxy',
+        saveAction: 'Save Proxy Pool',
+        statusValue: {
+          ok: 'Healthy',
+          failed: 'Failed',
+          cooldown: 'Cooldown',
+          unknown: 'Unknown'
+        }
+      },
       loop: {
         title: 'Loop Control',
         actions: {

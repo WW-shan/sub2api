@@ -300,12 +300,16 @@ func registerCodexRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		codex.GET("/logs", h.Admin.Codex.GetLogs)
 		codex.GET("/accounts", h.Admin.Codex.GetAccounts)
 		codex.GET("/loop/status", h.Admin.Codex.GetLoopStatus)
+		codex.GET("/proxy/status", h.Admin.Codex.GetProxyStatus)
 		codex.POST("/enable", h.Admin.Codex.Enable)
 		codex.POST("/disable", h.Admin.Codex.Disable)
 		codex.POST("/resume", h.Admin.Codex.Resume)
 		codex.POST("/retry", h.Admin.Codex.Retry)
 		codex.POST("/loop/start", h.Admin.Codex.StartLoop)
 		codex.POST("/loop/stop", h.Admin.Codex.StopLoop)
+		codex.POST("/proxy/list", h.Admin.Codex.SaveProxyList)
+		codex.POST("/proxy/select", h.Admin.Codex.SelectProxy)
+		codex.POST("/proxy/test", h.Admin.Codex.TestProxy)
 	}
 }
 

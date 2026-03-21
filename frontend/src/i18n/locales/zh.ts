@@ -1129,6 +1129,27 @@ export default {
         email: '目标邮箱',
         missingResumeContextHint: '缺少 resume_context.email 或 resume_context.access_token_raw。'
       },
+      proxyPool: {
+        title: '代理池',
+        available: '可用代理：{count}',
+        lastError: '最近代理错误：{error}',
+        enableAction: '启用代理路由',
+        disableAction: '禁用代理路由',
+        enableRouting: '启用代理路由',
+        enabledLabel: '启用',
+        statusLabel: '状态：{status}',
+        cooldownLabel: '冷却至：{value}',
+        failedLabel: '失败次数：{count}',
+        testAction: '测试代理',
+        selectAction: '选为当前代理',
+        saveAction: '保存代理池',
+        statusValue: {
+          ok: '健康',
+          failed: '失败',
+          cooldown: '冷却中',
+          unknown: '未知'
+        }
+      },
       loop: {
         title: '循环执行控制',
         actions: {

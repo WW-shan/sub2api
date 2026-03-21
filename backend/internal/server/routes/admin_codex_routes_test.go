@@ -1,8 +1,10 @@
 package routes
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler"
@@ -191,5 +193,161 @@ func TestRegisterCodexRoutesIncludesLoopStopEndpoint(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	require.NotEqual(t, http.StatusNotFound, w.Code)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRegisterCodexRoutesIncludesProxyStatusEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/proxy/status" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"enabled":true}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{Codex: adminhandler.NewCodexHandler()},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/codex/proxy/status", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRegisterCodexRoutesIncludesProxyListEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/proxy/list" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{Codex: adminhandler.NewCodexHandler()},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/codex/proxy/list", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRegisterCodexRoutesIncludesProxySelectEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/proxy/select" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{Codex: adminhandler.NewCodexHandler()},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/codex/proxy/select", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRegisterCodexRoutesIncludesProxyTestEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/proxy/test" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{Codex: adminhandler.NewCodexHandler()},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/codex/proxy/test", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRegisterCodexRoutesForwardsProxyPostBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	expectedBody := `{"proxy_id":"proxy-1"}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/proxy/select" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		actualBody, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.JSONEq(t, expectedBody, string(actualBody))
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("CODEX_REGISTER_BASE_URL", upstream.URL)
+
+	router := gin.New()
+	adminGroup := router.Group("/admin")
+	registerCodexRoutes(adminGroup, &handler.Handlers{
+		Admin: &handler.AdminHandlers{Codex: adminhandler.NewCodexHandler()},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/codex/proxy/select", strings.NewReader(expectedBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
 	require.Equal(t, http.StatusOK, w.Code)
 }

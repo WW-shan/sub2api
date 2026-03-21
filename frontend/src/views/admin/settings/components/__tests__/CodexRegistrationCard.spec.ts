@@ -274,7 +274,23 @@ vi.mock('vue-i18n', async (importOriginal) => {
     'admin.codexRegister.loop.history.status.running': '运行中',
     'admin.codexRegister.loop.history.status.success': '成功',
     'admin.codexRegister.loop.history.status.failed': '失败',
-    'admin.codexRegister.loop.history.status.stopped': '已停止'
+    'admin.codexRegister.proxyPool.title': 'Proxy Pool',
+    'admin.codexRegister.proxyPool.available': 'Available Proxies: {count}',
+    'admin.codexRegister.proxyPool.lastError': 'Last Proxy Error: {error}',
+    'admin.codexRegister.proxyPool.enableAction': 'Enable Proxy Routing',
+    'admin.codexRegister.proxyPool.disableAction': 'Disable Proxy Routing',
+    'admin.codexRegister.proxyPool.enableRouting': 'Enable Proxy Routing',
+    'admin.codexRegister.proxyPool.enabledLabel': 'Enabled',
+    'admin.codexRegister.proxyPool.statusLabel': 'Status: {status}',
+    'admin.codexRegister.proxyPool.cooldownLabel': 'Cooldown: {value}',
+    'admin.codexRegister.proxyPool.failedLabel': 'Failed: {count}',
+    'admin.codexRegister.proxyPool.testAction': 'Test Proxy',
+    'admin.codexRegister.proxyPool.selectAction': 'Select Proxy',
+    'admin.codexRegister.proxyPool.saveAction': 'Save Proxy Pool',
+    'admin.codexRegister.proxyPool.statusValue.ok': 'Healthy',
+    'admin.codexRegister.proxyPool.statusValue.failed': 'Failed',
+    'admin.codexRegister.proxyPool.statusValue.cooldown': 'Cooldown',
+    'admin.codexRegister.proxyPool.statusValue.unknown': 'Unknown',
   }
 
   return {
@@ -317,8 +333,21 @@ vi.mock('vue-i18n', async (importOriginal) => {
         if (key === 'admin.codexRegister.loop.history.timeRange' && params) {
           return `开始：${params.startedAt} · 结束：${params.finishedAt}`
         }
-        if (key === 'admin.codexRegister.debug.resumeGateBlocked' && params) {
-          return `Resume gate blocked: ${params.reason}`
+
+        if (key === 'admin.codexRegister.proxyPool.available' && params) {
+          return `Available Proxies: ${params.count}`
+        }
+        if (key === 'admin.codexRegister.proxyPool.lastError' && params) {
+          return `Last Proxy Error: ${params.error}`
+        }
+        if (key === 'admin.codexRegister.proxyPool.statusLabel' && params) {
+          return `Status: ${params.status}`
+        }
+        if (key === 'admin.codexRegister.proxyPool.cooldownLabel' && params) {
+          return `Cooldown: ${params.value}`
+        }
+        if (key === 'admin.codexRegister.proxyPool.failedLabel' && params) {
+          return `Failed: ${params.count}`
         }
         return messages[key] ?? key
       }
@@ -1591,7 +1620,48 @@ describe('CodexRegistrationCard', () => {
     expect(historyRows[1].text()).toContain('成功')
   })
 
-  it('renders proxy pool rows from API data', async () => {
+  it('renders localized proxy panel labels and preserves unsaved proxy edits across refresh', async () => {
+    codexApiMocks.getProxyStatus.mockResolvedValueOnce(
+      makeProxyStatus({
+        proxy_enabled: true,
+        proxy_last_error: 'initial-error',
+        proxy_pool: [
+          {
+            id: 'proxy-1',
+            name: 'Primary Proxy',
+            proxy_url: 'http://proxy-1:8080',
+            enabled: true,
+            last_status: 'ok',
+            last_checked_at: null,
+            last_success_at: null,
+            last_failure_at: null,
+            cooldown_until: null,
+            failure_count: 0,
+          },
+        ],
+      })
+    )
+    codexApiMocks.getProxyStatus.mockResolvedValueOnce(
+      makeProxyStatus({
+        proxy_enabled: true,
+        proxy_last_error: 'server-refreshed-error',
+        proxy_pool: [
+          {
+            id: 'proxy-1',
+            name: 'Server Refreshed Proxy',
+            proxy_url: 'http://server-refresh:8080',
+            enabled: false,
+            last_status: 'failed',
+            last_checked_at: null,
+            last_success_at: null,
+            last_failure_at: '2026-03-06T11:30:00Z',
+            cooldown_until: '2026-03-06T12:00:00Z',
+            failure_count: 5,
+          },
+        ],
+      })
+    )
+
     const wrapper = mount(CodexRegistrationCard, {
       props: { active: true },
       global: { stubs: { StatCard: StatCardStub } }
@@ -1600,13 +1670,28 @@ describe('CodexRegistrationCard', () => {
     await flushPromises()
 
     const panel = wrapper.find('[data-testid="codex-proxy-panel"]')
-    expect(panel.exists()).toBe(true)
+    expect(panel.text()).toContain('Proxy Pool')
+    expect(panel.text()).toContain('Available Proxies: 1')
+    expect(panel.text()).toContain('Last Proxy Error: initial-error')
+    expect(panel.text()).toContain('Enable Proxy Routing')
+    expect(panel.text()).toContain('Disable Proxy Routing')
+    expect(panel.text()).toContain('Enabled')
+    expect(panel.text()).toContain('Status: Healthy')
+    expect(panel.text()).toContain('Test Proxy')
+    expect(panel.text()).toContain('Select Proxy')
+    expect(panel.text()).toContain('Save Proxy Pool')
 
-    const rows = wrapper.findAll('[data-testid="codex-proxy-row"]')
-    expect(rows).toHaveLength(2)
-    expect(panel.text()).toContain('Primary Proxy')
-    expect(panel.text()).toContain('Backup Proxy')
+    await wrapper.find('[data-testid="codex-proxy-name-input-proxy-1"]').setValue('Draft Proxy Name')
+    await wrapper.find('[data-testid="codex-proxy-url-input-proxy-1"]').setValue('http://draft-proxy:9090')
+
+    await wrapper.find('[data-testid="codex-refresh-action"]').trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.getProxyStatus).toHaveBeenCalledTimes(2)
+    expect((wrapper.find('[data-testid="codex-proxy-name-input-proxy-1"]').element as HTMLInputElement).value).toBe('Draft Proxy Name')
+    expect((wrapper.find('[data-testid="codex-proxy-url-input-proxy-1"]').element as HTMLInputElement).value).toBe('http://draft-proxy:9090')
   })
+
 
   it('save action sends edited proxy list', async () => {
     codexApiMocks.saveProxyList.mockResolvedValueOnce(
@@ -1712,6 +1797,7 @@ describe('CodexRegistrationCard', () => {
       ]
     })
 
+    codexApiMocks.saveProxyList.mockClear()
     codexApiMocks.saveProxyList.mockResolvedValueOnce(
       makeProxyStatus({
         proxy_enabled: true
@@ -1724,9 +1810,23 @@ describe('CodexRegistrationCard', () => {
     await enableButton.trigger('click')
     await flushPromises()
 
-    expect(codexApiMocks.saveProxyList).toHaveBeenCalledTimes(2)
-    expect(codexApiMocks.saveProxyList.mock.calls[1]?.[0]).toMatchObject({
-      proxy_enabled: true
+    expect(codexApiMocks.saveProxyList).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.saveProxyList).toHaveBeenCalledWith({
+      proxy_enabled: true,
+      proxy_pool: [
+        {
+          id: 'proxy-1',
+          name: 'Primary Proxy',
+          proxy_url: 'http://proxy-1:8080',
+          enabled: true
+        },
+        {
+          id: 'proxy-2',
+          name: 'Backup Proxy',
+          proxy_url: 'http://proxy-2:8080',
+          enabled: true
+        }
+      ]
     })
   })
   it('renders proxy diagnostics by proxy id rather than row index', async () => {
@@ -1806,13 +1906,13 @@ describe('CodexRegistrationCard', () => {
     const rows = wrapper.findAll('[data-testid="codex-proxy-row"]')
     expect(rows).toHaveLength(2)
 
-    expect(rows[0].text()).toContain('Primary Proxy First')
-    expect(rows[0].text()).toContain('Status: cooldown')
+    expect(rows[0].text()).toContain('Primary Proxy')
+    expect(rows[0].text()).toContain('Status: Cooldown')
     expect(rows[0].text()).toContain('Cooldown: 2026-03-06T10:10:00Z')
     expect(rows[0].text()).toContain('Failed: 2')
 
-    expect(rows[1].text()).toContain('Backup Proxy Second')
-    expect(rows[1].text()).toContain('Status: failed')
+    expect(rows[1].text()).toContain('Backup Proxy')
+    expect(rows[1].text()).toContain('Status: Failed')
     expect(rows[1].text()).toContain('Failed: 3')
     expect(rows[1].text()).not.toContain('Cooldown:')
   })
@@ -1864,7 +1964,7 @@ describe('CodexRegistrationCard', () => {
     expect(codexApiMocks.testProxy).toHaveBeenCalledWith({ proxy_id: 'proxy-1' })
 
     const rows = wrapper.findAll('[data-testid="codex-proxy-row"]')
-    expect(rows[0].text()).toContain('Status: failed')
+    expect(rows[0].text()).toContain('Status: Failed')
     expect(rows[0].text()).toContain('Cooldown: 2026-03-06T10:20:00Z')
     expect(rows[0].text()).toContain('Failed: 4')
 
