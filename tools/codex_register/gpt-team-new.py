@@ -1947,6 +1947,7 @@ def register_one_account(proxy=""):
 # ============================================================
 
 def run_batch():
+    register_proxy = str(os.getenv("REGISTER_PROXY_URL") or "").strip()
     logger.info("=" * 60)
     logger.info("🚀 开始批量注册，目标账号数: %d", TOTAL_ACCOUNTS)
     logger.info("=" * 60)
@@ -1965,7 +1966,7 @@ def run_batch():
         logger.info("📝 注册账号 %d/%d", i + 1, TOTAL_ACCOUNTS)
         logger.info("#" * 60)
 
-        email, password, success = register_one_account()
+        email, password, success = register_one_account(proxy=register_proxy)
 
         if success:
             success_count += 1

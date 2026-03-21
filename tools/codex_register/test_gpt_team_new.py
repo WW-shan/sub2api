@@ -2,8 +2,63 @@ import base64
 import importlib.util
 import json
 import pathlib
+import sys
+import types
 import unittest
 from unittest.mock import patch
+
+
+class GptTeamRunBatchProxyTests(unittest.TestCase):
+    def _load_module(self):
+        spec = importlib.util.spec_from_file_location(
+            "tools.codex_register.gpt_team_new_proxy_test",
+            str(pathlib.Path(__file__).resolve().parent / "gpt-team-new.py"),
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+
+        fake_requests = types.ModuleType("requests")
+        fake_requests.Session = lambda: types.SimpleNamespace(mount=lambda *args, **kwargs: None, proxies={})
+        fake_adapters = types.ModuleType("requests.adapters")
+        fake_adapters.HTTPAdapter = lambda *args, **kwargs: object()
+        fake_urllib3 = types.ModuleType("urllib3")
+        fake_urllib3.exceptions = types.SimpleNamespace(InsecureRequestWarning=Warning)
+        fake_urllib3.disable_warnings = lambda *args, **kwargs: None
+        fake_urllib3_util = types.ModuleType("urllib3.util")
+        fake_urllib3_retry = types.ModuleType("urllib3.util.retry")
+        fake_urllib3_retry.Retry = lambda *args, **kwargs: object()
+
+        with patch.dict(
+            sys.modules,
+            {
+                "requests": fake_requests,
+                "requests.adapters": fake_adapters,
+                "urllib3": fake_urllib3,
+                "urllib3.util": fake_urllib3_util,
+                "urllib3.util.retry": fake_urllib3_retry,
+            },
+        ), patch("builtins.print"):
+            spec.loader.exec_module(module)
+        return module
+
+    def test_run_batch_reads_register_proxy_url_and_passes_it_to_register_one_account(self):
+        module = self._load_module()
+        module.TOTAL_ACCOUNTS = 1
+
+        captured = []
+
+        def fake_register_one_account(proxy=""):
+            captured.append(proxy)
+            return "user@example.com", "pw", True
+
+        with patch.object(module, "register_one_account", side_effect=fake_register_one_account), \
+             patch.object(module.random, "randint", return_value=0), \
+             patch.object(module.os, "getenv", side_effect=lambda name, default=None: "http://loop-proxy:8080" if name == "REGISTER_PROXY_URL" else default), \
+             patch.object(module.logger, "info"), \
+             patch.object(module.logger, "warning"):
+            module.run_batch()
+
+        self.assertEqual(captured, ["http://loop-proxy:8080"])
 
 
 class GptTeamChatGPTLoginTests(unittest.TestCase):
@@ -14,7 +69,28 @@ class GptTeamChatGPTLoginTests(unittest.TestCase):
         )
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
-        with patch("builtins.print"):
+
+        fake_requests = types.ModuleType("requests")
+        fake_requests.Session = lambda: types.SimpleNamespace(mount=lambda *args, **kwargs: None, proxies={})
+        fake_adapters = types.ModuleType("requests.adapters")
+        fake_adapters.HTTPAdapter = lambda *args, **kwargs: object()
+        fake_urllib3 = types.ModuleType("urllib3")
+        fake_urllib3.exceptions = types.SimpleNamespace(InsecureRequestWarning=Warning)
+        fake_urllib3.disable_warnings = lambda *args, **kwargs: None
+        fake_urllib3_util = types.ModuleType("urllib3.util")
+        fake_urllib3_retry = types.ModuleType("urllib3.util.retry")
+        fake_urllib3_retry.Retry = lambda *args, **kwargs: object()
+
+        with patch.dict(
+            sys.modules,
+            {
+                "requests": fake_requests,
+                "requests.adapters": fake_adapters,
+                "urllib3": fake_urllib3,
+                "urllib3.util": fake_urllib3_util,
+                "urllib3.util.retry": fake_urllib3_retry,
+            },
+        ), patch("builtins.print"):
             spec.loader.exec_module(module)
         return module
 

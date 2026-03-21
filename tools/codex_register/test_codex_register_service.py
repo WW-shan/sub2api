@@ -374,6 +374,100 @@ class ProxyEndpointTests(ServiceTestCase):
         self.assertEqual(row["last_failure_at"], "")
         self.assertNotEqual(row["last_success_at"], "")
 
+    def test_proxy_list_rejects_empty_name_without_mutating_state(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "existing", "name": "Existing", "proxy_url": "http://existing:8080", "enabled": True},
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"id": "p1", "name": "", "proxy_url": "http://p1:8080", "enabled": True},
+                    ]
+                },
+            )
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "proxy_name_required")
+        persisted_state = asyncio.run(self.service._load_state())
+        self.assertEqual(persisted_state["proxy_pool"], state["proxy_pool"])
+
+    def test_proxy_list_rejects_empty_proxy_url_without_mutating_state(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "existing", "name": "Existing", "proxy_url": "http://existing:8080", "enabled": True},
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"id": "p1", "name": "Proxy 1", "proxy_url": "", "enabled": True},
+                    ]
+                },
+            )
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "proxy_url_required")
+        persisted_state = asyncio.run(self.service._load_state())
+        self.assertEqual(persisted_state["proxy_pool"], state["proxy_pool"])
+
+    def test_proxy_list_rejects_duplicate_proxy_ids_without_mutating_state(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "existing", "name": "Existing", "proxy_url": "http://existing:8080", "enabled": True},
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"id": "dup", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": True},
+                        {"id": "dup", "name": "Proxy 2", "proxy_url": "http://p2:8080", "enabled": True},
+                    ]
+                },
+            )
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "duplicate_proxy_id")
+        persisted_state = asyncio.run(self.service._load_state())
+        self.assertEqual(persisted_state["proxy_pool"], state["proxy_pool"])
+
+    def test_proxy_list_rejects_duplicate_proxy_urls_without_mutating_state(self):
+        state = self.service._default_state()
+        state["proxy_pool"] = [
+            {"id": "existing", "name": "Existing", "proxy_url": "http://existing:8080", "enabled": True},
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"id": "p1", "name": "Proxy 1", "proxy_url": " http://same:8080 ", "enabled": True},
+                        {"id": "p2", "name": "Proxy 2", "proxy_url": "http://same:8080", "enabled": True},
+                    ]
+                },
+            )
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "duplicate_proxy_url")
+        persisted_state = asyncio.run(self.service._load_state())
+        self.assertEqual(persisted_state["proxy_pool"], state["proxy_pool"])
+
     def test_proxy_list_clears_stale_current_proxy_name_when_selected_proxy_removed(self):
         state = self.service._default_state()
         state["proxy_pool"] = [

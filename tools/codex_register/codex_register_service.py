@@ -308,6 +308,39 @@ class CodexRegisterService:
                 state["proxy_enabled"] = any(self._coerce_bool(item.get("enabled", True)) for item in pool if isinstance(item, dict))
             return self._result(True, data=state)
 
+    def _normalize_proxy_url(self, value: Any) -> str:
+        return str(value or "").strip()
+
+    def _validate_proxy_pool_payload(self, pool: Any) -> str:
+        if not isinstance(pool, list):
+            return "invalid_proxy_pool"
+
+        seen_ids = set()
+        seen_proxy_urls = set()
+        for item in pool:
+            if not isinstance(item, dict):
+                return "invalid_proxy_pool"
+
+            proxy_id = str(item.get("id") or "").strip()
+            if not proxy_id:
+                return "invalid_proxy_pool"
+            if proxy_id in seen_ids:
+                return "duplicate_proxy_id"
+            seen_ids.add(proxy_id)
+
+            name = str(item.get("name") or "").strip()
+            if not name:
+                return "proxy_name_required"
+
+            proxy_url = self._normalize_proxy_url(item.get("proxy_url") or item.get("url"))
+            if not proxy_url:
+                return "proxy_url_required"
+            if proxy_url in seen_proxy_urls:
+                return "duplicate_proxy_url"
+            seen_proxy_urls.add(proxy_url)
+
+        return ""
+
     def _normalize_proxy_pool(self, pool: Any) -> List[Dict[str, Any]]:
         if not isinstance(pool, list):
             return []
@@ -318,7 +351,7 @@ class CodexRegisterService:
             proxy_id = str(item.get("id") or "").strip()
             if not proxy_id:
                 continue
-            proxy_url = str(item.get("proxy_url") or item.get("url") or "").strip()
+            proxy_url = self._normalize_proxy_url(item.get("proxy_url") or item.get("url"))
             normalized_pool.append(
                 {
                     "id": proxy_id,
@@ -370,6 +403,9 @@ class CodexRegisterService:
     async def _handle_proxy_list(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         async with self._state_lock:
             state = await self._load_state()
+            validation_error = self._validate_proxy_pool_payload(payload.get("proxy_pool"))
+            if validation_error:
+                return self._result(False, data=state, error=validation_error)
             previous_pool = state.get("proxy_pool")
             state["proxy_pool"] = self._merge_saved_proxy_runtime_metadata(
                 previous_pool,
