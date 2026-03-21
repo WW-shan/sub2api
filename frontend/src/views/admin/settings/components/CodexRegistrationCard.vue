@@ -244,6 +244,10 @@
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
               {{ loopSummaryLabel }}
             </p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Current round proxy: {{ loopCurrentProxyLabel }} · Previous round proxy:
+              {{ loopLastProxyLabel }}
+            </p>
           </div>
           <div class="flex flex-wrap items-center gap-2" data-testid="codex-loop-controls">
             <button
@@ -318,16 +322,7 @@
               {{ loopStartedAtLabel }}
             </p>
           </div>
-          <div
-            class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
-          >
-            <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
-              {{ t("admin.codexRegister.loop.fields.lastFinishedAt") }}
-            </p>
-            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
-              {{ loopFinishedAtLabel }}
-            </p>
-          </div>
+
           <div
             class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
           >
@@ -416,6 +411,112 @@
               </p>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section
+        class="rounded-2xl border border-gray-200 bg-gray-50/60 p-6 dark:border-dark-700 dark:bg-dark-900/20"
+        data-testid="codex-proxy-panel"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Proxy pool</h3>
+          <span
+            class="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300"
+            data-testid="codex-proxy-available-count"
+          >
+            Available: {{ proxyAvailableCount }}
+          </span>
+        </div>
+
+        <p class="mt-2 text-xs text-gray-500 dark:text-gray-400" data-testid="codex-proxy-last-error">
+          Last proxy error: {{ proxyLastErrorLabel }}
+        </p>
+
+        <div class="mt-4 space-y-3">
+          <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+            <input
+              v-model="proxyDraftEnabled"
+              type="checkbox"
+              class="rounded border-gray-300"
+            />
+            Enable proxy routing
+          </label>
+
+          <div
+            v-for="(entry, index) in proxyDraftRows"
+            :key="entry.id || `proxy-row-${index}`"
+            class="grid gap-2 rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-700 dark:bg-dark-900/40"
+            data-testid="codex-proxy-row"
+          >
+            <p class="text-xs font-medium text-gray-700 dark:text-gray-200">
+              {{ entry.name || "-" }}
+            </p>
+            <div class="grid gap-2 sm:grid-cols-3">
+              <input
+                :data-testid="`codex-proxy-name-input-${entry.id || index}`"
+                v-model.trim="entry.name"
+                type="text"
+                class="input input-sm"
+              />
+              <input
+                :data-testid="`codex-proxy-url-input-${entry.id || index}`"
+                v-model.trim="entry.proxy_url"
+                type="text"
+                class="input input-sm"
+              />
+              <label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                <input
+                  :data-testid="`codex-proxy-enabled-input-${entry.id || index}`"
+                  v-model="entry.enabled"
+                  type="checkbox"
+                  class="rounded border-gray-300"
+                />
+                enabled
+              </label>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              <span>Status: {{ proxyStatusText(proxyStatus?.proxy_pool[index]?.last_status || "unknown") }}</span>
+              <span v-if="proxyStatus?.proxy_pool[index]?.cooldown_until">
+                Cooldown: {{ proxyStatus?.proxy_pool[index]?.cooldown_until }}
+              </span>
+              <span v-if="proxyStatus?.proxy_pool[index]?.failure_count">
+                Failed: {{ proxyStatus?.proxy_pool[index]?.failure_count }}
+              </span>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                :data-testid="`codex-proxy-test-${entry.id || index}`"
+                :disabled="Boolean(proxyActionLoading)"
+                @click="testProxyById(entry.id || '')"
+              >
+                Test
+              </button>
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                :disabled="Boolean(proxyActionLoading)"
+                @click="selectProxyById(entry.id || '')"
+              >
+                Select
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-4">
+          <button
+            type="button"
+            class="btn btn-primary"
+            data-testid="codex-proxy-save"
+            :disabled="Boolean(proxyActionLoading)"
+            @click="saveProxyList"
+          >
+            Save proxy pool
+          </button>
         </div>
       </section>
 
@@ -805,6 +906,7 @@ import { adminAPI } from "@/api/admin";
 import type {
   CodexLogEntry,
   CodexLoopStatus,
+  CodexProxyStatus,
   CodexRegisterAccount,
   CodexStatus,
 } from "@/api/admin/codex";
@@ -821,11 +923,23 @@ const { t } = useI18n();
 
 const status = ref<CodexStatus | null>(null);
 const loopStatus = ref<CodexLoopStatus | null>(null);
+const proxyStatus = ref<CodexProxyStatus | null>(null);
+const proxyDraftEnabled = ref(false);
+const proxyDraftRows = ref<
+  Array<{
+    id?: string;
+    name: string;
+    proxy_url: string;
+    enabled: boolean;
+  }>
+>([]);
+const proxyActionLoading = ref<"save" | string | null>(null);
 const loading = ref(false);
 const loopActionLoading = ref<"start" | "stop" | null>(null);
 const error = ref<string | null>(null);
 const statusError = ref<string | null>(null);
 const loopError = ref<string | null>(null);
+const proxyError = ref<string | null>(null);
 const logsError = ref<string | null>(null);
 const accountsError = ref<string | null>(null);
 const logs = ref<CodexLogEntry[]>([]);
@@ -972,7 +1086,13 @@ function getErrorMessage(errorValue: unknown): string {
 }
 
 const combinedError = computed(
-  () => error.value || loopError.value || logsError.value || statusError.value || accountsError.value,
+  () =>
+    error.value ||
+    loopError.value ||
+    proxyError.value ||
+    logsError.value ||
+    statusError.value ||
+    accountsError.value,
 );
 const emptyValueLabel = computed(() => t("admin.codexRegister.summary.empty"));
 
@@ -1187,6 +1307,31 @@ const subscribeGateTokenDisplay = computed(() =>
     : maskSubscribeGateToken(subscribeGateRawToken.value),
 );
 
+const proxyAvailableCount = computed(
+  () => proxyDraftRows.value.filter((entry) => entry.enabled).length,
+);
+
+const proxyLastErrorLabel = computed(
+  () => proxyStatus.value?.proxy_last_error || emptyValueLabel.value,
+);
+
+function proxyStatusText(value: string): string {
+  if (value === "ok") return "ok";
+  if (value === "failed") return "failed";
+  if (value === "cooldown") return "cooldown";
+  return "unknown";
+}
+
+function syncProxyDraft(next: CodexProxyStatus) {
+  proxyDraftEnabled.value = next.proxy_enabled;
+  proxyDraftRows.value = next.proxy_pool.map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    proxy_url: entry.proxy_url,
+    enabled: entry.enabled,
+  }));
+}
+
 const canStart = computed(() => Boolean(status.value?.can_start));
 const canResume = computed(() => Boolean(status.value?.can_resume));
 const canAbandon = computed(() => Boolean(status.value?.can_abandon));
@@ -1311,6 +1456,18 @@ const loopLastRoundSummaryLabel = computed(() =>
 );
 const loopLastErrorLabel = computed(
   () => loopStatus.value?.loop_last_error || t("admin.codexRegister.loop.noError"),
+);
+const loopCurrentProxyLabel = computed(
+  () =>
+    loopStatus.value?.loop_current_proxy_name ||
+    loopStatus.value?.loop_current_proxy_id ||
+    emptyValueLabel.value,
+);
+const loopLastProxyLabel = computed(
+  () =>
+    loopStatus.value?.loop_last_proxy_name ||
+    loopStatus.value?.loop_last_proxy_id ||
+    emptyValueLabel.value,
 );
 const loopSummaryLabel = computed(() => {
   if (!loopStatus.value) {
@@ -1477,6 +1634,17 @@ async function fetchLoopStatus() {
   }
 }
 
+async function fetchProxyStatus() {
+  try {
+    const next = await adminAPI.codex.getProxyStatus();
+    proxyStatus.value = next;
+    proxyError.value = null;
+    syncProxyDraft(next);
+  } catch (errorValue) {
+    proxyError.value = getErrorMessage(errorValue);
+  }
+}
+
 async function fetchLogs() {
   try {
     logs.value = await adminAPI.codex.getLogs({
@@ -1508,6 +1676,59 @@ async function fetchAccounts() {
   }
 }
 
+async function saveProxyList() {
+  if (proxyActionLoading.value || refreshing.value || loading.value) return;
+  proxyActionLoading.value = "save";
+  try {
+    const next = await adminAPI.codex.saveProxyList({
+      proxy_enabled: proxyDraftEnabled.value,
+      proxy_pool: proxyDraftRows.value.map((row) => ({
+        id: row.id,
+        name: row.name,
+        proxy_url: row.proxy_url,
+        enabled: row.enabled,
+      })),
+    });
+    proxyStatus.value = next;
+    syncProxyDraft(next);
+    proxyError.value = null;
+  } catch (errorValue) {
+    proxyError.value = getErrorMessage(errorValue);
+  } finally {
+    proxyActionLoading.value = null;
+  }
+}
+
+async function testProxyById(proxyId: string) {
+  if (proxyActionLoading.value || refreshing.value || loading.value) return;
+  proxyActionLoading.value = proxyId;
+  try {
+    const next = await adminAPI.codex.testProxy({ proxy_id: proxyId });
+    proxyStatus.value = next;
+    syncProxyDraft(next);
+    proxyError.value = null;
+  } catch (errorValue) {
+    proxyError.value = getErrorMessage(errorValue);
+  } finally {
+    proxyActionLoading.value = null;
+  }
+}
+
+async function selectProxyById(proxyId: string) {
+  if (proxyActionLoading.value || refreshing.value || loading.value) return;
+  proxyActionLoading.value = proxyId;
+  try {
+    const next = await adminAPI.codex.selectProxy({ proxy_id: proxyId });
+    proxyStatus.value = next;
+    syncProxyDraft(next);
+    proxyError.value = null;
+  } catch (errorValue) {
+    proxyError.value = getErrorMessage(errorValue);
+  } finally {
+    proxyActionLoading.value = null;
+  }
+}
+
 async function copyText(value: string) {
   if (!value) return;
   await navigator.clipboard.writeText(value);
@@ -1531,7 +1752,13 @@ async function refreshAll() {
   if (refreshing.value) return;
   refreshing.value = true;
   try {
-    await Promise.all([fetchStatus(), fetchLoopStatus(), fetchLogs(), fetchAccounts()]);
+    await Promise.all([
+      fetchStatus(),
+      fetchLoopStatus(),
+      fetchProxyStatus(),
+      fetchLogs(),
+      fetchAccounts(),
+    ]);
   } finally {
     refreshing.value = false;
   }
@@ -1548,7 +1775,7 @@ async function toggleEnabled(value: boolean) {
   } finally {
     loading.value = false;
   }
-  await Promise.all([fetchLoopStatus(), fetchLogs()]);
+  await Promise.all([fetchLoopStatus(), fetchProxyStatus(), fetchLogs()]);
 }
 
 async function resumeWorkflow() {
@@ -1562,7 +1789,7 @@ async function resumeWorkflow() {
   } finally {
     loading.value = false;
   }
-  await Promise.all([fetchLoopStatus(), fetchLogs()]);
+  await Promise.all([fetchLoopStatus(), fetchProxyStatus(), fetchLogs()]);
 }
 
 async function retryWorkflow() {
@@ -1576,7 +1803,7 @@ async function retryWorkflow() {
   } finally {
     loading.value = false;
   }
-  await Promise.all([fetchLoopStatus(), fetchLogs()]);
+  await Promise.all([fetchLoopStatus(), fetchProxyStatus(), fetchLogs()]);
 }
 
 async function startLoopRunner() {
