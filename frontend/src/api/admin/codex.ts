@@ -118,6 +118,54 @@ export interface CodexLoopStatus {
   loop_last_error: string | null;
   loop_history: CodexLoopHistoryEntry[];
   loop_committed_accounts_jsonl_offset: number;
+  loop_current_proxy_id: string | null;
+  loop_current_proxy_name: string | null;
+  loop_last_proxy_id: string | null;
+  loop_last_proxy_name: string | null;
+  loop_last_switch_reason: string | null;
+}
+
+export interface CodexProxyEntry {
+  id: string;
+  name: string;
+  proxy_url: string;
+  enabled: boolean;
+  last_status: "unknown" | "ok" | "failed" | "cooldown";
+  last_checked_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  cooldown_until: string | null;
+  failure_count: number;
+}
+
+export interface CodexProxyStatus {
+  proxy_enabled: boolean;
+  proxy_current_id: string | null;
+  proxy_current_name: string | null;
+  proxy_last_used_id: string | null;
+  proxy_last_used_name: string | null;
+  proxy_last_checked_at: string | null;
+  proxy_last_error: string | null;
+  proxy_last_switch_reason: string | null;
+  proxy_pool: CodexProxyEntry[];
+}
+
+export interface CodexSaveProxyListPayload {
+  proxy_enabled?: boolean;
+  proxy_pool: Array<{
+    id?: string;
+    name: string;
+    proxy_url: string;
+    enabled?: boolean;
+  }>;
+}
+
+export interface CodexSelectProxyPayload {
+  proxy_id: string;
+}
+
+export interface CodexTestProxyPayload {
+  proxy_id: string;
 }
 
 const defaultProcessedSummary = (): CodexProcessedSummary => ({
@@ -175,6 +223,23 @@ const defaultLoopStatus = (): CodexLoopStatus => ({
   loop_last_error: null,
   loop_history: [],
   loop_committed_accounts_jsonl_offset: 0,
+  loop_current_proxy_id: null,
+  loop_current_proxy_name: null,
+  loop_last_proxy_id: null,
+  loop_last_proxy_name: null,
+  loop_last_switch_reason: null,
+});
+
+const defaultProxyStatus = (): CodexProxyStatus => ({
+  proxy_enabled: false,
+  proxy_current_id: null,
+  proxy_current_name: null,
+  proxy_last_used_id: null,
+  proxy_last_used_name: null,
+  proxy_last_checked_at: null,
+  proxy_last_error: null,
+  proxy_last_switch_reason: null,
+  proxy_pool: [],
 });
 
 function unwrapCodexPayload<T>(payload: unknown, fallback: T): T {
@@ -372,6 +437,67 @@ function normalizeLoopStatus(status: CodexLoopStatus): CodexLoopStatus {
     loop_committed_accounts_jsonl_offset: toNumber(
       status.loop_committed_accounts_jsonl_offset,
     ),
+    loop_current_proxy_id: toNullableString(status.loop_current_proxy_id),
+    loop_current_proxy_name: toNullableString(status.loop_current_proxy_name),
+    loop_last_proxy_id: toNullableString(status.loop_last_proxy_id),
+    loop_last_proxy_name: toNullableString(status.loop_last_proxy_name),
+    loop_last_switch_reason: toNullableString(status.loop_last_switch_reason),
+  };
+}
+
+function normalizeProxyEntry(entry: unknown): CodexProxyEntry {
+  const fallback: CodexProxyEntry = {
+    id: "",
+    name: "",
+    proxy_url: "",
+    enabled: true,
+    last_status: "unknown",
+    last_checked_at: null,
+    last_success_at: null,
+    last_failure_at: null,
+    cooldown_until: null,
+    failure_count: 0,
+  };
+
+  if (!entry || typeof entry !== "object") {
+    return fallback;
+  }
+
+  const value = entry as Record<string, unknown>;
+  const statusValue = String(value.last_status ?? "unknown");
+  const allowedStatus = ["unknown", "ok", "failed", "cooldown"] as const;
+
+  return {
+    id: String(value.id ?? ""),
+    name: String(value.name ?? ""),
+    proxy_url: String(value.proxy_url ?? ""),
+    enabled: value.enabled === undefined ? true : Boolean(value.enabled),
+    last_status: allowedStatus.includes(statusValue as (typeof allowedStatus)[number])
+      ? (statusValue as CodexProxyEntry["last_status"])
+      : "unknown",
+    last_checked_at: toNullableString(value.last_checked_at),
+    last_success_at: toNullableString(value.last_success_at),
+    last_failure_at: toNullableString(value.last_failure_at),
+    cooldown_until: toNullableString(value.cooldown_until),
+    failure_count: toNumber(value.failure_count),
+  };
+}
+
+function normalizeProxyStatus(status: CodexProxyStatus): CodexProxyStatus {
+  return {
+    ...defaultProxyStatus(),
+    ...status,
+    proxy_enabled: Boolean(status.proxy_enabled),
+    proxy_current_id: toNullableString(status.proxy_current_id),
+    proxy_current_name: toNullableString(status.proxy_current_name),
+    proxy_last_used_id: toNullableString(status.proxy_last_used_id),
+    proxy_last_used_name: toNullableString(status.proxy_last_used_name),
+    proxy_last_checked_at: toNullableString(status.proxy_last_checked_at),
+    proxy_last_error: toNullableString(status.proxy_last_error),
+    proxy_last_switch_reason: toNullableString(status.proxy_last_switch_reason),
+    proxy_pool: Array.isArray(status.proxy_pool)
+      ? status.proxy_pool.map(normalizeProxyEntry)
+      : [],
   };
 }
 
@@ -388,6 +514,48 @@ export async function getLoopStatus(): Promise<CodexLoopStatus> {
   >("/admin/codex/loop/status");
   return normalizeLoopStatus(
     unwrapCodexPayload<CodexLoopStatus>(res.data, defaultLoopStatus()),
+  );
+}
+
+export async function getProxyStatus(): Promise<CodexProxyStatus> {
+  const res = await apiClient.get<
+    CodexProxyStatus | CodexEnvelope<CodexProxyStatus>
+  >("/admin/codex/proxy/status");
+  return normalizeProxyStatus(
+    unwrapCodexPayload<CodexProxyStatus>(res.data, defaultProxyStatus()),
+  );
+}
+
+export async function saveProxyList(
+  payload: CodexSaveProxyListPayload,
+): Promise<CodexProxyStatus> {
+  const res = await apiClient.post<
+    CodexProxyStatus | CodexEnvelope<CodexProxyStatus>
+  >("/admin/codex/proxy/list", payload);
+  return normalizeProxyStatus(
+    unwrapCodexPayload<CodexProxyStatus>(res.data, defaultProxyStatus()),
+  );
+}
+
+export async function selectProxy(
+  payload: CodexSelectProxyPayload,
+): Promise<CodexProxyStatus> {
+  const res = await apiClient.post<
+    CodexProxyStatus | CodexEnvelope<CodexProxyStatus>
+  >("/admin/codex/proxy/select", payload);
+  return normalizeProxyStatus(
+    unwrapCodexPayload<CodexProxyStatus>(res.data, defaultProxyStatus()),
+  );
+}
+
+export async function testProxy(
+  payload: CodexTestProxyPayload,
+): Promise<CodexProxyStatus> {
+  const res = await apiClient.post<
+    CodexProxyStatus | CodexEnvelope<CodexProxyStatus>
+  >("/admin/codex/proxy/test", payload);
+  return normalizeProxyStatus(
+    unwrapCodexPayload<CodexProxyStatus>(res.data, defaultProxyStatus()),
   );
 }
 
@@ -471,6 +639,10 @@ export async function stopLoop(): Promise<CodexLoopStatus> {
 export default {
   getStatus,
   getLoopStatus,
+  getProxyStatus,
+  saveProxyList,
+  selectProxy,
+  testProxy,
   getLogs,
   getAccounts,
   enable,
