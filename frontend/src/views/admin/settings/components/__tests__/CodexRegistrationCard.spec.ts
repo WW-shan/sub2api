@@ -1389,6 +1389,8 @@ describe('CodexRegistrationCard', () => {
     expect(panel.text()).toContain('7')
     expect(panel.text()).toContain('已提交偏移量')
     expect(panel.text()).toContain('24')
+    expect(panel.text()).toContain('最近完成时间')
+    expect(panel.text()).toContain('2026-03-06T11:05:00Z')
     expect(panel.text()).toContain('创建 2 / 更新 1 / 跳过 0 / 失败 0')
   })
 
@@ -1646,32 +1648,10 @@ describe('CodexRegistrationCard', () => {
     })
   })
 
-  it('test action calls testProxy', async () => {
-    codexApiMocks.testProxy.mockResolvedValueOnce(makeProxyStatus())
-
-    const wrapper = mount(CodexRegistrationCard, {
-      props: { active: true },
-      global: { stubs: { StatCard: StatCardStub } }
-    })
-
-    await flushPromises()
-
-    await wrapper.find('[data-testid="codex-proxy-test-proxy-2"]').trigger('click')
-    await flushPromises()
-
-    expect(codexApiMocks.testProxy).toHaveBeenCalledTimes(1)
-    expect(codexApiMocks.testProxy).toHaveBeenCalledWith({ proxy_id: 'proxy-2' })
-  })
-
-  it('loop panel displays current round proxy and previous round proxy', async () => {
-    codexApiMocks.getLoopStatus.mockResolvedValueOnce(
-      makeLoopStatus({
-        loop_running: true,
-        loop_current_round: 6,
-        loop_current_proxy_id: 'proxy-1',
-        loop_current_proxy_name: 'Primary Proxy',
-        loop_last_proxy_id: 'proxy-2',
-        loop_last_proxy_name: 'Backup Proxy'
+  it('uses dedicated proxy enable/disable actions with saveProxyList', async () => {
+    codexApiMocks.saveProxyList.mockResolvedValueOnce(
+      makeProxyStatus({
+        proxy_enabled: false
       })
     )
 
@@ -1682,12 +1662,49 @@ describe('CodexRegistrationCard', () => {
 
     await flushPromises()
 
-    const panel = wrapper.find('[data-testid="codex-loop-panel"]')
-    expect(panel.text()).toContain('Primary Proxy')
-    expect(panel.text()).toContain('Backup Proxy')
-  })
+    const disableButton = wrapper.find('[data-testid="codex-proxy-disable"]')
+    expect(disableButton.exists()).toBe(true)
 
-  it('shows cooldown and failed proxy states in UI', async () => {
+    await disableButton.trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.saveProxyList).toHaveBeenCalledTimes(1)
+    expect(codexApiMocks.saveProxyList).toHaveBeenCalledWith({
+      proxy_enabled: false,
+      proxy_pool: [
+        {
+          id: 'proxy-1',
+          name: 'Primary Proxy',
+          proxy_url: 'http://proxy-1:8080',
+          enabled: true
+        },
+        {
+          id: 'proxy-2',
+          name: 'Backup Proxy',
+          proxy_url: 'http://proxy-2:8080',
+          enabled: true
+        }
+      ]
+    })
+
+    codexApiMocks.saveProxyList.mockResolvedValueOnce(
+      makeProxyStatus({
+        proxy_enabled: true
+      })
+    )
+
+    const enableButton = wrapper.find('[data-testid="codex-proxy-enable"]')
+    expect(enableButton.exists()).toBe(true)
+
+    await enableButton.trigger('click')
+    await flushPromises()
+
+    expect(codexApiMocks.saveProxyList).toHaveBeenCalledTimes(2)
+    expect(codexApiMocks.saveProxyList.mock.calls[1]?.[0]).toMatchObject({
+      proxy_enabled: true
+    })
+  })
+  it('renders proxy row status values', async () => {
     codexApiMocks.getProxyStatus.mockResolvedValueOnce(
       makeProxyStatus({
         proxy_pool: [

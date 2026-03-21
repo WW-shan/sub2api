@@ -316,10 +316,10 @@
             class="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900/60"
           >
             <p class="text-xs font-medium uppercase tracking-[0.18em] text-gray-400 dark:text-dark-400">
-              {{ t("admin.codexRegister.loop.fields.startedAt") }}
+              {{ t("admin.codexRegister.loop.fields.lastFinishedAt") }}
             </p>
             <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
-              {{ loopStartedAtLabel }}
+              {{ loopFinishedAtLabel }}
             </p>
           </div>
 
@@ -433,6 +433,27 @@
         </p>
 
         <div class="mt-4 space-y-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              data-testid="codex-proxy-enable"
+              :disabled="Boolean(proxyActionLoading) || proxyDraftEnabled"
+              @click="setProxyEnabled(true)"
+            >
+              Enable proxy routing
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              data-testid="codex-proxy-disable"
+              :disabled="Boolean(proxyActionLoading) || !proxyDraftEnabled"
+              @click="setProxyEnabled(false)"
+            >
+              Disable proxy routing
+            </button>
+          </div>
+
           <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
             <input
               v-model="proxyDraftEnabled"
@@ -1697,6 +1718,12 @@ async function saveProxyList() {
   } finally {
     proxyActionLoading.value = null;
   }
+}
+
+async function setProxyEnabled(enabled: boolean) {
+  if (proxyActionLoading.value || refreshing.value || loading.value) return;
+  proxyDraftEnabled.value = enabled;
+  await saveProxyList();
 }
 
 async function testProxyById(proxyId: string) {
