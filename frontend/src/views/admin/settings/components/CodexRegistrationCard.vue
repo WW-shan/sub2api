@@ -1480,9 +1480,6 @@ const loopStopButtonLabel = computed(() =>
     ? t("admin.codexRegister.loop.actions.stopping")
     : t("admin.codexRegister.loop.actions.stop"),
 );
-const loopStartedAtLabel = computed(
-  () => loopStatus.value?.loop_started_at || emptyValueLabel.value,
-);
 const loopFinishedAtLabel = computed(
   () => loopStatus.value?.loop_last_round_finished_at || emptyValueLabel.value,
 );

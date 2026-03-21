@@ -941,6 +941,25 @@ describe('CodexRegistrationCard', () => {
     expect(wrapper.text()).toContain('status failure')
   })
 
+  it('renders loop last finished time from loop status', async () => {
+    codexApiMocks.getLoopStatus.mockResolvedValueOnce(
+      makeLoopStatus({
+        loop_last_round_finished_at: '2026-03-06 12:34:56'
+      })
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    const loopPanel = wrapper.find('[data-testid="codex-loop-panel"]')
+    expect(loopPanel.text()).toContain('最近完成时间')
+    expect(loopPanel.text()).toContain('2026-03-06 12:34:56')
+  })
+
   it('polls only when active and stops when deactivated', async () => {
     const setIntervalSpy = vi.spyOn(window, 'setInterval')
     const clearIntervalSpy = vi.spyOn(window, 'clearInterval')
