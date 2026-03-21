@@ -442,24 +442,6 @@
             <button
               type="button"
               class="btn btn-secondary btn-sm"
-              data-testid="codex-proxy-enable"
-              :disabled="Boolean(proxyActionLoading) || proxyDraftEnabled"
-              @click="setProxyEnabled(true)"
-            >
-              {{ t("admin.codexRegister.proxyPool.enableAction") }}
-            </button>
-            <button
-              type="button"
-              class="btn btn-secondary btn-sm"
-              data-testid="codex-proxy-disable"
-              :disabled="Boolean(proxyActionLoading) || !proxyDraftEnabled"
-              @click="setProxyEnabled(false)"
-            >
-              {{ t("admin.codexRegister.proxyPool.disableAction") }}
-            </button>
-            <button
-              type="button"
-              class="btn btn-secondary btn-sm"
               data-testid="codex-proxy-add"
               :disabled="Boolean(proxyActionLoading)"
               @click="addProxyDraftRow"
@@ -493,35 +475,36 @@
             class="grid gap-2 rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-700 dark:bg-dark-900/40"
             data-testid="codex-proxy-row"
           >
-            <p class="text-xs font-medium text-gray-700 dark:text-gray-200">
-              {{ entry.name || "-" }}
-            </p>
-            <div class="grid gap-2 sm:grid-cols-3">
-              <input
-                :data-testid="`codex-proxy-name-input-${entry.clientKey}`"
-                v-model.trim="entry.name"
-                type="text"
-                class="input input-sm"
-                @input="proxyDraftDirty = true"
-              />
-              <input
-                :data-testid="`codex-proxy-url-input-${entry.clientKey}`"
-                v-model.trim="entry.proxy_url"
-                type="text"
-                class="input input-sm"
-                @input="proxyDraftDirty = true"
-              />
-              <label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
-                <input
-                :data-testid="`codex-proxy-enabled-input-${entry.clientKey}`"
-                  v-model="entry.enabled"
-                  type="checkbox"
-                  class="rounded border-gray-300"
-                  @change="proxyDraftDirty = true"
-                />
-                {{ t("admin.codexRegister.proxyPool.enabledLabel") }}
-              </label>
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <p class="text-xs font-medium text-gray-700 dark:text-gray-200">
+                {{ entry.persistedId || emptyValueLabel }}
+              </p>
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                :data-testid="`codex-proxy-delete-${entry.persistedId || entry.clientKey}`"
+                :disabled="Boolean(proxyActionLoading)"
+                @click="removeProxyDraftRow(entry.clientKey)"
+              >
+                {{ t("admin.codexRegister.proxyPool.deleteAction") }}
+              </button>
             </div>
+
+            <div
+              v-if="entry.persistedId"
+              class="rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700 dark:bg-dark-800 dark:text-gray-200"
+              :data-testid="`codex-proxy-url-readonly-${entry.persistedId}`"
+            >
+              {{ entry.proxy_url || emptyValueLabel }}
+            </div>
+            <input
+              v-else
+              :data-testid="`codex-proxy-url-input-${entry.clientKey}`"
+              v-model.trim="entry.proxy_url"
+              type="text"
+              class="input input-sm"
+              @input="proxyDraftDirty = true"
+            />
 
             <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
               <span>{{ t("admin.codexRegister.proxyPool.statusLabel", { status: proxyStatusText(proxyStatusById(entry.persistedId)?.last_status || "unknown") }) }}</span>
@@ -554,13 +537,6 @@
               >
                 {{ t("admin.codexRegister.proxyPool.selectAction") }}
               </button>
-              <span
-                v-else
-                class="text-xs text-gray-500 dark:text-gray-400"
-                data-testid="codex-proxy-unsaved-hint"
-              >
-                {{ t("admin.codexRegister.proxyPool.unsavedHint") }}
-              </span>
             </div>
           </div>
         </div>
@@ -987,9 +963,7 @@ const proxyDraftRows = ref<
   Array<{
     clientKey: string;
     persistedId?: string;
-    name: string;
     proxy_url: string;
-    enabled: boolean;
   }>
 >([]);
 const proxyActionLoading = ref<"save" | string | null>(null);
@@ -1366,9 +1340,7 @@ const subscribeGateTokenDisplay = computed(() =>
     : maskSubscribeGateToken(subscribeGateRawToken.value),
 );
 
-const proxyAvailableCount = computed(
-  () => proxyDraftRows.value.filter((entry) => entry.enabled).length,
-);
+const proxyAvailableCount = computed(() => proxyDraftRows.value.length);
 
 const proxyLastErrorLabel = computed(
   () => proxyStatus.value?.proxy_last_error || emptyValueLabel.value,
@@ -1397,10 +1369,13 @@ function addProxyDraftRow() {
   proxyDraftRows.value.push({
     clientKey: nextProxyDraftClientKey(),
     persistedId: undefined,
-    name: "",
     proxy_url: "",
-    enabled: true,
   });
+  proxyDraftDirty.value = true;
+}
+
+function removeProxyDraftRow(clientKey: string) {
+  proxyDraftRows.value = proxyDraftRows.value.filter((row) => row.clientKey !== clientKey);
   proxyDraftDirty.value = true;
 }
 
@@ -1416,9 +1391,7 @@ function syncProxyDraft(next: CodexProxyStatus) {
   proxyDraftRows.value = next.proxy_pool.map((entry) => ({
     clientKey: proxyClientKeyFromPersistedId(entry.id),
     persistedId: entry.id,
-    name: entry.name,
     proxy_url: entry.proxy_url,
-    enabled: entry.enabled,
   }));
   proxyDraftDirty.value = false;
 }
@@ -1774,9 +1747,7 @@ async function saveProxyList() {
       proxy_enabled: proxyDraftEnabled.value,
       proxy_pool: proxyDraftRows.value.map((row) => ({
         ...(row.persistedId ? { id: row.persistedId } : {}),
-        name: row.name,
         proxy_url: row.proxy_url,
-        enabled: row.enabled,
       })),
     });
     proxyStatus.value = next;
@@ -1787,12 +1758,6 @@ async function saveProxyList() {
   } finally {
     proxyActionLoading.value = null;
   }
-}
-
-async function setProxyEnabled(enabled: boolean) {
-  if (proxyActionLoading.value || refreshing.value || loading.value) return;
-  proxyDraftEnabled.value = enabled;
-  await saveProxyList();
 }
 
 async function testProxyById(proxyId: string) {

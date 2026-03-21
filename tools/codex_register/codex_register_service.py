@@ -16,6 +16,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
+import hashlib
 from urllib.parse import urlparse
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -305,32 +306,57 @@ class CodexRegisterService:
                 pool = []
                 state["proxy_pool"] = pool
             if "proxy_enabled" not in state:
-                state["proxy_enabled"] = any(self._coerce_bool(item.get("enabled", True)) for item in pool if isinstance(item, dict))
+                state["proxy_enabled"] = False
             return self._result(True, data=state)
+
+    def _normalize_proxy_url(self, proxy_url: Any) -> str:
+        value = str(proxy_url or "").strip()
+        if not value:
+            return ""
+        parsed = urlparse(value)
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+        path = parsed.path or ""
+        if not netloc and path:
+            netloc = path.lower()
+            path = ""
+        path = path.rstrip("/")
+        normalized = f"{scheme}://{netloc}" if scheme and netloc else value.lower().rstrip("/")
+        if path:
+            normalized = f"{normalized}{path}"
+        return normalized
+
+    def _derive_proxy_id(self, normalized_proxy_url: str) -> str:
+        digest = hashlib.sha1(normalized_proxy_url.encode("utf-8")).hexdigest()[:12]
+        return f"proxy-{digest}"
 
     def _normalize_proxy_pool(self, pool: Any) -> List[Dict[str, Any]]:
         if not isinstance(pool, list):
             return []
         normalized_pool: List[Dict[str, Any]] = []
+        seen_proxy_urls: set[str] = set()
         for item in pool:
             if not isinstance(item, dict):
                 continue
-            proxy_id = str(item.get("id") or "").strip()
-            if not proxy_id:
-                continue
-            proxy_url = str(item.get("proxy_url") or item.get("url") or "").strip()
+            proxy_url = self._normalize_proxy_url(item.get("proxy_url") or item.get("url"))
+            if not proxy_url:
+                raise ValueError("proxy_url_missing")
+            if proxy_url in seen_proxy_urls:
+                raise ValueError("duplicate_proxy_url")
+            seen_proxy_urls.add(proxy_url)
+            proxy_id = str(item.get("id") or "").strip() or self._derive_proxy_id(proxy_url)
             normalized_pool.append(
                 {
                     "id": proxy_id,
                     "name": str(item.get("name") or proxy_id).strip(),
                     "proxy_url": proxy_url,
-                    "enabled": self._coerce_bool(item.get("enabled", True)),
-                    "last_status": "unknown",
-                    "last_checked_at": "",
-                    "last_success_at": "",
-                    "last_failure_at": "",
-                    "cooldown_until": "",
-                    "failure_count": 0,
+                    "enabled": True,
+                    "last_status": str(item.get("last_status") or "unknown"),
+                    "last_checked_at": str(item.get("last_checked_at") or ""),
+                    "last_success_at": str(item.get("last_success_at") or ""),
+                    "last_failure_at": str(item.get("last_failure_at") or ""),
+                    "cooldown_until": str(item.get("cooldown_until") or ""),
+                    "failure_count": int(item.get("failure_count") or 0),
                 }
             )
         return normalized_pool
@@ -368,17 +394,21 @@ class CodexRegisterService:
         return merged
 
     async def _handle_proxy_list(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            normalized_pool = self._normalize_proxy_pool(payload.get("proxy_pool"))
+        except ValueError as exc:
+            return self._result(False, data=await self._load_state(), error=str(exc))
         async with self._state_lock:
             state = await self._load_state()
             previous_pool = state.get("proxy_pool")
             state["proxy_pool"] = self._merge_saved_proxy_runtime_metadata(
                 previous_pool,
-                self._normalize_proxy_pool(payload.get("proxy_pool")),
+                normalized_pool,
             )
             if "proxy_enabled" in payload:
                 state["proxy_enabled"] = self._coerce_bool(payload.get("proxy_enabled"))
             else:
-                state["proxy_enabled"] = any(item.get("enabled") for item in state["proxy_pool"])
+                state["proxy_enabled"] = False
 
             current_id = str(state.get("proxy_current_id") or "")
             last_used_id = str(state.get("proxy_last_used_id") or "")
@@ -409,7 +439,7 @@ class CodexRegisterService:
                 self._normalize_proxy_pool(state.get("proxy_pool")),
             )
             state["proxy_pool"] = pool
-            matched = next((item for item in pool if str(item.get("id") or "") == proxy_id and self._coerce_bool(item.get("enabled", True))), None)
+            matched = next((item for item in pool if str(item.get("id") or "") == proxy_id), None)
             if matched is None:
                 return self._result(False, data=state, error="proxy_not_found")
             state["proxy_current_id"] = proxy_id
@@ -869,8 +899,6 @@ class CodexRegisterService:
         eligible_indices: List[int] = []
         for index in ordered_indices:
             item = pool[index]
-            if not self._coerce_bool(item.get("enabled", True)):
-                continue
             if not str(item.get("proxy_url") or "").strip():
                 continue
             if self._proxy_is_in_cooldown(item, now=now):

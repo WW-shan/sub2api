@@ -154,9 +154,7 @@ export interface CodexSaveProxyListPayload {
   proxy_enabled?: boolean;
   proxy_pool: Array<{
     id?: string;
-    name: string;
     proxy_url: string;
-    enabled?: boolean;
   }>;
 }
 
@@ -499,10 +497,11 @@ function normalizeProxyEntry(entry: unknown): CodexProxyEntry {
   const value = entry as Record<string, unknown>;
   const statusValue = String(value.last_status ?? "unknown");
   const allowedStatus = ["unknown", "ok", "failed", "cooldown"] as const;
+  const id = String(value.id ?? "");
 
   return {
-    id: String(value.id ?? ""),
-    name: String(value.name ?? ""),
+    id,
+    name: String(value.name ?? id),
     proxy_url: String(value.proxy_url ?? ""),
     enabled: value.enabled === undefined ? true : toBoolean(value.enabled, true),
     last_status: allowedStatus.includes(statusValue as (typeof allowedStatus)[number])
