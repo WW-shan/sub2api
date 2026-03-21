@@ -165,6 +165,53 @@ describe('codex proxy api', () => {
     getSpy.mockRestore()
   })
 
+  it('normalizes boolean-like codex flags from API payloads', async () => {
+    const getSpy = vi.spyOn(apiClient, 'get')
+      .mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            proxy_enabled: 'false',
+            proxy_pool: [
+              {
+                id: 'p-1',
+                name: 'Proxy A',
+                proxy_url: 'http://127.0.0.1:8080',
+                enabled: 'false'
+              },
+              {
+                id: 'p-2',
+                name: 'Proxy B',
+                proxy_url: 'http://127.0.0.1:8081',
+                enabled: 'true'
+              }
+            ]
+          }
+        }
+      } as any)
+      .mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            loop_running: 'false',
+            loop_stopping: '0',
+            loop_history: []
+          }
+        }
+      } as any)
+
+    const proxyResult = await getProxyStatus()
+    const loopResult = await getLoopStatus()
+
+    expect(proxyResult.proxy_enabled).toBe(false)
+    expect(proxyResult.proxy_pool[0].enabled).toBe(false)
+    expect(proxyResult.proxy_pool[1].enabled).toBe(true)
+    expect(loopResult.loop_running).toBe(false)
+    expect(loopResult.loop_stopping).toBe(false)
+
+    getSpy.mockRestore()
+  })
+
   it('posts proxy actions to expected endpoints', async () => {
     const postSpy = vi.spyOn(apiClient, 'post').mockResolvedValue({
       data: {

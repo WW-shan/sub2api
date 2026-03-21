@@ -260,6 +260,39 @@ function toNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(num) ? num : fallback;
 }
 
+function toBoolean(value: unknown, fallback = false): boolean {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) {
+      return fallback;
+    }
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+
+    if (["", "0", "false", "no", "off", "null", "undefined", "nan"].includes(normalized)) {
+      return false;
+    }
+
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+
+    return fallback;
+  }
+
+  return Boolean(value);
+}
+
 function toNullableString(value: unknown): string | null {
   if (value === null || value === undefined || value === "") {
     return null;
@@ -419,8 +452,8 @@ function normalizeLoopStatus(status: CodexLoopStatus): CodexLoopStatus {
   return {
     ...defaultLoopStatus(),
     ...status,
-    loop_running: Boolean(status.loop_running),
-    loop_stopping: Boolean(status.loop_stopping),
+    loop_running: toBoolean(status.loop_running),
+    loop_stopping: toBoolean(status.loop_stopping),
     loop_started_at: toNullableString(status.loop_started_at),
     loop_current_round: toNumber(status.loop_current_round),
     loop_last_round_started_at: toNullableString(status.loop_last_round_started_at),
@@ -471,7 +504,7 @@ function normalizeProxyEntry(entry: unknown): CodexProxyEntry {
     id: String(value.id ?? ""),
     name: String(value.name ?? ""),
     proxy_url: String(value.proxy_url ?? ""),
-    enabled: value.enabled === undefined ? true : Boolean(value.enabled),
+    enabled: value.enabled === undefined ? true : toBoolean(value.enabled, true),
     last_status: allowedStatus.includes(statusValue as (typeof allowedStatus)[number])
       ? (statusValue as CodexProxyEntry["last_status"])
       : "unknown",
@@ -487,7 +520,7 @@ function normalizeProxyStatus(status: CodexProxyStatus): CodexProxyStatus {
   return {
     ...defaultProxyStatus(),
     ...status,
-    proxy_enabled: Boolean(status.proxy_enabled),
+    proxy_enabled: toBoolean(status.proxy_enabled),
     proxy_current_id: toNullableString(status.proxy_current_id),
     proxy_current_name: toNullableString(status.proxy_current_name),
     proxy_last_used_id: toNullableString(status.proxy_last_used_id),
