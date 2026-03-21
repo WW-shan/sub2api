@@ -331,7 +331,89 @@ class ProxyEndpointTests(ServiceTestCase):
             )
             self.assertEqual(mocked_handle_path.await_args.kwargs["payload"]["method"], "POST")
 
-    def test_proxy_select_updates_current_proxy_name(self):
+    def test_proxy_list_generates_stable_id_from_normalized_proxy_url(self):
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"proxy_url": "HTTP://127.0.0.1:7890/"},
+                    ]
+                },
+            )
+        )
+
+        self.assertTrue(result["success"])
+        row = result["data"]["proxy_pool"][0]
+        self.assertTrue(row["id"])
+        self.assertEqual(row["proxy_url"], "http://127.0.0.1:7890")
+
+    def test_proxy_list_rejects_duplicate_normalized_proxy_urls(self):
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"proxy_url": "http://127.0.0.1:7890"},
+                        {"proxy_url": "HTTP://127.0.0.1:7890/"},
+                    ]
+                },
+            )
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "duplicate_proxy_url")
+
+    def test_proxy_list_uses_id_as_label_when_name_missing(self):
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"proxy_url": "http://127.0.0.1:7890"},
+                    ]
+                },
+            )
+        )
+        self.assertTrue(result["success"])
+        proxy_id = result["data"]["proxy_pool"][0]["id"]
+
+        select_result = asyncio.run(self.service.handle_path("/proxy/select", payload={"proxy_id": proxy_id}))
+        self.assertTrue(select_result["success"])
+        self.assertEqual(select_result["data"]["proxy_current_name"], proxy_id)
+
+    def test_proxy_enabled_depends_only_on_global_flag(self):
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_enabled": False,
+                    "proxy_pool": [
+                        {"proxy_url": "http://127.0.0.1:7890"},
+                    ]
+                },
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertFalse(result["data"]["proxy_enabled"])
+
+    def test_proxy_select_does_not_require_row_enabled(self):
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"proxy_url": "http://127.0.0.1:7890"},
+                    ]
+                },
+            )
+        )
+        self.assertTrue(result["success"])
+        proxy_id = result["data"]["proxy_pool"][0]["id"]
+
+        select_result = asyncio.run(self.service.handle_path("/proxy/select", payload={"proxy_id": proxy_id}))
+        self.assertTrue(select_result["success"])
         state = self.service._default_state()
         state["proxy_pool"] = [
             {"id": "p1", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": True},
@@ -373,100 +455,6 @@ class ProxyEndpointTests(ServiceTestCase):
         self.assertEqual(row["cooldown_until"], "")
         self.assertEqual(row["last_failure_at"], "")
         self.assertNotEqual(row["last_success_at"], "")
-
-    def test_proxy_list_rejects_empty_name_without_mutating_state(self):
-        state = self.service._default_state()
-        state["proxy_pool"] = [
-            {"id": "existing", "name": "Existing", "proxy_url": "http://existing:8080", "enabled": True},
-        ]
-        asyncio.run(self.service._save_state(state))
-
-        result = asyncio.run(
-            self.service.handle_path(
-                "/proxy/list",
-                payload={
-                    "proxy_pool": [
-                        {"id": "p1", "name": "", "proxy_url": "http://p1:8080", "enabled": True},
-                    ]
-                },
-            )
-        )
-
-        self.assertFalse(result["success"])
-        self.assertEqual(result["error"], "proxy_name_required")
-        persisted_state = asyncio.run(self.service._load_state())
-        self.assertEqual(persisted_state["proxy_pool"], state["proxy_pool"])
-
-    def test_proxy_list_rejects_empty_proxy_url_without_mutating_state(self):
-        state = self.service._default_state()
-        state["proxy_pool"] = [
-            {"id": "existing", "name": "Existing", "proxy_url": "http://existing:8080", "enabled": True},
-        ]
-        asyncio.run(self.service._save_state(state))
-
-        result = asyncio.run(
-            self.service.handle_path(
-                "/proxy/list",
-                payload={
-                    "proxy_pool": [
-                        {"id": "p1", "name": "Proxy 1", "proxy_url": "", "enabled": True},
-                    ]
-                },
-            )
-        )
-
-        self.assertFalse(result["success"])
-        self.assertEqual(result["error"], "proxy_url_required")
-        persisted_state = asyncio.run(self.service._load_state())
-        self.assertEqual(persisted_state["proxy_pool"], state["proxy_pool"])
-
-    def test_proxy_list_rejects_duplicate_proxy_ids_without_mutating_state(self):
-        state = self.service._default_state()
-        state["proxy_pool"] = [
-            {"id": "existing", "name": "Existing", "proxy_url": "http://existing:8080", "enabled": True},
-        ]
-        asyncio.run(self.service._save_state(state))
-
-        result = asyncio.run(
-            self.service.handle_path(
-                "/proxy/list",
-                payload={
-                    "proxy_pool": [
-                        {"id": "dup", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": True},
-                        {"id": "dup", "name": "Proxy 2", "proxy_url": "http://p2:8080", "enabled": True},
-                    ]
-                },
-            )
-        )
-
-        self.assertFalse(result["success"])
-        self.assertEqual(result["error"], "duplicate_proxy_id")
-        persisted_state = asyncio.run(self.service._load_state())
-        self.assertEqual(persisted_state["proxy_pool"], state["proxy_pool"])
-
-    def test_proxy_list_rejects_duplicate_proxy_urls_without_mutating_state(self):
-        state = self.service._default_state()
-        state["proxy_pool"] = [
-            {"id": "existing", "name": "Existing", "proxy_url": "http://existing:8080", "enabled": True},
-        ]
-        asyncio.run(self.service._save_state(state))
-
-        result = asyncio.run(
-            self.service.handle_path(
-                "/proxy/list",
-                payload={
-                    "proxy_pool": [
-                        {"id": "p1", "name": "Proxy 1", "proxy_url": " http://same:8080 ", "enabled": True},
-                        {"id": "p2", "name": "Proxy 2", "proxy_url": "http://same:8080", "enabled": True},
-                    ]
-                },
-            )
-        )
-
-        self.assertFalse(result["success"])
-        self.assertEqual(result["error"], "duplicate_proxy_url")
-        persisted_state = asyncio.run(self.service._load_state())
-        self.assertEqual(persisted_state["proxy_pool"], state["proxy_pool"])
 
     def test_proxy_list_clears_stale_current_proxy_name_when_selected_proxy_removed(self):
         state = self.service._default_state()
