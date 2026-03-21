@@ -245,8 +245,12 @@
               {{ loopSummaryLabel }}
             </p>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Current round proxy: {{ loopCurrentProxyLabel }} · Previous round proxy:
-              {{ loopLastProxyLabel }}
+              {{
+                t("admin.codexRegister.loop.proxySummary", {
+                  currentProxy: loopCurrentProxyLabel,
+                  previousProxy: loopLastProxyLabel,
+                })
+              }}
             </p>
           </div>
           <div class="flex flex-wrap items-center gap-2" data-testid="codex-loop-controls">
@@ -497,12 +501,12 @@
             </div>
 
             <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              <span>Status: {{ proxyStatusText(proxyStatus?.proxy_pool[index]?.last_status || "unknown") }}</span>
-              <span v-if="proxyStatus?.proxy_pool[index]?.cooldown_until">
-                Cooldown: {{ proxyStatus?.proxy_pool[index]?.cooldown_until }}
+              <span>Status: {{ proxyStatusText(proxyStatusById(entry.id)?.last_status || "unknown") }}</span>
+              <span v-if="proxyStatusById(entry.id)?.cooldown_until">
+                Cooldown: {{ proxyStatusById(entry.id)?.cooldown_until }}
               </span>
-              <span v-if="proxyStatus?.proxy_pool[index]?.failure_count">
-                Failed: {{ proxyStatus?.proxy_pool[index]?.failure_count }}
+              <span v-if="proxyStatusById(entry.id)?.failure_count">
+                Failed: {{ proxyStatusById(entry.id)?.failure_count }}
               </span>
             </div>
 
@@ -1341,6 +1345,13 @@ function proxyStatusText(value: string): string {
   if (value === "failed") return "failed";
   if (value === "cooldown") return "cooldown";
   return "unknown";
+}
+
+function proxyStatusById(proxyId?: string): CodexProxyStatus["proxy_pool"][number] | undefined {
+  if (!proxyId) {
+    return undefined;
+  }
+  return proxyStatus.value?.proxy_pool.find((item) => item.id === proxyId);
 }
 
 function syncProxyDraft(next: CodexProxyStatus) {

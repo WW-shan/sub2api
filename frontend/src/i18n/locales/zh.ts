@@ -1158,6 +1158,7 @@ export default {
           lastRoundSummary: '最近一轮结果',
           lastError: '最近循环错误'
         },
+        proxySummary: '本轮代理：{currentProxy} · 上一轮代理：{previousProxy}',
         lastRoundSummary: '创建 {created} / 更新 {updated} / 跳过 {skipped} / 失败 {failed}',
         noError: '暂无循环错误',
         history: {

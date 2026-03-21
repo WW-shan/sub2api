@@ -1123,6 +1123,7 @@ export default {
           lastRoundSummary: 'Last Round Result',
           lastError: 'Latest Loop Error'
         },
+        proxySummary: 'Current round proxy: {currentProxy} · Previous round proxy: {previousProxy}',
         lastRoundSummary: 'Created {created} / Updated {updated} / Skipped {skipped} / Failed {failed}',
         noError: 'No loop errors',
         history: {
