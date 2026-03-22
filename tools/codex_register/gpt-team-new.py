@@ -50,7 +50,7 @@ TOTAL_ACCOUNTS: int = 5
 # 统一邮件 Worker 配置
 MAIL_WORKER_BASE_URL: str = "https://openai-register.wwshan.workers.dev"
 MAIL_WORKER_TOKEN: str = "7BwPEFa1NGMTjUVpdf1w"
-MAIL_DOMAIN: str = "wwcloud.me"
+MAIL_DOMAIN: str = "wwcloud.app"
 MAIL_POLL_SECONDS: int = 3
 MAIL_POLL_MAX_ATTEMPTS: int = 40
 
