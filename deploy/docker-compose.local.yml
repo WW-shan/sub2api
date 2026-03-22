@@ -10,7 +10,7 @@
 #   2. mkdir -p data postgres_data redis_data codex_register_data
 #   3. docker-compose -f docker-compose.local.yml up -d
 #   4. Check logs: docker-compose -f docker-compose.local.yml logs -f sub2api
-#   5. Access through nginx-proxy-manager or other containers on sub2api-network
+#   5. Access: http://localhost:8080
 #
 # Migration to New Server:
 #   1. docker-compose -f docker-compose.local.yml down
@@ -34,6 +34,8 @@ services:
       nofile:
         soft: 100000
         hard: 100000
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
     volumes:
       # Local directory mapping for easy migration
       - ./data:/app/data
@@ -164,7 +166,17 @@ services:
     networks:
       - sub2api-network
     healthcheck:
-      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-T",
+          "5",
+          "-O",
+          "/dev/null",
+          "http://localhost:8080/health",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
