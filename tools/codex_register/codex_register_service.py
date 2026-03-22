@@ -935,6 +935,8 @@ class CodexRegisterService:
         eligible_indices: List[int] = []
         for index in ordered_indices:
             item = pool[index]
+            if not self._coerce_bool(item.get("enabled", True)):
+                continue
             if not str(item.get("proxy_url") or "").strip():
                 continue
             if self._proxy_is_in_cooldown(item, now=now):
@@ -2406,8 +2408,49 @@ class InMemoryStateStore:
         self._state["recent_logs_tail"] = tail[-20:]
 
 
+class JsonFileStateStore:
+    def __init__(self, data_dir: Path) -> None:
+        self._data_dir = Path(data_dir).resolve()
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._state_path = self._data_dir / "state.json"
+        self._lock = threading.Lock()
+
+    def _read_state_unlocked(self) -> Dict[str, Any]:
+        if not self._state_path.exists():
+            return {}
+        try:
+            raw = self._state_path.read_text(encoding="utf-8")
+            parsed = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
+    def _write_state_unlocked(self, state: Dict[str, Any]) -> None:
+        tmp_path = self._state_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, self._state_path)
+
+    async def load_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return self._read_state_unlocked()
+
+    async def save_state(self, state: Dict[str, Any]) -> None:
+        with self._lock:
+            self._write_state_unlocked(dict(state))
+
+    async def append_log(self, message: str, **fields: Any) -> None:
+        entry = {"message": message, **fields}
+        with self._lock:
+            state = self._read_state_unlocked()
+            tail = list(state.get("recent_logs_tail") or [])
+            tail.append(entry)
+            state["recent_logs_tail"] = tail[-20:]
+            self._write_state_unlocked(state)
+
+
 def _build_state_store_from_env() -> Any:
-    return InMemoryStateStore()
+    data_dir = Path(os.getenv("CODEX_REGISTER_DATA_DIR") or Path(__file__).resolve().parent).resolve()
+    return JsonFileStateStore(data_dir)
 
 
 async def run_http(service: CodexRegisterService, *, host: str, port: int) -> None:

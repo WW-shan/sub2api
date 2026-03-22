@@ -678,9 +678,103 @@ class StateStoreEnvContractRedTests(unittest.TestCase):
             del sys.modules[MODULE_NAME]
         self.module = importlib.import_module(MODULE_NAME)
 
-    def test_build_state_store_from_env_returns_in_memory_store(self):
-        store = self.module._build_state_store_from_env()
-        self.assertIsInstance(store, self.module.InMemoryStateStore)
+    def test_build_state_store_from_env_returns_json_file_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"CODEX_REGISTER_DATA_DIR": tmpdir}, clear=False):
+                if MODULE_NAME in sys.modules:
+                    del sys.modules[MODULE_NAME]
+                module = importlib.import_module(MODULE_NAME)
+                store = module._build_state_store_from_env()
+
+        self.assertIsInstance(store, module.JsonFileStateStore)
+        self.assertEqual(store._state_path, pathlib.Path(tmpdir).resolve() / "state.json")
+
+    def test_proxy_pool_persists_across_fresh_service_instances(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"CODEX_REGISTER_DATA_DIR": tmpdir}, clear=False):
+                if MODULE_NAME in sys.modules:
+                    del sys.modules[MODULE_NAME]
+                module = importlib.import_module(MODULE_NAME)
+                service_cls = getattr(module, "CodexRegisterService")
+
+                first_store = module._build_state_store_from_env()
+                first_service = service_cls(
+                    state_store=first_store,
+                    chatgpt_service=SimpleNamespace(),
+                    workflow_id="wf-test",
+                    sleep_min=1,
+                    sleep_max=1,
+                    auto_run=False,
+                )
+                save_result = asyncio.run(
+                    first_service.handle_path(
+                        "/proxy/list",
+                        payload={
+                            "proxy_enabled": True,
+                            "proxy_pool": [
+                                {"proxy_url": "http://127.0.0.1:7890"},
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(save_result["success"])
+
+                second_store = module._build_state_store_from_env()
+                second_service = service_cls(
+                    state_store=second_store,
+                    chatgpt_service=SimpleNamespace(),
+                    workflow_id="wf-test",
+                    sleep_min=1,
+                    sleep_max=1,
+                    auto_run=False,
+                )
+                status = asyncio.run(second_service.handle_path("/proxy/status"))
+
+        self.assertEqual(status["data"]["proxy_pool"][0]["proxy_url"], "http://127.0.0.1:7890")
+        self.assertTrue(status["data"]["proxy_enabled"])
+
+    def test_json_file_store_round_trips_saved_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = self.module.JsonFileStateStore(pathlib.Path(tmpdir))
+            asyncio.run(
+                store.save_state({
+                    "proxy_pool": [{"id": "p1", "proxy_url": "http://127.0.0.1:7890"}],
+                    "proxy_enabled": True,
+                })
+            )
+
+            reloaded = asyncio.run(self.module.JsonFileStateStore(pathlib.Path(tmpdir)).load_state())
+
+        self.assertEqual(reloaded["proxy_pool"][0]["id"], "p1")
+        self.assertTrue(reloaded["proxy_enabled"])
+
+    def test_json_file_store_returns_empty_state_for_invalid_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "state.json"
+            path.write_text("{bad json", encoding="utf-8")
+            store = self.module.JsonFileStateStore(pathlib.Path(tmpdir))
+
+            self.assertEqual(asyncio.run(store.load_state()), {})
+
+    def test_json_file_store_returns_empty_state_for_non_object_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "state.json"
+            path.write_text("[]", encoding="utf-8")
+            store = self.module.JsonFileStateStore(pathlib.Path(tmpdir))
+
+            self.assertEqual(asyncio.run(store.load_state()), {})
+
+    def test_json_file_store_append_log_persists_and_caps_recent_tail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = self.module.JsonFileStateStore(pathlib.Path(tmpdir))
+            for idx in range(25):
+                asyncio.run(store.append_log("event", seq=idx))
+
+            reloaded = asyncio.run(self.module.JsonFileStateStore(pathlib.Path(tmpdir)).load_state())
+
+        self.assertEqual(len(reloaded["recent_logs_tail"]), 20)
+        self.assertEqual(reloaded["recent_logs_tail"][0]["seq"], 5)
+        self.assertEqual(reloaded["recent_logs_tail"][-1]["seq"], 24)
 
 
 class JsonlParsingTests(ServiceTestCase):
@@ -2028,6 +2122,7 @@ class LoopRoundTests(ServiceTestCase):
             path = pathlib.Path(tmpdir) / "accounts.jsonl"
             old_line = json.dumps({"email": "old@example.com", "access_token": "old-token"}) + "\n"
             path.write_text(old_line, encoding="utf-8")
+            old_size = path.stat().st_size
             self.service._accounts_jsonl_path = path
 
             with patch.object(self.service, "_start_loop_worker", return_value=(None, "")):
@@ -2053,8 +2148,8 @@ class LoopRoundTests(ServiceTestCase):
             self.assertEqual(history["failed"], 0)
             summary = history["summary"]
             self.assertEqual(summary["records_seen"], 1)
-            self.assertEqual(summary["start_offset"], len(old_line.encode("utf-8")))
-            self.assertEqual(summary["end_offset"], len((old_line + new_line).encode("utf-8")))
+            self.assertEqual(summary["start_offset"], old_size)
+            self.assertEqual(summary["end_offset"], path.stat().st_size)
 
     def test_loop_round_updates_created_counts_and_committed_offset(self):
         state = self._base_round_state()
