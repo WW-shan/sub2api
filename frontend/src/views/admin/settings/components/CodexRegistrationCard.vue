@@ -546,7 +546,7 @@
             type="button"
             class="btn btn-primary"
             data-testid="codex-proxy-save"
-            :disabled="Boolean(proxyActionLoading)"
+            :disabled="proxySaveDisabled"
             @click="saveProxyList"
           >
             {{ t("admin.codexRegister.proxyPool.saveAction") }}
@@ -978,6 +978,9 @@ const accountsError = ref<string | null>(null);
 const logs = ref<CodexLogEntry[]>([]);
 const accounts = ref<CodexRegisterAccount[]>([]);
 const refreshing = ref(false);
+const proxySaveDisabled = computed(
+  () => Boolean(proxyActionLoading.value) || refreshing.value || loading.value,
+);
 let timer: number | undefined;
 const POLL_INTERVAL = 10000;
 const selectedLogLevel = ref<"all" | "info" | "warn" | "error">("all");

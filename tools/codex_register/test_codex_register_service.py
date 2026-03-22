@@ -382,7 +382,53 @@ class ProxyEndpointTests(ServiceTestCase):
         self.assertTrue(select_result["success"])
         self.assertEqual(select_result["data"]["proxy_current_name"], proxy_id)
 
+    def test_proxy_list_preserves_existing_global_toggle_when_payload_omits_proxy_enabled(self):
+        state = self.service._default_state()
+        state["proxy_enabled"] = True
+        state["proxy_pool"] = [
+            {"id": "p1", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": True},
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_pool": [
+                        {"id": "p1", "proxy_url": "http://p1:8080"},
+                    ]
+                },
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["data"]["proxy_enabled"])
+
+    def test_proxy_list_preserves_existing_row_enabled_when_payload_omits_row_enabled(self):
+        state = self.service._default_state()
+        state["proxy_enabled"] = True
+        state["proxy_pool"] = [
+            {"id": "p1", "name": "Proxy 1", "proxy_url": "http://p1:8080", "enabled": False},
+        ]
+        asyncio.run(self.service._save_state(state))
+
+        result = asyncio.run(
+            self.service.handle_path(
+                "/proxy/list",
+                payload={
+                    "proxy_enabled": True,
+                    "proxy_pool": [
+                        {"id": "p1", "proxy_url": "http://p1:8080"},
+                    ]
+                },
+            )
+        )
+
+        self.assertTrue(result["success"])
+        self.assertFalse(result["data"]["proxy_pool"][0]["enabled"])
+
     def test_proxy_enabled_depends_only_on_global_flag(self):
+
         result = asyncio.run(
             self.service.handle_path(
                 "/proxy/list",

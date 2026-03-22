@@ -1669,6 +1669,22 @@ describe('CodexRegistrationCard', () => {
     expect(wrapper.findAll('[data-testid^="codex-proxy-url-input-"]')).toHaveLength(1)
   })
 
+
+  it('disables proxy save button while initial loading is in progress', async () => {
+    codexApiMocks.getProxyStatus.mockImplementationOnce(
+      () => new Promise(() => {})
+    )
+
+    const wrapper = mount(CodexRegistrationCard, {
+      props: { active: true },
+      global: { stubs: { StatCard: StatCardStub } }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="codex-proxy-save"]').attributes('disabled')).toBeDefined()
+  })
+
   it('saves a newly added proxy row using only proxy_url and current routing state', async () => {
     codexApiMocks.getProxyStatus.mockResolvedValueOnce(
       makeProxyStatus({
