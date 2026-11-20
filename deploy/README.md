@@ -513,6 +513,8 @@ Use a running Sub2API release with the OpenAI API-key account option to force Ch
 2. Set the account's Responses API mode to **Force Chat Completions** (`force_chat_completions`). For this setup, the client uses `/v1/chat/completions` with a `messages` array. See the [NVIDIA API reference](https://build.nvidia.com/nvidia/nemotron-3.5-super-vl-120b-a12b/apireference).
 3. Bind the account to a dedicated test group such as `NVIDIA-NIM-test`. Keep its upstream limited to NVIDIA and make the group available to the authorized test user. Check the group's pricing and fallback settings, then create a Sub2API client key scoped to that group. Keep both API keys in their respective credential stores.
 
+If `security.url_allowlist.enabled` is on, add `integrate.api.nvidia.com` to `security.url_allowlist.upstream_hosts`. If the upstream account restricts available models through model mapping, include `nvidia/nemotron-3.5-super-vl-120b-a12b` and map it to the same NVIDIA model ID.
+
 NVIDIA's hosted development endpoint is subject to its [API Trial Terms of Service](https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf). Verify your account's trial eligibility and limits before testing.
 
 ### Verify the gateway route
