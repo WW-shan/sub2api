@@ -503,6 +503,39 @@ The main config file is at `/etc/sub2api/config.yaml` (created by Setup Wizard).
 
 ---
 
+## NVIDIA NIM Development Endpoint
+
+Use a running Sub2API release with the OpenAI API-key account option to force Chat Completions, such as upstream [v0.2.23](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.2.23). Check the version shown by the running server. A Compose deployment using a prebuilt release image can run a different version from the source checkout.
+
+### Configure an isolated test group
+
+1. In the admin UI, create an **OpenAI** upstream account of type **API Key**. Use `https://integrate.api.nvidia.com/v1` as the Base URL and enter an authorized NVIDIA Build API key in the account form.
+2. Set the account's Responses API mode to **Force Chat Completions** (`force_chat_completions`). For this setup, the client uses `/v1/chat/completions` with a `messages` array. See the [NVIDIA API reference](https://build.nvidia.com/nvidia/nemotron-3.5-super-vl-120b-a12b/apireference).
+3. Bind the account to a dedicated test group such as `NVIDIA-NIM-test`. Keep its upstream limited to NVIDIA and make the group available to the authorized test user. Check the group's pricing and fallback settings, then create a Sub2API client key scoped to that group. Keep both API keys in their respective credential stores.
+
+NVIDIA's hosted development endpoint is subject to its [API Trial Terms of Service](https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf). Verify your account's trial eligibility and limits before testing.
+
+### Verify the gateway route
+
+First verify the model directly using the NVIDIA API reference. Then set `SUB2API_BASE_URL` to the gateway origin and `SUB2API_API_KEY` to the client key for the test group. Send the same request through Sub2API:
+
+```bash
+gateway="${SUB2API_BASE_URL:?Set the Sub2API gateway origin}"
+curl --fail-with-body --silent --show-error --max-time 30 \
+  "${gateway%/}/v1/chat/completions" \
+  -H "Authorization: Bearer ${SUB2API_API_KEY:?Set a key for the test group}" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "model": "nvidia/nemotron-3.5-super-vl-120b-a12b",
+    "messages": [{"role": "user", "content": "What is 17 + 25? Reply with only the integer."}],
+    "max_tokens": 32,
+    "stream": false,
+    "chat_template_kwargs": {"enable_thinking": false}
+  }'
+```
+
+Verify that the gateway returns `42` and that the server's upstream request went to `integrate.api.nvidia.com/v1/chat/completions`. Check that usage was attributed to the test group. If the route or response is unexpected, check the key's group, the model ID, and the upstream protocol mode before changing the deployment.
+
 ## Troubleshooting
 
 ### Docker
